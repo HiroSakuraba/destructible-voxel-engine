@@ -37,6 +37,10 @@ int main() {
         auto skip = planner.plan(catalog, near, objects, 10);
         require(skip && (skip->loadIds == std::vector<std::uint64_t>{12,15}));
         objects[0].inFlight = false;
+        // Other world/LOD objects must not be evicted even if loaded.
+        objects[3].loaded = true; objects[3].mayUnload = true;
+        objects[4].loaded = true; objects[4].mayUnload = true;
+        require(planner.plan(catalog, near, objects, 10)->unloadIds == std::vector<std::uint64_t>{11});
         objects[1].pinned = true;
         require(planner.plan(catalog, near, objects, 10)->unloadIds.empty());
         objects[1].pinned = false;

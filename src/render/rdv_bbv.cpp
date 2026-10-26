@@ -129,6 +129,25 @@ BbvUpdateStats BbvClipmap::recenter(BrickKey center, const PackedBrickmapScene& 
     return stats;
 }
 
+BbvUpdateStats BbvClipmap::recenter_camera(Float3 cameraWorldMeters,
+                                              float metresPerVoxel,
+                                              const PackedBrickmapScene& source) {
+    if (!valid_finite(cameraWorldMeters) || !std::isfinite(metresPerVoxel) ||
+        !(metresPerVoxel > 0.0F)) {
+        throw std::invalid_argument("BBV camera position and metres-per-voxel must be finite");
+    }
+    const double brickMetres = 8.0 * static_cast<double>(metresPerVoxel);
+    const auto key = [&](float coordinate) -> std::int32_t {
+        const double v = std::floor(static_cast<double>(coordinate) / brickMetres);
+        if (v < static_cast<double>(std::numeric_limits<std::int32_t>::min()) ||
+            v > static_cast<double>(std::numeric_limits<std::int32_t>::max()))
+            throw std::out_of_range("BBV camera position exceeds brick-key range");
+        return static_cast<std::int32_t>(v);
+    };
+    return recenter({key(cameraWorldMeters.x), key(cameraWorldMeters.y),
+                     key(cameraWorldMeters.z)}, source);
+}
+
 BbvUpdateStats BbvClipmap::refresh(std::span<const BrickKey> keys,
                                     const PackedBrickmapScene& source) {
     BbvUpdateStats stats;
@@ -213,7 +232,8 @@ std::optional<BbvHit> BbvClipmap::trace(Float3 origin, Float3 direction,
     Int3 voxel{};
     for (int axis = 0; axis < 3; ++axis) {
         const float p = float_axis(origin, axis) + float_axis(unit, axis) * start;
-        const float nudged = std::nextafter(p, float_axis(unit, axis) >= 0.0F ? INFINITY : -INFINITY);
+        const float nudged = entry > 0.0F ?
+            std::nextafter(p, float_axis(unit, axis) >= 0.0F ? INFINITY : -INFINITY) : p;
         const float bounded = std::clamp(nudged, low[axis], std::nextafter(high[axis], -INFINITY));
         set_axis(voxel, axis, static_cast<std::int32_t>(std::floor(bounded)));
     }

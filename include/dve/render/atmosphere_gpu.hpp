@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "dve/render/atmosphere.hpp"
+#include "dve/asset_cooker.hpp"
 #include "dve/render_environment.hpp"
 #include "dve/rhi/device.hpp"
 

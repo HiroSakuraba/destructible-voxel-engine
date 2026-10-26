@@ -4,6 +4,7 @@
 #include <cmath>
 
 #include "dve/gpu_render_environment.hpp"
+#include "dve/render/ambient_occlusion_gpu.hpp"   // register shifts
 #include "dve/transform.hpp"
 
 namespace dve::render {

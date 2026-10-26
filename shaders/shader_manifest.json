@@ -4,6 +4,45 @@
   "shader_model_floor": "6.0",
   "shaders": [
     {
+      "name": "atmosphere_multiple_scattering",
+      "source": "atmosphere_multiple_scattering.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [64, 1, 1],
+      "bindings": [
+        {"name": "AtmosphereConstants", "kind": "constant_buffer", "access": "read", "register": "b0"},
+        {"name": "gTransmittanceTable", "kind": "storage_buffer", "access": "read", "register": "t0"},
+        {"name": "gMultipleScattering", "kind": "storage_buffer", "access": "read_write", "register": "u0"}
+      ]
+    },
+    {
+      "name": "atmosphere_sky_view",
+      "source": "atmosphere_sky_view.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [64, 1, 1],
+      "bindings": [
+        {"name": "AtmosphereConstants", "kind": "constant_buffer", "access": "read", "register": "b0"},
+        {"name": "gTransmittanceTable", "kind": "storage_buffer", "access": "read", "register": "t0"},
+        {"name": "gMultipleScatteringTable", "kind": "storage_buffer", "access": "read", "register": "t1"},
+        {"name": "gSkyView", "kind": "storage_buffer", "access": "read_write", "register": "u0"}
+      ]
+    },
+    {
+      "name": "atmosphere_transmittance",
+      "source": "atmosphere_transmittance.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [64, 1, 1],
+      "bindings": [
+        {"name": "AtmosphereConstants", "kind": "constant_buffer", "access": "read", "register": "b0"},
+        {"name": "gTransmittance", "kind": "storage_buffer", "access": "read_write", "register": "u0"}
+      ]
+    },
+    {
       "name": "bloom_blur",
       "source": "bloom_blur.hlsl",
       "stage": "compute",

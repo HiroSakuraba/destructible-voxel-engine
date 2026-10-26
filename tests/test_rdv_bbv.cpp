@@ -262,8 +262,9 @@ void test_validation() {
         BbvClipmap gpuClipmap({2, 2, 2});
         (void)gpuClipmap.recenter({0, 0, 0}, packed);
         rhi::VulkanDevice gpu;
-        check(gpu.status() == rhi::DeviceStatus::Ready,
-              "DVE_RDV_TRACE_SPV was set but Vulkan device is unavailable");
+        if (gpu.status() != rhi::DeviceStatus::Ready)
+            throw std::runtime_error(std::string("Vulkan device initialization failed: ") +
+                                     std::string(gpu.device_loss_reason()));
         BbvRhiMirror gpuMirror(gpu);
         std::array<GpuTraceRay, 2> gpuRays{};
         gpuRays[0].origin = {-2.25F, 1.25F, 1.25F};

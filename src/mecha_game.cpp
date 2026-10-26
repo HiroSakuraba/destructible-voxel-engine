@@ -340,8 +340,10 @@ void MechaGame::step(float dt){
  s.primaryCooldown=std::max(0.F,s.primaryCooldown-dt);
  s.rocketCooldown=std::max(0.F,s.rocketCooldown-dt);
  s.move(dt);
- if(s.world.is_action_pressed("mech_primary"))s.shoot_primary();
- if(s.world.is_action_pressed("mech_secondary"))s.shoot_rocket();
+ // Gamepad triggers are analog axes in PlayerInput, while mouse buttons are actions.
+ // Either representation may drive a weapon; never discard the digital binding.
+ if(s.world.is_action_pressed("mech_primary")||s.world.get_axis("mech_primary")>.25F)s.shoot_primary();
+ if(s.world.is_action_pressed("mech_secondary")||s.world.get_axis("mech_secondary")>.25F)s.shoot_rocket();
  s.step_rockets(dt);
  s.world.tick(dt);s.camera();s.refresh_hud();
 }

@@ -733,6 +733,7 @@ if(DVE_BUILD_RHI)
         src/render/brick_palette_gpu_resolve.cpp
         src/render/brickmap_rhi_mirror.cpp
         src/render/rdv_bbv.cpp
+        src/render/rdv_viewport.cpp
         src/render/mesh_rhi_mirror.cpp
         src/render/dashr_atlas.cpp
         src/render/dashr_shell.cpp

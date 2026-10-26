@@ -303,7 +303,12 @@ struct MechaGame::Impl {
   if(rocketCooldown>0||missiles==0||rockets.size()>=128)return;
   rocketCooldown=.85F;--missiles;++telemetry.rocketsFired;
   const auto direction=facing(motor.torsoYaw);
-  rockets.push_back({plus(plus(motor.position,{0,0,2.F}),scaled(direction,1.3F)),
+  const auto origin=plus(motor.position,{0,0,2.F});
+  // The spawn point is 1.3 m ahead of the firing origin. A thin wall can fit inside that gap,
+  // so sweep it with the same radius as step_rockets and detonate on the first obstruction.
+  const auto muzzleHit=trace(origin,scaled(direction,1.3F),.15F);
+  if(muzzleHit.valid){impact(muzzleHit,true);return;}
+  rockets.push_back({plus(origin,scaled(direction,1.3F)),
                      scaled(direction,37.F),4.0F,nextProjectile++});
  }
  void step_rockets(float dt){

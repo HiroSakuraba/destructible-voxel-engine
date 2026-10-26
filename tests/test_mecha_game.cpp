@@ -145,6 +145,19 @@ void editor_action_aliases(){
  check(exported<idle,"mech_boost drains boost energy");
  check(std::abs(editor-exported)<1.e-5F&&editor<idle,"editor 'sprint' action boosts like mech_boost");
 }
+// Regression (Codex P2 4381797424): the rocket spawns 1.3 m ahead of the muzzle; a thin wall that
+// fits in that gap must still stop it instead of letting it fly through to the target.
+void rocket_muzzle_gap_is_swept(){
+ Fixture open;
+ open.fire("mech_secondary");open.tick(60);
+ check(!open.world.is_enabled(open.target),"control: unobstructed rocket kills the target");
+ Fixture thin(FixtureOptions{.thinWall=true,.thinWallY=.525F});
+ thin.fire("mech_secondary");thin.tick(60);
+ check(thin.game->telemetry().rocketsFired==1,"rocket was fired");
+ check(thin.game->telemetry().impacts>=1,"rocket detonates on the wall inside the muzzle gap");
+ check(thin.game->telemetry().activeRockets==0,"no rocket survives past the wall");
+ check(thin.world.is_enabled(thin.target),"rocket cannot pass through a wall thinner than the muzzle offset");
+}
 void movement(){
  Fixture moving;
  moving.world.set_axis("move_y",1.F);
@@ -183,7 +196,7 @@ void exported_starter(){
 }
 int main(){
  try{
-  motor_contract();validation();movement();combat();editor_action_aliases();exported_starter();
+  motor_contract();validation();movement();combat();editor_action_aliases();rocket_muzzle_gap_is_swept();exported_starter();
   std::cout<<"mecha M1/M2 tests passed\n";return 0;
  }catch(const std::exception& e){std::cerr<<"mecha M1/M2: "<<e.what()<<'\n';return 1;}
 }

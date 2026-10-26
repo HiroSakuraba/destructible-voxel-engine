@@ -32,20 +32,7 @@ double milliseconds_since(Clock::time_point start) {
 const std::array<VoxelMaterialDefinition, 256>& default_palette() {
     static const std::array<VoxelMaterialDefinition, 256> palette = [] {
         std::array<VoxelMaterialDefinition, 256> result{};
-        for (std::size_t id = 0; id < result.size(); ++id) {
-            const float hue = static_cast<float>((id * 47U) % 360U) / 60.0F;
-            const float x = 1.0F - std::abs(std::fmod(hue, 2.0F) - 1.0F);
-            Float3 rgb{};
-            if (hue < 1) rgb = {1, x, 0};
-            else if (hue < 2) rgb = {x, 1, 0};
-            else if (hue < 3) rgb = {0, 1, x};
-            else if (hue < 4) rgb = {0, x, 1};
-            else if (hue < 5) rgb = {x, 0, 1};
-            else rgb = {1, 0, x};
-            result[id].name = "default";
-            result[id].baseColor = {0.25F + 0.5F * rgb.x, 0.25F + 0.5F * rgb.y, 0.25F + 0.5F * rgb.z, 1.0F};
-            result[id].roughness = 0.8F;
-        }
+        for (std::size_t id = 0; id < result.size(); ++id) result[id] = default_voxel_material(static_cast<MaterialId>(id));
         return result;
     }();
     return palette;

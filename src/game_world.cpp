@@ -1893,6 +1893,37 @@ bool world_material_table_valid(const std::vector<VoxelMaterialDefinition>& tabl
 }
 } // namespace
 
+VoxelMaterialDefinition default_voxel_material(MaterialId id) {
+    const float hue = static_cast<float>((static_cast<unsigned>(id) * 47U) % 360U) / 60.0F;
+    const float x = 1.0F - std::abs(std::fmod(hue, 2.0F) - 1.0F);
+    Float3 rgb{};
+    if (hue < 1) rgb = {1, x, 0};
+    else if (hue < 2) rgb = {x, 1, 0};
+    else if (hue < 3) rgb = {0, 1, x};
+    else if (hue < 4) rgb = {0, x, 1};
+    else if (hue < 5) rgb = {x, 0, 1};
+    else rgb = {1, 0, x};
+    VoxelMaterialDefinition m;
+    m.name = "default";
+    m.baseColor = {0.25F + 0.5F * rgb.x, 0.25F + 0.5F * rgb.y, 0.25F + 0.5F * rgb.z, 1.0F};
+    m.roughness = 0.8F;
+    return m;
+}
+
+bool GameWorld::ensure_object_material_table(GameObjectId id) {
+    const auto it = objects_.find(id);
+    if (it == objects_.end() || !it->second.voxels) return false;
+    Object& object = it->second;
+    if (!object.materials.empty()) return true;
+    unsigned highest = 0;
+    for (const auto& [key, brick] : object.voxels->bricks()) {
+        (void)key;
+        brick.occupancy().for_each_set([&](std::uint16_t at) { highest = std::max<unsigned>(highest, brick.material(at)); });
+    }
+    for (unsigned i = 0; i <= highest; ++i) object.materials.push_back(default_voxel_material(static_cast<MaterialId>(i)));
+    return true;
+}
+
 std::span<const VoxelMaterialDefinition> GameWorld::object_materials(GameObjectId id) const {
     const auto it = objects_.find(id);
     if (it == objects_.end() || !it->second.voxels) return {};
@@ -1902,6 +1933,7 @@ std::span<const VoxelMaterialDefinition> GameWorld::object_materials(GameObjectI
 bool GameWorld::set_object_material(GameObjectId id, std::size_t index, VoxelMaterialDefinition material, std::string* error) {
     const auto it = objects_.find(id);
     if (it == objects_.end() || !it->second.voxels) { if (error) *error = "no voxel object with that id"; return false; }
+    if (!ensure_object_material_table(id)) { if (error) *error = "no voxel object with that id"; return false; }
     Object& object = it->second;
     if (index >= object.materials.size()) { if (error) *error = "material slot out of range"; return false; }
     const VoxelMaterialDefinition& old = object.materials[index];
@@ -1921,7 +1953,7 @@ bool GameWorld::set_object_material(GameObjectId id, std::size_t index, VoxelMat
 
 std::optional<std::size_t> GameWorld::add_object_material(GameObjectId id, VoxelMaterialDefinition material, std::string* error) {
     const auto it = objects_.find(id);
-    if (it == objects_.end() || !it->second.voxels) { if (error) *error = "no voxel object with that id"; return std::nullopt; }
+    if (it == objects_.end() || !ensure_object_material_table(id)) { if (error) *error = "no voxel object with that id"; return std::nullopt; }
     Object& object = it->second;
     std::vector<VoxelMaterialDefinition> table = object.materials;
     table.push_back(std::move(material));

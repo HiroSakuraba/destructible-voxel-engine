@@ -52,6 +52,19 @@ void catalog_and_files(){
     }
 }
 EditorDocument scene(){EditorDocument d("Material batch 1");EditorObject v(1,"Mixed voxel profile");v.voxels->set_voxel({0,0,0},1);v.voxels->set_voxel({1,0,0},3);d.add_object(std::move(v));EditorObject p(2,"Polygon");p.polygon=make_editor_polygon_cube(2);p.polygon->materials[0].densityKilogramsPerCubicMeter=4321;d.add_object(std::move(p));return d;}
+// A tiny uncompressed (stored-deflate) RGBA PNG, enough for the map importer.
+void write_test_png(const std::filesystem::path& path,unsigned w,unsigned h,std::uint8_t value){
+    std::vector<std::uint8_t> raw;for(unsigned y=0;y<h;++y){raw.push_back(0);for(unsigned x=0;x<w;++x){raw.push_back(value);raw.push_back(value);raw.push_back(value);raw.push_back(255);}}
+    std::uint32_t table[256];for(std::uint32_t n=0;n<256;++n){std::uint32_t c=n;for(int k=0;k<8;++k)c=(c&1)?0xedb88320U^(c>>1):c>>1;table[n]=c;}
+    const auto crc=[&](const std::vector<std::uint8_t>& d){std::uint32_t c=0xffffffffU;for(auto b:d)c=table[(c^b)&255]^(c>>8);return c^0xffffffffU;};
+    const auto be=[](std::vector<std::uint8_t>& v,std::uint32_t x){for(int i=3;i>=0;--i)v.push_back(std::uint8_t(x>>(8*i)));};
+    std::vector<std::uint8_t> out{0x89,'P','N','G','\r','\n',0x1a,'\n'};
+    const auto chunk=[&](const char* type,const std::vector<std::uint8_t>& data){be(out,std::uint32_t(data.size()));std::vector<std::uint8_t> t(type,type+4);t.insert(t.end(),data.begin(),data.end());out.insert(out.end(),t.begin(),t.end());be(out,crc(t));};
+    std::vector<std::uint8_t> ihdr;be(ihdr,w);be(ihdr,h);ihdr.insert(ihdr.end(),{8,6,0,0,0});chunk("IHDR",ihdr);
+    std::vector<std::uint8_t> z{0x78,0x01,1,std::uint8_t(raw.size()&255),std::uint8_t(raw.size()>>8),std::uint8_t(~raw.size()&255),std::uint8_t((~raw.size()>>8)&255)};
+    z.insert(z.end(),raw.begin(),raw.end());std::uint32_t a=1,b=0;for(auto v:raw){a=(a+v)%65521;b=(b+a)%65521;}be(z,(b<<16)|a);chunk("IDAT",z);chunk("IEND",{});
+    std::ofstream f(path,std::ios::binary);f.write(reinterpret_cast<const char*>(out.data()),std::streamsize(out.size()));
+}
 // Texturing controls: the five new properties, the panel showing them where they matter,
 // weathering a voxel object and a polygon slot (one undo each, saved with the scene) and the
 // Layers rows that edit a layer's rules.
@@ -95,12 +108,40 @@ void texturing_controls(){
         require(palette.contains(1)&&palette.at(1).layers.size()==1&&palette.at(1).layers[0].rules.enabled&&
                 palette.at(1).layers[0].rules.seed==d.find_object(1)->voxelMaterials.at(1).layers[0].rules.seed,"the scene keeps the weathering rules");
     }
+    // Voxel overlays in Layers mode: material 1's moss layer, its rules (with the voxel-only AO
+    // and edge rows), one undo step per edit.
+    n.open_material_panel();n.material_panel().slot=1;n.material_panel().layerIndex=0;
+    {
+        bool edgeRow=false,occlusionRow=false;for(const auto& [key,text]:n.material_panel_layer_controls()){edgeRow=edgeRow||key=="ruleEdge";occlusionRow=occlusionRow||key=="ruleOcclusion";}
+        require(edgeRow&&occlusionRow,"voxel overlays list the AO and edge rules");
+        const auto before=w.commands().size();
+        require(n.material_panel_layer_action("ruleEdge",.05F),n.material_panel().message);
+        require(w.commands().size()==before+1&&d.find_object(1)->voxelMaterials.at(1).layers[0].rules.edgeWidthMeters==.05F,"edit a voxel overlay rule");
+        require(!n.material_panel_layer_action("ruleOcclusion",2.0F)&&d.find_object(1)->voxelMaterials.at(1).layers[0].rules.occlusionMax<=1.0F,"an out-of-range voxel rule is refused");
+        require(n.material_panel_layer_action("weight",.4F)&&d.find_object(1)->voxelMaterials.at(1).layers[0].weight==.4F,"voxel overlay weight");
+        require(w.commands().undo(d).success&&w.commands().undo(d).success&&d.find_object(1)->voxelMaterials.at(1).layers[0].rules.edgeWidthMeters!=.05F,"undo voxel overlay edits");
+    }
+    n.close_material_panel();
     require(w.commands().undo(d).success,"undo weathering");
     {
         const auto& palette=d.find_object(1)->voxelMaterials;
         require(!palette.contains(1)||palette.at(1).layers.empty(),"undo removes the weathering");
     }
     require(!n.weather_selection(WeatheringKind::Snow,1.5F),"amount above 1 is refused");
+
+    // Texture maps: import into the draft, apply to voxels, refused on meshes, cleared.
+    write_test_png(root/"stone_height.png",4,4,200);
+    n.open_material_panel();
+    require(!n.material_panel_import_map(2,root/"missing.png"),"a missing image is refused");
+    require(n.material_panel_import_map(2,root/"stone_height.png")&&n.material_panel().draft.heightMap&&n.material_panel().draft.heightMap->role==2U,n.material_panel().message);
+    require(n.material_panel_import_map(0,root/"stone_height.png")&&n.material_panel().draft.baseColorMap->role==1U,"base colour is a colour map");
+    n.material_panel().draft.displacementDepthMeters=.03F;
+    w.select_object(2);require(!n.apply_material_panel(),"maps are not applied to meshes");
+    w.select_object(1);require(n.apply_material_panel(),n.material_panel().message);
+    bool mapped=false;for(const auto& [slot,material]:d.find_object(1)->voxelMaterials)mapped=mapped||(material.heightMap&&material.baseColorMap&&material.displacementDepthMeters==.03F);
+    require(mapped,"the voxels' material carries the imported maps");
+    n.material_panel_clear_maps();require(!material_has_textures(n.material_panel().draft),"clear maps");
+    n.close_material_panel();
 
     // Polygon slot 0 from the Layers rows: next kind (Snow -> Moss), amount, add; then rules.
     w.select_object(2);n.open_material_panel();n.material_panel().slot=0;n.material_panel().layerIndex=0;

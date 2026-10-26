@@ -173,6 +173,10 @@ struct GameDamageEvent {
 // it; fragments split off by damage inherit their parent's source with `derived` set (their
 // voxels are a subset of the source, so saves store them in full but take the material table
 // from the source).
+// The look of material `id` on a voxel object that has no material table: a stable colour per
+// id, rough, no maps (what the CPU player draws for create_object / spawn_box objects).
+[[nodiscard]] VoxelMaterialDefinition default_voxel_material(MaterialId id);
+
 struct GameObjectSource {
     std::string path;               // content path (or filesystem path) of the .dvox / .dmesh
     std::uint64_t contentHash{};    // FNV-1a 64 of the file bytes
@@ -539,6 +543,11 @@ public:
     // weathering recipe) and returns its index. Fragments split off later copy the table;
     // saves store edited tables inline.
     [[nodiscard]] std::span<const VoxelMaterialDefinition> object_materials(GameObjectId id) const;
+    // Objects made without a material table (create_object / spawn_box) get one on demand:
+    // default_voxel_material for every id their voxels use (the CPU player's palette for such
+    // objects, so nothing changes on screen). Mass is unaffected. True when the object now has
+    // a table; false for unknown or voxel-less objects.
+    bool ensure_object_material_table(GameObjectId id);
     bool set_object_material(GameObjectId id, std::size_t index, VoxelMaterialDefinition material, std::string* error = nullptr);
     [[nodiscard]] std::optional<std::size_t> add_object_material(GameObjectId id, VoxelMaterialDefinition material,
                                                                  std::string* error = nullptr);

@@ -487,6 +487,20 @@ void test_texturing_controls_from_lua() {
     std::string error;
     CHECK(!world.set_object_material(wall, 2, loop, &error) && !error.empty());   // 1 -> 2 -> 1
     std::filesystem::remove(path);
+
+    // spawn_box objects have no material table: reads show the default look, the first edit
+    // creates the table (one default entry per used id) without touching mass.
+    CHECK(run_ok(host, R"(
+        box = world.spawn_box("Box", 3, 0.25, 5.0, 0.0, 0.0, false, 1500.0)
+        world.set_global("box", box)
+        world.set_global("box_default", world.get_material(box, 1).name == "default" and 1 or 0)
+        world.set_global("box_layer", world.add_weathering(box, 1, "moss", 0.5) or -1)
+        world.set_global("box_pattern", world.set_material_texturing(box, 1, {pattern = "marble"}) and 1 or 0)
+    )", "box_texturing"));
+    CHECK(host.global_number("box_default") == 1.0 && host.global_number("box_layer") == 1.0 && host.global_number("box_pattern") == 1.0);
+    const auto box = static_cast<GameObjectId>(*host.global_number("box"));
+    const auto boxTable = world.object_materials(box);
+    CHECK(boxTable.size() == 3U && boxTable[1].surfaceDetail.pattern == SurfacePattern::Marble && boxTable[2].name == "Moss");
 }
 
 void test_fragmentation_from_lua() {

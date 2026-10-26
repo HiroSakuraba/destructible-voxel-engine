@@ -1474,9 +1474,13 @@ bool read_layer_rules(lua_State* L, int index, MaterialLayerRules& r) {
 int l_get_material(lua_State* L) {
     const auto id = static_cast<GameObjectId>(luaL_checkinteger(L, 1));
     const lua_Integer slot = luaL_checkinteger(L, 2);
-    const auto table = world_from_state(L).object_materials(id);
-    if (slot < 0 || static_cast<std::size_t>(slot) >= table.size()) { lua_pushnil(L); return 1; }
-    const VoxelMaterialDefinition& m = table[static_cast<std::size_t>(slot)];
+    const GameWorld& world = world_from_state(L);
+    const auto table = world.object_materials(id);
+    // Objects without a table (spawn_box) read as their default look until something edits them.
+    const bool defaults = table.empty() && world.voxel_count(id).value_or(0U) > 0U;
+    if (slot < 0 || (defaults ? slot > 255 : static_cast<std::size_t>(slot) >= table.size())) { lua_pushnil(L); return 1; }
+    const VoxelMaterialDefinition fallback = defaults ? default_voxel_material(static_cast<MaterialId>(slot)) : VoxelMaterialDefinition{};
+    const VoxelMaterialDefinition& m = defaults ? fallback : table[static_cast<std::size_t>(slot)];
     lua_newtable(L);
     lua_pushstring(L, m.name.c_str()); lua_setfield(L, -2, "name");
     lua_pushnumber(L, m.displacementDepthMeters); lua_setfield(L, -2, "displacement_depth");
@@ -1522,6 +1526,7 @@ int l_set_material_texturing(lua_State* L) {
     char message[160] = {};
     {
         GameWorld& world = world_from_state(L);
+        (void)world.ensure_object_material_table(id);   // spawn_box objects get their default table
         const auto table = world.object_materials(id);
         if (slot < 0 || static_cast<std::size_t>(slot) >= table.size()) return push_failure(L, "no such object material");
         VoxelMaterialDefinition m = table[static_cast<std::size_t>(slot)];
@@ -1579,6 +1584,7 @@ int l_add_weathering(lua_State* L) {
     lua_Integer layerNumber = 0;
     {
         GameWorld& world = world_from_state(L);
+        (void)world.ensure_object_material_table(id);   // spawn_box objects get their default table
         const auto table = world.object_materials(id);
         if (slot < 0 || static_cast<std::size_t>(slot) >= table.size()) return push_failure(L, "no such object material");
         VoxelMaterialDefinition target = table[static_cast<std::size_t>(slot)];
@@ -1620,6 +1626,7 @@ int l_set_layer(lua_State* L) {
     char message[160] = {};
     {
         GameWorld& world = world_from_state(L);
+        (void)world.ensure_object_material_table(id);   // spawn_box objects get their default table
         const auto table = world.object_materials(id);
         if (slot < 0 || static_cast<std::size_t>(slot) >= table.size()) return push_failure(L, "no such object material");
         VoxelMaterialDefinition m = table[static_cast<std::size_t>(slot)];
@@ -1657,6 +1664,7 @@ int l_remove_layer(lua_State* L) {
     const char* failure = nullptr;
     {
         GameWorld& world = world_from_state(L);
+        (void)world.ensure_object_material_table(id);   // spawn_box objects get their default table
         const auto table = world.object_materials(id);
         if (slot < 0 || static_cast<std::size_t>(slot) >= table.size()) return push_failure(L, "no such object material");
         VoxelMaterialDefinition m = table[static_cast<std::size_t>(slot)];

@@ -190,7 +190,7 @@ void test_validation() {
         gpuRays[0].origin = {-2.25F, 1.25F, 1.25F};
         gpuRays[0].direction = {1.0F, 0.0F, 0.0F};
         gpuRays[0].maxDistance = 30.0F;
-        gpuRays[1].origin = {2.25F, 1.25F, 1.25F};
+        gpuRays[1].origin = {9.25F, 1.25F, 1.25F};
         gpuRays[1].direction = {-1.0F, 0.0F, 0.0F};
         gpuRays[1].maxDistance = 30.0F;
         check(execute_bbv_gpu_trace(gpu, gpuMirror, gpuClipmap, gpuRays, shader, hits, &error),

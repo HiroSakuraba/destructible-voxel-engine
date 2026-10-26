@@ -60,7 +60,12 @@ constexpr std::array<MaterialPresetControl, unsigned(MaterialPresetProperty::Cou
     {MaterialPresetProperty::SheenRoughness,"Sheen roughness","","Spread of the Charlie sheen lobe",0,1,0.025F,false},
     {MaterialPresetProperty::Iridescence,"Thin-film weight","","Blend ordinary Fresnel with thin-film reflection",0,1,0.05F,false},
     {MaterialPresetProperty::FilmIor,"Film IOR","","Refractive index of the film itself",1,3,0.025F,false},
-    {MaterialPresetProperty::FilmThickness,"Film thickness","nm","Physical thin-film thickness; zero removes the film",0,100000,10.0F,false}
+    {MaterialPresetProperty::FilmThickness,"Film thickness","nm","Physical thin-film thickness; zero removes the film",0,100000,10.0F,false},
+    {MaterialPresetProperty::TextureTile,"Texture repeat","m","One repeat of the texture set (colour, ORM, height, emission maps)",.0001F,10000,.05F,false},
+    {MaterialPresetProperty::TextureSharpness,"Texture blend","","Triplanar blend exponent: higher keeps each face's projection crisper",1,64,1,true},
+    {MaterialPresetProperty::TextureAntiTiling,"Anti-tiling","tiles","Randomly offset tiles blended across this band; 0 shows the plain repeat",0,.5F,.05F,false},
+    {MaterialPresetProperty::DisplacementDepth,"Displacement depth","m","How deep the height map or surface pattern carves voxel faces (capped at half a voxel); 0 is off",0,10,.005F,false},
+    {MaterialPresetProperty::DisplacementMode,"Displacement mode","","0 traced (real relief: outlines, shadows), 1 parallax (shading only)",0,1,1,false}
 }};
 std::string lower(std::string_view s) { std::string r(s); for(char& c:r)c=char(std::tolower(static_cast<unsigned char>(c))); return r; }
 void physical(VoxelMaterialDefinition& to,const VoxelMaterialDefinition& from) {
@@ -86,6 +91,8 @@ float material_preset_value(const VoxelMaterialDefinition& m, MaterialPresetProp
     VALUE(PatternScale,surfaceDetail.periodMeters) VALUE(PatternRotationX,surfaceDetail.rotationRadians.x) VALUE(PatternRotationY,surfaceDetail.rotationRadians.y) VALUE(PatternRotationZ,surfaceDetail.rotationRadians.z)
     VALUE(GrainStretch,surfaceDetail.grainStretch) VALUE(ColorVariation,surfaceDetail.colorVariation) VALUE(RoughnessVariation,surfaceDetail.roughnessVariation) VALUE(BumpHeight,surfaceDetail.bumpHeightMeters) VALUE(UvTileMeters,surfaceDetail.uvTileMeters)
 VALUE(ScatterDistance,subsurfaceScatterDistanceMeters) VALUE(ScatterR,subsurfaceColor.x) VALUE(ScatterG,subsurfaceColor.y) VALUE(ScatterB,subsurfaceColor.z) VALUE(SheenR,sheenColor.x) VALUE(SheenG,sheenColor.y) VALUE(SheenB,sheenColor.z) VALUE(SheenRoughness,sheenRoughness) VALUE(Iridescence,iridescence) VALUE(FilmIor,iridescenceIor) VALUE(FilmThickness,iridescenceThicknessNm)
+    VALUE(TextureTile,textureTileMeters) VALUE(TextureSharpness,textureSharpness) VALUE(TextureAntiTiling,textureAntiTiling) VALUE(DisplacementDepth,displacementDepthMeters)
+    case MaterialPresetProperty::DisplacementMode:return float(m.displacementMode);
 #undef VALUE
     default:return 0;
     }
@@ -94,7 +101,7 @@ bool set_material_preset_value(VoxelMaterialDefinition& m,MaterialPresetProperty
     const auto i=unsigned(p); if(i>=controls.size()||!std::isfinite(v)||v<controls[i].minimum||v>controls[i].maximum)
         return fail(e,"Value outside the displayed finite range");
     auto edited=m;
-    const bool integer=p==MaterialPresetProperty::Pattern||p==MaterialPresetProperty::DetailSpace||p==MaterialPresetProperty::PatternSeed;
+    const bool integer=p==MaterialPresetProperty::Pattern||p==MaterialPresetProperty::DetailSpace||p==MaterialPresetProperty::PatternSeed||p==MaterialPresetProperty::DisplacementMode;
     if(integer&&std::floor(v)!=v)return fail(e,"This control requires an integer");
     switch(p){
 #define SET(P,V) case MaterialPresetProperty::P:edited.V=v;break;
@@ -110,6 +117,8 @@ bool set_material_preset_value(VoxelMaterialDefinition& m,MaterialPresetProperty
     SET(PatternScale,surfaceDetail.periodMeters) SET(PatternRotationX,surfaceDetail.rotationRadians.x) SET(PatternRotationY,surfaceDetail.rotationRadians.y) SET(PatternRotationZ,surfaceDetail.rotationRadians.z)
     SET(GrainStretch,surfaceDetail.grainStretch) SET(ColorVariation,surfaceDetail.colorVariation) SET(RoughnessVariation,surfaceDetail.roughnessVariation) SET(BumpHeight,surfaceDetail.bumpHeightMeters) SET(UvTileMeters,surfaceDetail.uvTileMeters)
 SET(ScatterDistance,subsurfaceScatterDistanceMeters) SET(ScatterR,subsurfaceColor.x) SET(ScatterG,subsurfaceColor.y) SET(ScatterB,subsurfaceColor.z) SET(SheenR,sheenColor.x) SET(SheenG,sheenColor.y) SET(SheenB,sheenColor.z) SET(SheenRoughness,sheenRoughness) SET(Iridescence,iridescence) SET(FilmIor,iridescenceIor) SET(FilmThickness,iridescenceThicknessNm)
+    SET(TextureTile,textureTileMeters) SET(TextureSharpness,textureSharpness) SET(TextureAntiTiling,textureAntiTiling) SET(DisplacementDepth,displacementDepthMeters)
+    case MaterialPresetProperty::DisplacementMode:edited.displacementMode=static_cast<std::uint8_t>(v);break;
 #undef SET
     default:return false;
     }

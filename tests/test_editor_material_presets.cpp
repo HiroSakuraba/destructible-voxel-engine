@@ -52,6 +52,74 @@ void catalog_and_files(){
     }
 }
 EditorDocument scene(){EditorDocument d("Material batch 1");EditorObject v(1,"Mixed voxel profile");v.voxels->set_voxel({0,0,0},1);v.voxels->set_voxel({1,0,0},3);d.add_object(std::move(v));EditorObject p(2,"Polygon");p.polygon=make_editor_polygon_cube(2);p.polygon->materials[0].densityKilogramsPerCubicMeter=4321;d.add_object(std::move(p));return d;}
+// Texturing controls: the five new properties, the panel showing them where they matter,
+// weathering a voxel object and a polygon slot (one undo each, saved with the scene) and the
+// Layers rows that edit a layer's rules.
+void texturing_controls(){
+    std::string e;
+    VoxelMaterialDefinition m;m.name="Cobble";m.surfaceDetail.pattern=SurfacePattern::Cellular;m.surfaceDetail.periodMeters=.2F;
+    ok(set_material_preset_value(m,MaterialPresetProperty::DisplacementDepth,.04F,&e),e);
+    ok(set_material_preset_value(m,MaterialPresetProperty::DisplacementMode,1,&e),e);
+    require(!set_material_preset_value(m,MaterialPresetProperty::DisplacementMode,.5F,&e),"displacement mode is a whole number");
+    require(!set_material_preset_value(m,MaterialPresetProperty::TextureAntiTiling,.7F,&e),"anti-tiling above 0.5 is refused");
+    ok(set_material_preset_value(m,MaterialPresetProperty::TextureAntiTiling,.25F,&e),e);
+    ok(set_material_preset_value(m,MaterialPresetProperty::TextureTile,.5F,&e),e);
+    require(m.displacementDepthMeters==.04F&&m.displacementMode==1&&m.textureAntiTiling==.25F&&m.textureTileMeters==.5F&&
+            material_preset_value(m,MaterialPresetProperty::DisplacementMode)==1,"texturing properties read back");
+
+    NativeEditorController n{EditorWorkspace(scene()),root/"texturing.settings"};n.resize(1280,800);auto& w=n.workspace();auto& d=w.document();
+    n.open_material_panel();n.material_panel().draft=m;
+    const auto shows=[&](MaterialPresetProperty property){for(const auto& c:n.material_panel_controls())if(c.property==property)return true;return false;};
+    require(shows(MaterialPresetProperty::DisplacementDepth)&&shows(MaterialPresetProperty::DisplacementMode),"a height source shows the displacement controls");
+    require(!shows(MaterialPresetProperty::TextureTile)&&!shows(MaterialPresetProperty::TextureAntiTiling),"no texture set: no texture-set controls");
+    n.material_panel().draft.surfaceDetail.pattern=SurfacePattern::NoPattern;
+    require(!shows(MaterialPresetProperty::DisplacementDepth),"no height source: no displacement controls");
+    n.close_material_panel();
+
+    // Voxels: both materials the object uses gain a moss layer from one new source slot.
+    w.select_object(1);const auto history=w.commands().size();
+    require(n.weather_selection(WeatheringKind::Moss,.7F),n.material_panel().message);
+    require(w.commands().size()==history+1,"weathering is one undo step");
+    {
+        const auto& palette=d.find_object(1)->voxelMaterials;
+        require(palette.contains(1)&&palette.contains(3),"both used materials are weathered");
+        const auto& a=palette.at(1);const auto& b=palette.at(3);
+        require(a.layers.size()==1&&b.layers.size()==1&&a.layers[0].sourceMaterial==b.layers[0].sourceMaterial,"one shared source slot");
+        const auto source=a.layers[0].sourceMaterial;
+        require(palette.contains(source)&&palette.at(source).name=="Moss"&&a.layers[0].rules.enabled&&a.layers[0].rules.occlusionMax>.7F,"moss source and its rules");
+    }
+    auto saved=d.save_transactional(root/"weather.dvescene");require(saved.success,saved.error);
+    auto loaded=EditorDocument::load(root/"weather.dvescene",&e);require(bool(loaded),e);
+    {
+        const auto& palette=loaded->find_object(1)->voxelMaterials;
+        require(palette.contains(1)&&palette.at(1).layers.size()==1&&palette.at(1).layers[0].rules.enabled&&
+                palette.at(1).layers[0].rules.seed==d.find_object(1)->voxelMaterials.at(1).layers[0].rules.seed,"the scene keeps the weathering rules");
+    }
+    require(w.commands().undo(d).success,"undo weathering");
+    {
+        const auto& palette=d.find_object(1)->voxelMaterials;
+        require(!palette.contains(1)||palette.at(1).layers.empty(),"undo removes the weathering");
+    }
+    require(!n.weather_selection(WeatheringKind::Snow,1.5F),"amount above 1 is refused");
+
+    // Polygon slot 0 from the Layers rows: next kind (Snow -> Moss), amount, add; then rules.
+    w.select_object(2);n.open_material_panel();n.material_panel().slot=0;n.material_panel().layerIndex=0;
+    require(n.dispatch_action("material.weather_kind")&&n.material_panel().weatherKind==WeatheringKind::Moss,"next weathering kind");
+    require(n.material_panel_layer_action("weatherAmount",.9F)&&n.material_panel().weatherAmount==.9F,"weathering amount");
+    require(n.material_panel_layer_action("weatherAdd"),n.material_panel().message);
+    {
+        const auto& mesh=*d.find_object(2)->polygon;
+        require(mesh.materials[0].layers.size()==1&&mesh.materialBindings[0].layers.size()==1,"one overlay with its binding");
+        const auto source=mesh.materials[0].layers[0].sourceMaterial;
+        require(source<mesh.materials.size()&&mesh.materials[source].name=="Moss"&&mesh.materials[0].layers[0].rules.enabled,"moss overlay with rules");
+    }
+    bool rulesRow=false;for(const auto& [key,text]:n.material_panel_layer_controls())rulesRow=rulesRow||key=="ruleSlope";
+    require(rulesRow,"Layers rows list the rules");
+    require(n.material_panel_layer_action("ruleSlope",.2F)&&d.find_object(2)->polygon->materials[0].layers[0].rules.slopeMinCos==.2F,"edit a rule");
+    require(!n.material_panel_layer_action("ruleSlope",3.0F)&&d.find_object(2)->polygon->materials[0].layers[0].rules.slopeMinCos==.2F,"an out-of-range rule is refused");
+    require(n.material_panel_layer_action("rules")&&!d.find_object(2)->polygon->materials[0].layers[0].rules.enabled,"rules off");
+    n.close_material_panel();
+}
 void native_workflow(){
     NativeEditorController n{EditorWorkspace(scene()),root/"user.settings"};n.resize(1280,800);auto& w=n.workspace();auto& d=w.document();w.select_object(1);w.add_to_selection(2);
     require(n.dispatch_action("material.library")&&n.material_panel().open,"native browser opens");n.material_panel_select("dve.glass.frosted");
@@ -147,4 +215,4 @@ void preview_jobs(){
     require(!worker.image(),"cancelled job never commits later");
 }
 }
-int main(){try{root=std::filesystem::temp_directory_path()/"dve-material-presets-batch1";std::filesystem::remove_all(root);std::filesystem::create_directories(root);const auto previous=std::filesystem::current_path();std::filesystem::current_path(root);catalog_and_files();native_workflow();component_domains();undo_redo_exact();project_switch_rebuilds_catalog();preview_jobs();std::filesystem::current_path(previous);std::filesystem::remove_all(root);std::cout<<"Material preset catalog, persistence, native workflow and asynchronous preview checks passed\n";}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
+int main(){try{root=std::filesystem::temp_directory_path()/"dve-material-presets-batch1";std::filesystem::remove_all(root);std::filesystem::create_directories(root);const auto previous=std::filesystem::current_path();std::filesystem::current_path(root);catalog_and_files();native_workflow();texturing_controls();component_domains();undo_redo_exact();project_switch_rebuilds_catalog();preview_jobs();std::filesystem::current_path(previous);std::filesystem::remove_all(root);std::cout<<"Material preset catalog, persistence, native workflow and asynchronous preview checks passed\n";}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

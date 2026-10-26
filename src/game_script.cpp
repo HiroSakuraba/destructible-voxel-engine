@@ -8,6 +8,8 @@
 #include "dve/camera_sequence.hpp"
 #include "dve/content_source.hpp"
 #include "dve/game_save.hpp"
+#include "dve/surface_marks.hpp"
+#include "dve/weathering.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -1375,6 +1377,363 @@ int l_get_material_layer_weight(lua_State* L) {
     return 1;
 }
 
+// --- Texturing controls on world objects (texture sets, displacement, surface patterns, layers
+// with rules, weathering) and damage marks ------------------------------------------------------
+// Lua is built as C here: luaL_check* and luaL_error longjmp, so they are only used before any
+// C++ object with a destructor exists. Table fields are read with lua_to* and validated by hand,
+// and failures return nil plus a message.
+
+constexpr const char* kPatternNames[] = {"none", "wood", "leather", "paper", "mineral", "paint", "marble", "strata", "cellular"};
+constexpr const char* kWeatheringNames[] = {"snow", "moss", "rust", "dust", "wetness", "edge_wear"};
+constexpr const char* kBlendNames[] = {"lerp", "multiply", "additive"};
+
+template <std::size_t N>
+int name_index(const char* const (&names)[N], const char* text) noexcept {
+    if (!text) return -1;
+    for (std::size_t i = 0; i < N; ++i)
+        if (std::strcmp(names[i], text) == 0) return static_cast<int>(i);
+    return -1;
+}
+
+// Optional number field of the table at `index`: false when present but not a number.
+bool table_number(lua_State* L, int index, const char* key, float& value) {
+    lua_getfield(L, index, key);
+    bool good = true;
+    if (!lua_isnil(L, -1)) {
+        int isNumber = 0;
+        const lua_Number n = lua_tonumberx(L, -1, &isNumber);
+        if (isNumber) value = static_cast<float>(n); else good = false;
+    }
+    lua_pop(L, 1);
+    return good;
+}
+bool table_boolean(lua_State* L, int index, const char* key, bool& value) {
+    lua_getfield(L, index, key);
+    bool good = true;
+    if (lua_isboolean(L, -1)) value = lua_toboolean(L, -1) != 0;
+    else if (!lua_isnil(L, -1)) good = false;
+    lua_pop(L, 1);
+    return good;
+}
+// Optional string field; nullptr when absent. The pointer stays valid while the table is alive.
+bool table_string(lua_State* L, int index, const char* key, const char*& value) {
+    lua_getfield(L, index, key);
+    bool good = true;
+    if (lua_type(L, -1) == LUA_TSTRING) value = lua_tostring(L, -1);
+    else if (!lua_isnil(L, -1)) good = false;
+    lua_pop(L, 1);
+    return good;
+}
+bool table_vector(lua_State* L, int index, const char* key, Float3& value) {
+    lua_getfield(L, index, key);
+    bool good = true;
+    if (lua_istable(L, -1)) {
+        const int at = lua_gettop(L);
+        good = table_number(L, at, "x", value.x) && table_number(L, at, "y", value.y) && table_number(L, at, "z", value.z);
+    } else if (!lua_isnil(L, -1)) {
+        good = false;
+    }
+    lua_pop(L, 1);
+    return good;
+}
+int push_failure(lua_State* L, const char* message) {
+    lua_pushnil(L);
+    lua_pushstring(L, message);
+    return 2;
+}
+
+void push_layer_rules(lua_State* L, const MaterialLayerRules& r) {
+    lua_newtable(L);
+    push_float3_table(L, r.up); lua_setfield(L, -2, "up");
+    const std::pair<const char*, float> fields[] = {
+        {"slope_min", r.slopeMinCos}, {"slope_max", r.slopeMaxCos}, {"height_min", r.heightMinMeters}, {"height_max", r.heightMaxMeters},
+        {"occlusion_min", r.occlusionMin}, {"occlusion_max", r.occlusionMax}, {"edge_width", r.edgeWidthMeters},
+        {"base_height", r.baseHeightInfluence}, {"noise", r.noiseAmount}, {"noise_scale", r.noiseScaleMeters},
+        {"softness", r.softness}, {"height_softness", r.heightSoftnessMeters}};
+    for (const auto& [key, value] : fields) { lua_pushnumber(L, value); lua_setfield(L, -2, key); }
+    lua_pushinteger(L, static_cast<lua_Integer>(r.seed)); lua_setfield(L, -2, "seed");
+}
+
+// Reads a rules table at `index` over `r` (fields absent keep their values); enables the rules.
+bool read_layer_rules(lua_State* L, int index, MaterialLayerRules& r) {
+    float seed = static_cast<float>(r.seed);
+    const bool good = table_vector(L, index, "up", r.up) && table_number(L, index, "slope_min", r.slopeMinCos) &&
+                      table_number(L, index, "slope_max", r.slopeMaxCos) && table_number(L, index, "height_min", r.heightMinMeters) &&
+                      table_number(L, index, "height_max", r.heightMaxMeters) && table_number(L, index, "occlusion_min", r.occlusionMin) &&
+                      table_number(L, index, "occlusion_max", r.occlusionMax) && table_number(L, index, "edge_width", r.edgeWidthMeters) &&
+                      table_number(L, index, "base_height", r.baseHeightInfluence) && table_number(L, index, "noise", r.noiseAmount) &&
+                      table_number(L, index, "noise_scale", r.noiseScaleMeters) && table_number(L, index, "softness", r.softness) &&
+                      table_number(L, index, "height_softness", r.heightSoftnessMeters) && table_number(L, index, "seed", seed);
+    if (!good || !(seed >= 0.0F) || seed > 4294967295.0F || std::floor(seed) != seed) return false;
+    r.seed = static_cast<std::uint32_t>(seed);
+    r.enabled = true;
+    return true;
+}
+
+// world.get_material(id, material) -> table, or nil.
+int l_get_material(lua_State* L) {
+    const auto id = static_cast<GameObjectId>(luaL_checkinteger(L, 1));
+    const lua_Integer slot = luaL_checkinteger(L, 2);
+    const auto table = world_from_state(L).object_materials(id);
+    if (slot < 0 || static_cast<std::size_t>(slot) >= table.size()) { lua_pushnil(L); return 1; }
+    const VoxelMaterialDefinition& m = table[static_cast<std::size_t>(slot)];
+    lua_newtable(L);
+    lua_pushstring(L, m.name.c_str()); lua_setfield(L, -2, "name");
+    lua_pushnumber(L, m.displacementDepthMeters); lua_setfield(L, -2, "displacement_depth");
+    lua_pushstring(L, m.displacementMode == 1U ? "parallax" : "traced"); lua_setfield(L, -2, "displacement_mode");
+    lua_pushnumber(L, m.textureTileMeters); lua_setfield(L, -2, "texture_tile");
+    lua_pushnumber(L, m.textureSharpness); lua_setfield(L, -2, "texture_sharpness");
+    lua_pushnumber(L, m.textureAntiTiling); lua_setfield(L, -2, "anti_tiling");
+    lua_pushboolean(L, material_has_textures(m)); lua_setfield(L, -2, "has_texture_set");
+    const MaterialSurfaceDetail& d = m.surfaceDetail;
+    lua_pushstring(L, kPatternNames[std::min<unsigned>(static_cast<unsigned>(d.pattern), 8U)]); lua_setfield(L, -2, "pattern");
+    lua_pushstring(L, d.space == SurfaceDetailSpace::World ? "world" : d.space == SurfaceDetailSpace::Object ? "object" : "uv"); lua_setfield(L, -2, "pattern_space");
+    lua_pushnumber(L, d.periodMeters); lua_setfield(L, -2, "pattern_period");
+    lua_pushnumber(L, d.grainStretch); lua_setfield(L, -2, "pattern_stretch");
+    lua_pushinteger(L, static_cast<lua_Integer>(d.seed)); lua_setfield(L, -2, "pattern_seed");
+    lua_pushnumber(L, d.colorVariation); lua_setfield(L, -2, "pattern_color_variation");
+    lua_pushnumber(L, d.roughnessVariation); lua_setfield(L, -2, "pattern_roughness_variation");
+    lua_pushnumber(L, d.bumpHeightMeters); lua_setfield(L, -2, "pattern_bump");
+    lua_newtable(L);
+    for (std::size_t i = 0; i < m.layers.size(); ++i) {
+        const VoxelMaterialLayer& layer = m.layers[i];
+        lua_newtable(L);
+        lua_pushinteger(L, layer.sourceMaterial); lua_setfield(L, -2, "source");
+        lua_pushnumber(L, layer.weight); lua_setfield(L, -2, "weight");
+        lua_pushboolean(L, layer.enabled); lua_setfield(L, -2, "enabled");
+        lua_pushstring(L, kBlendNames[static_cast<unsigned>(layer.blendMode) % 3U]); lua_setfield(L, -2, "blend");
+        if (layer.rules.enabled) { push_layer_rules(L, layer.rules); lua_setfield(L, -2, "rules"); }
+        lua_rawseti(L, -2, static_cast<lua_Integer>(i + 1U));
+    }
+    lua_setfield(L, -2, "layers");
+    return 1;
+}
+
+// world.set_material_texturing(id, material, {displacement_depth=, displacement_mode="traced"|
+// "parallax", texture_tile=, texture_sharpness=, anti_tiling=, pattern="marble", pattern_space=
+// "object"|"world", pattern_period=, pattern_stretch=, pattern_seed=, pattern_color_variation=,
+// pattern_roughness_variation=, pattern_bump=}) -> true, or nil and a message. Absent fields keep
+// their values; the whole change applies or nothing does.
+int l_set_material_texturing(lua_State* L) {
+    const auto id = static_cast<GameObjectId>(luaL_checkinteger(L, 1));
+    const lua_Integer slot = luaL_checkinteger(L, 2);
+    luaL_checktype(L, 3, LUA_TTABLE);
+    const char* failure = nullptr;
+    char message[160] = {};
+    {
+        GameWorld& world = world_from_state(L);
+        const auto table = world.object_materials(id);
+        if (slot < 0 || static_cast<std::size_t>(slot) >= table.size()) return push_failure(L, "no such object material");
+        VoxelMaterialDefinition m = table[static_cast<std::size_t>(slot)];
+        const char* mode = nullptr;
+        const char* pattern = nullptr;
+        const char* space = nullptr;
+        float seed = static_cast<float>(m.surfaceDetail.seed);
+        const bool read = table_number(L, 3, "displacement_depth", m.displacementDepthMeters) && table_string(L, 3, "displacement_mode", mode) &&
+                          table_number(L, 3, "texture_tile", m.textureTileMeters) && table_number(L, 3, "texture_sharpness", m.textureSharpness) &&
+                          table_number(L, 3, "anti_tiling", m.textureAntiTiling) && table_string(L, 3, "pattern", pattern) &&
+                          table_string(L, 3, "pattern_space", space) && table_number(L, 3, "pattern_period", m.surfaceDetail.periodMeters) &&
+                          table_number(L, 3, "pattern_stretch", m.surfaceDetail.grainStretch) && table_number(L, 3, "pattern_seed", seed) &&
+                          table_number(L, 3, "pattern_color_variation", m.surfaceDetail.colorVariation) &&
+                          table_number(L, 3, "pattern_roughness_variation", m.surfaceDetail.roughnessVariation) &&
+                          table_number(L, 3, "pattern_bump", m.surfaceDetail.bumpHeightMeters);
+        if (!read) failure = "a texturing field has the wrong type";
+        else if (mode && std::strcmp(mode, "traced") != 0 && std::strcmp(mode, "parallax") != 0) failure = "displacement_mode is \"traced\" or \"parallax\"";
+        else if (pattern && name_index(kPatternNames, pattern) < 0) failure = "unknown pattern";
+        else if (space && std::strcmp(space, "object") != 0 && std::strcmp(space, "world") != 0) failure = "pattern_space is \"object\" or \"world\"";
+        else if (!(seed >= 0.0F) || seed > 16777215.0F || std::floor(seed) != seed) failure = "pattern_seed must be a whole number";
+        else {
+            if (mode) m.displacementMode = std::strcmp(mode, "parallax") == 0 ? 1U : 0U;
+            if (pattern) m.surfaceDetail.pattern = static_cast<SurfacePattern>(name_index(kPatternNames, pattern));
+            if (space) m.surfaceDetail.space = std::strcmp(space, "world") == 0 ? SurfaceDetailSpace::World : SurfaceDetailSpace::Object;
+            m.surfaceDetail.seed = static_cast<std::uint32_t>(seed);
+            std::string error;
+            if (!world.set_object_material(id, static_cast<std::size_t>(slot), std::move(m), &error)) {
+                std::snprintf(message, sizeof message, "%s", error.c_str());
+                failure = message;
+            }
+        }
+    }
+    if (failure) return push_failure(L, failure);
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+// world.add_weathering(id, material, kind, amount [, {seed=, up={x,y,z}}]) -> layer number, or nil
+// and a message. kind: "snow", "moss", "rust", "dust", "wetness", "edge_wear".
+int l_add_weathering(lua_State* L) {
+    const auto id = static_cast<GameObjectId>(luaL_checkinteger(L, 1));
+    const lua_Integer slot = luaL_checkinteger(L, 2);
+    const char* kindName = luaL_checkstring(L, 3);
+    const float amount = static_cast<float>(luaL_checknumber(L, 4));
+    const int kind = name_index(kWeatheringNames, kindName);
+    if (kind < 0) return push_failure(L, "unknown weathering kind");
+    if (!(amount >= 0.0F && amount <= 1.0F)) return push_failure(L, "amount must be in [0,1]");
+    float seed = 1.0F;
+    Float3 up{0.0F, 1.0F, 0.0F};
+    if (lua_istable(L, 5) && !(table_number(L, 5, "seed", seed) && table_vector(L, 5, "up", up)))
+        return push_failure(L, "weathering options have the wrong type");
+    if (!(seed >= 0.0F) || seed > 4294967295.0F || std::floor(seed) != seed) return push_failure(L, "seed must be a whole number");
+    const char* failure = nullptr;
+    char message[160] = {};
+    lua_Integer layerNumber = 0;
+    {
+        GameWorld& world = world_from_state(L);
+        const auto table = world.object_materials(id);
+        if (slot < 0 || static_cast<std::size_t>(slot) >= table.size()) return push_failure(L, "no such object material");
+        VoxelMaterialDefinition target = table[static_cast<std::size_t>(slot)];
+        std::string error;
+        if (target.layers.size() >= kMaximumVoxelMaterialLayers) failure = "the material already has four layers";
+        else {
+            WeatheringLayer recipe = make_weathering_layer(static_cast<WeatheringKind>(kind), amount, up, static_cast<std::uint32_t>(seed));
+            const auto source = world.add_object_material(id, std::move(recipe.source), &error);
+            if (!source) {
+                std::snprintf(message, sizeof message, "%s", error.c_str());
+                failure = message;
+            } else {
+                recipe.layer.sourceMaterial = static_cast<MaterialId>(*source);
+                target.layers.push_back(recipe.layer);
+                layerNumber = static_cast<lua_Integer>(target.layers.size());
+                if (!world.set_object_material(id, static_cast<std::size_t>(slot), std::move(target), &error)) {
+                    std::snprintf(message, sizeof message, "%s", error.c_str());
+                    failure = message;
+                }
+            }
+        }
+    }
+    if (failure) return push_failure(L, failure);
+    lua_pushinteger(L, layerNumber);
+    return 1;
+}
+
+// world.set_layer(id, material, layer, {weight=, enabled=, blend="lerp"|"multiply"|"additive",
+// rules={...} | false}) -> true, or nil and a message. Rules fields: up, slope_min, slope_max,
+// height_min, height_max, occlusion_min, occlusion_max, edge_width, base_height, noise,
+// noise_scale, softness, height_softness, seed (dve/material_layer_rules.hpp). rules=false turns
+// them off; a rules table changes only the fields it names.
+int l_set_layer(lua_State* L) {
+    const auto id = static_cast<GameObjectId>(luaL_checkinteger(L, 1));
+    const lua_Integer slot = luaL_checkinteger(L, 2);
+    const lua_Integer oneBased = luaL_checkinteger(L, 3);
+    luaL_checktype(L, 4, LUA_TTABLE);
+    const char* failure = nullptr;
+    char message[160] = {};
+    {
+        GameWorld& world = world_from_state(L);
+        const auto table = world.object_materials(id);
+        if (slot < 0 || static_cast<std::size_t>(slot) >= table.size()) return push_failure(L, "no such object material");
+        VoxelMaterialDefinition m = table[static_cast<std::size_t>(slot)];
+        if (oneBased < 1 || static_cast<std::size_t>(oneBased) > m.layers.size()) return push_failure(L, "no such layer (layers are one-based)");
+        VoxelMaterialLayer& layer = m.layers[static_cast<std::size_t>(oneBased - 1)];
+        const char* blend = nullptr;
+        bool read = table_number(L, 4, "weight", layer.weight) && table_boolean(L, 4, "enabled", layer.enabled) && table_string(L, 4, "blend", blend);
+        lua_getfield(L, 4, "rules");
+        if (lua_isboolean(L, -1) && !lua_toboolean(L, -1)) layer.rules.enabled = false;
+        else if (lua_istable(L, -1)) read = read && read_layer_rules(L, lua_gettop(L), layer.rules);
+        else if (!lua_isnil(L, -1)) read = false;
+        lua_pop(L, 1);
+        if (!read) failure = "a layer field has the wrong type";
+        else if (blend && name_index(kBlendNames, blend) < 0) failure = "blend is \"lerp\", \"multiply\" or \"additive\"";
+        else if (!material_layer_rules_valid(layer.rules)) failure = "layer rules are out of range";
+        else {
+            if (blend) layer.blendMode = static_cast<MaterialLayerBlendMode>(name_index(kBlendNames, blend));
+            std::string error;
+            if (!world.set_object_material(id, static_cast<std::size_t>(slot), std::move(m), &error)) {
+                std::snprintf(message, sizeof message, "%s", error.c_str());
+                failure = message;
+            }
+        }
+    }
+    if (failure) return push_failure(L, failure);
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+// world.remove_layer(id, material, layer) -> true, or nil and a message (the source slot stays).
+int l_remove_layer(lua_State* L) {
+    const auto id = static_cast<GameObjectId>(luaL_checkinteger(L, 1));
+    const lua_Integer slot = luaL_checkinteger(L, 2);
+    const lua_Integer oneBased = luaL_checkinteger(L, 3);
+    const char* failure = nullptr;
+    {
+        GameWorld& world = world_from_state(L);
+        const auto table = world.object_materials(id);
+        if (slot < 0 || static_cast<std::size_t>(slot) >= table.size()) return push_failure(L, "no such object material");
+        VoxelMaterialDefinition m = table[static_cast<std::size_t>(slot)];
+        if (oneBased < 1 || static_cast<std::size_t>(oneBased) > m.layers.size()) return push_failure(L, "no such layer (layers are one-based)");
+        m.layers.erase(m.layers.begin() + static_cast<std::ptrdiff_t>(oneBased - 1));
+        if (!world.set_object_material(id, static_cast<std::size_t>(slot), std::move(m), nullptr)) failure = "the material could not be updated";
+    }
+    if (failure) return push_failure(L, failure);
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+// world.set_damage_marks({enabled=, exposure=, scorch=, cracks=, reach=, crack_reach=, max=})
+// -> true, or nil and a message. Absent fields keep their values.
+int l_set_damage_marks(lua_State* L) {
+    luaL_checktype(L, 1, LUA_TTABLE);
+    GameWorld& world = world_from_state(L);
+    SurfaceMarkSettings s = world.surface_mark_settings();
+    float maximum = static_cast<float>(s.maximumMarks);
+    const bool read = table_boolean(L, 1, "enabled", s.enabled) && table_number(L, 1, "exposure", s.exposure) &&
+                      table_number(L, 1, "scorch", s.scorch) && table_number(L, 1, "cracks", s.cracks) &&
+                      table_number(L, 1, "reach", s.reachScale) && table_number(L, 1, "crack_reach", s.crackReach) &&
+                      table_number(L, 1, "max", maximum);
+    if (!read) return push_failure(L, "a damage-mark field has the wrong type");
+    if (!(maximum >= 0.0F) || maximum > 65536.0F || std::floor(maximum) != maximum) return push_failure(L, "max must be a whole number in [0,65536]");
+    s.maximumMarks = static_cast<std::size_t>(maximum);
+    if (!world.set_surface_mark_settings(s)) return push_failure(L, "damage-mark settings are out of range");
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+// world.get_damage_marks([id]) -> {enabled=, exposure=, scorch=, cracks=, reach=, crack_reach=,
+// max=, marks={{id=, center={x,y,z} (object-local metres), radius=}, ...}} (one object's marks
+// when id is given).
+int l_get_damage_marks(lua_State* L) {
+    const bool filter = !lua_isnoneornil(L, 1);
+    const auto only = filter ? static_cast<GameObjectId>(luaL_checkinteger(L, 1)) : kInvalidGameObjectId;
+    const GameWorld& world = world_from_state(L);
+    const SurfaceMarkSettings& s = world.surface_mark_settings();
+    lua_newtable(L);
+    lua_pushboolean(L, s.enabled); lua_setfield(L, -2, "enabled");
+    lua_pushnumber(L, s.exposure); lua_setfield(L, -2, "exposure");
+    lua_pushnumber(L, s.scorch); lua_setfield(L, -2, "scorch");
+    lua_pushnumber(L, s.cracks); lua_setfield(L, -2, "cracks");
+    lua_pushnumber(L, s.reachScale); lua_setfield(L, -2, "reach");
+    lua_pushnumber(L, s.crackReach); lua_setfield(L, -2, "crack_reach");
+    lua_pushinteger(L, static_cast<lua_Integer>(s.maximumMarks)); lua_setfield(L, -2, "max");
+    lua_newtable(L);
+    lua_Integer n = 0;
+    for (const SurfaceMark& m : world.surface_marks()) {
+        if (filter && m.objectId != only) continue;
+        lua_newtable(L);
+        lua_pushinteger(L, static_cast<lua_Integer>(m.objectId)); lua_setfield(L, -2, "id");
+        push_float3_table(L, m.centerMeters); lua_setfield(L, -2, "center");
+        lua_pushnumber(L, m.radiusMeters); lua_setfield(L, -2, "radius");
+        lua_rawseti(L, -2, ++n);
+    }
+    lua_setfield(L, -2, "marks");
+    return 1;
+}
+
+// world.add_damage_mark(id, x, y, z, radius) -> true/false: a crater mark without carving.
+int l_add_damage_mark(lua_State* L) {
+    const auto id = static_cast<GameObjectId>(luaL_checkinteger(L, 1));
+    const Float3 center = check_float3(L, 2);
+    const float radius = static_cast<float>(luaL_checknumber(L, 5));
+    lua_pushboolean(L, world_from_state(L).add_surface_mark(id, center, radius) ? 1 : 0);
+    return 1;
+}
+
+// world.clear_damage_marks([id]): every mark, or one object's.
+int l_clear_damage_marks(lua_State* L) {
+    if (lua_isnoneornil(L, 1)) world_from_state(L).clear_surface_marks();
+    else world_from_state(L).clear_surface_marks(static_cast<GameObjectId>(luaL_checkinteger(L, 1)));
+    return 0;
+}
+
 // --- Render environment bindings (Material-Parameter-Collection / Godot-Environment-resource
 // equivalent) -------------------------------------------------------------------------------
 
@@ -2557,6 +2916,15 @@ constexpr luaL_Reg kWorldFunctions[] = {
     {"clear_material_parameters", l_clear_material_parameters},
     {"set_material_layer_weight", l_set_material_layer_weight},
     {"get_material_layer_weight", l_get_material_layer_weight},
+    {"get_material", l_get_material},
+    {"set_material_texturing", l_set_material_texturing},
+    {"add_weathering", l_add_weathering},
+    {"set_layer", l_set_layer},
+    {"remove_layer", l_remove_layer},
+    {"set_damage_marks", l_set_damage_marks},
+    {"get_damage_marks", l_get_damage_marks},
+    {"add_damage_mark", l_add_damage_mark},
+    {"clear_damage_marks", l_clear_damage_marks},
     {"set_scene_light", l_set_scene_light},
     {"set_environment_scalar", l_set_environment_scalar},
     {"set_environment_vector", l_set_environment_vector},

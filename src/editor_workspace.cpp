@@ -786,6 +786,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"polygon.collision","Polygon","Collision Settings",""}, {"polygon.streaming","Polygon","Streaming Settings",""},
         {"material.library","Materials","Material Library",""}, {"material.globals","Materials","Global Parameters",""},
         {"material.layers","Materials","Material Layers",""}, {"material.rendering","Materials","Shading Models",""},
+        {"material.weather","Materials","Add Weathering to Selection",""}, {"material.weather_kind","Materials","Next Weathering Kind",""},
         // Polygon authoring and component modes; availability is enforced by the native controller.
         {"subdiv.create_cube","Subdivision","Create Subdivision Cube",""},
         {"subdiv.create_plane","Subdivision","Create Subdivision Plane",""},

@@ -7503,6 +7503,12 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
     if (actionId == "material.open_globals") return dispatch_action("material.globals");
     // Commands that exist in the shortcut set but have no native-editor implementation yet: say
     // so (and what to use instead) instead of reporting success.
+    if(actionId=="material.weather")return weather_selection(materialPanel_.weatherKind,materialPanel_.weatherAmount);
+    if(actionId=="material.weather_kind"){
+        materialPanel_.weatherKind=WeatheringKind((unsigned(materialPanel_.weatherKind)+1U)%6U);
+        set_status(std::string("Weathering: ")+weathering_kind_label(materialPanel_.weatherKind)+" (amount "+std::to_string(materialPanel_.weatherAmount).substr(0,4)+")");
+        return true;
+    }
     if(actionId=="material.library" || actionId=="material.preview"){open_material_panel();return materialPanel_.open;}
     if(actionId=="material.create_instance"){open_material_panel();return materialPanel_.open;}
     if (actionId == "material.assign" || actionId == "material.apply") {

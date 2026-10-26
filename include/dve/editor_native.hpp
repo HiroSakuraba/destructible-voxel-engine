@@ -644,6 +644,11 @@ public:
     void open_material_panel();
     void close_material_panel();
     bool apply_material_panel(bool editSlot = false);
+    // Adds a weathering recipe (dve/weathering.hpp) as a rule-driven layer: to every material the
+    // selected voxels use (the whole object without a voxel selection) and, on polygon objects,
+    // to the material panel's slot. Each target gets the recipe's source material in a free
+    // slot. One undo step.
+    bool weather_selection(WeatheringKind kind, float amount);
     bool load_material_panel_slot();
     // Layer edits affect assigned polygon slots immediately, one undo transaction each.
     bool material_panel_bake_source(bool showSource);

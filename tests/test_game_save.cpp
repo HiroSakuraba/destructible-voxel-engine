@@ -1531,11 +1531,12 @@ void test_script_state_v3_fog_height() {
     const auto blob = a.save_state(&error);
     CHECK(blob.has_value());
     if (!blob) { std::cerr << "v3 fog height save: " << error << '\n'; return; }
-    // After the falloff block the tail is: empty prompt (4), no tools (4),
-    // selection (8), no materials (4), no named timers (4) -- 24 bytes; remove
-    // the v5 lighting extension as well as the 8-byte height block.
-    CHECK(blob->size() > 32U);
-    std::vector<std::byte> v3(blob->begin(), blob->end() - 32 - 4 - encode_scene_lighting(a.environment()).size());
+    // After the falloff block come the v5 lighting extension (length-prefixed), the v6 sky
+    // (36 bytes) and v7 volumetric fog (36 bytes) blocks, then the tail: empty prompt (4), no
+    // tools (4), selection (8), no materials (4), no named timers (4) -- 24 bytes. Remove all
+    // of them but the tail, as well as the 8-byte height block.
+    CHECK(blob->size() > 32U + 72U);
+    std::vector<std::byte> v3(blob->begin(), blob->end() - 32 - 72 - 4 - encode_scene_lighting(a.environment()).size());
     v3.insert(v3.end(), blob->end() - 24, blob->end());
     v3[4] = std::byte{3};
     GameWorld worldB(std::make_unique<ReferenceRigidBodyWorld>());

@@ -28,6 +28,7 @@
 #include "dve/polygon_bvh.hpp"
 #include "dve/fragment.hpp"
 #include "dve/query.hpp"
+#include "dve/master_material.hpp"
 
 namespace dve {
 namespace {
@@ -1865,6 +1866,70 @@ bool GameWorld::add_surface_mark(GameObjectId id, Float3 worldCenter, float radi
     return surfaceMarks_.add_crater(id, inverse_transform_point(resolve_transform(it->second), worldCenter), radiusMeters);
 }
 
+namespace {
+// A material table is valid for a world object: every entry passes the same range checks the
+// formats apply, layers reference slots of this table, and there are no cycles.
+bool world_material_valid(const VoxelMaterialDefinition& m) noexcept {
+    const auto unit = [](float v) { return v >= 0.0F && v <= 1.0F; };   // false for NaN
+    const auto finite3 = [](Float3 v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); };
+    return unit(m.baseColor.x) && unit(m.baseColor.y) && unit(m.baseColor.z) && unit(m.baseColor.w) && finite3(m.emissive) &&
+           m.emissive.x >= 0.0F && m.emissive.y >= 0.0F && m.emissive.z >= 0.0F && unit(m.metallic) && unit(m.roughness) &&
+           unit(m.specular) && unit(m.clearCoat) && unit(m.clearCoatRoughness) && m.layers.size() <= kMaximumVoxelMaterialLayers &&
+           std::all_of(m.layers.begin(), m.layers.end(), [&](const VoxelMaterialLayer& l) {
+               return unit(l.weight) && static_cast<unsigned>(l.blendMode) <= static_cast<unsigned>(MaterialLayerBlendMode::Additive);
+           }) &&
+           material_optics_valid(m) && material_sheen_valid(m) && material_iridescence_valid(m) && material_normal_map_valid(m) &&
+           material_textures_valid(m) && material_displacement_settings_valid(m) && material_rules_valid(m) &&
+           material_surface_detail_valid(m.surfaceDetail);
+}
+bool world_material_table_valid(const std::vector<VoxelMaterialDefinition>& table, std::string* error) {
+    if (table.size() > 256U) { if (error) *error = "material table exceeds 256 entries"; return false; }
+    for (std::size_t i = 0; i < table.size(); ++i) {
+        for (const VoxelMaterialLayer& layer : table[i].layers)
+            if (layer.sourceMaterial >= table.size()) { if (error) *error = "a layer references a missing material slot"; return false; }
+        if (!world_material_valid(table[i])) { if (error) *error = "slot " + std::to_string(i) + " has an out-of-range value"; return false; }
+    }
+    return resolve_voxel_material_layers(table, error).has_value();
+}
+} // namespace
+
+std::span<const VoxelMaterialDefinition> GameWorld::object_materials(GameObjectId id) const {
+    const auto it = objects_.find(id);
+    if (it == objects_.end() || !it->second.voxels) return {};
+    return it->second.materials;
+}
+
+bool GameWorld::set_object_material(GameObjectId id, std::size_t index, VoxelMaterialDefinition material, std::string* error) {
+    const auto it = objects_.find(id);
+    if (it == objects_.end() || !it->second.voxels) { if (error) *error = "no voxel object with that id"; return false; }
+    Object& object = it->second;
+    if (index >= object.materials.size()) { if (error) *error = "material slot out of range"; return false; }
+    const VoxelMaterialDefinition& old = object.materials[index];
+    material.densityKilogramsPerCubicMeter = old.densityKilogramsPerCubicMeter;
+    material.structuralStrength = old.structuralStrength;
+    material.fractureResistance = old.fractureResistance;
+    material.flammability = old.flammability;
+    material.thermalConductivity = old.thermalConductivity;
+    material.structural = old.structural;
+    material.transparent = old.transparent;
+    std::vector<VoxelMaterialDefinition> table = object.materials;
+    table[index] = std::move(material);
+    if (!world_material_table_valid(table, error)) return false;
+    object.materials = std::move(table);
+    return true;
+}
+
+std::optional<std::size_t> GameWorld::add_object_material(GameObjectId id, VoxelMaterialDefinition material, std::string* error) {
+    const auto it = objects_.find(id);
+    if (it == objects_.end() || !it->second.voxels) { if (error) *error = "no voxel object with that id"; return std::nullopt; }
+    Object& object = it->second;
+    std::vector<VoxelMaterialDefinition> table = object.materials;
+    table.push_back(std::move(material));
+    if (!world_material_table_valid(table, error)) return std::nullopt;
+    object.materials = std::move(table);
+    return object.materials.size() - 1U;
+}
+
 void GameWorld::clear_surface_marks(std::optional<GameObjectId> id) {
     if (id) surfaceMarks_.remove_object(*id);
     else surfaceMarks_.clear();
@@ -2628,6 +2693,14 @@ void state_hash_material(std::uint64_t& hash, const VoxelMaterialDefinition& m) 
     }
     if(material_has_normal_map(m)){state_hash_value(hash,m.normalMap->contentHash);state_hash_value(hash,m.normalMapTileMeters);state_hash_value(hash,m.normalMapStrength);state_hash_value(hash,m.normalMapSharpness);}
     if(m.surfaceDetail.pattern!=SurfacePattern::NoPattern)state_hash_value(hash,material_surface_detail_hash(m.surfaceDetail));
+    // Texture sets, displacement, layer rules and anti-tiling: only when used (older hashes keep).
+    if (material_has_textures(m)) {
+        for (const auto* map : {m.baseColorMap.get(), m.ormMap.get(), m.heightMap.get(), m.emissiveMap.get()})
+            state_hash_value(hash, map ? map->contentHash : std::uint64_t{0});
+        state_hash_value(hash, m.textureTileMeters); state_hash_value(hash, m.textureSharpness);
+    }
+    if (material_has_displacement_settings(m)) { state_hash_value(hash, m.displacementDepthMeters); state_hash_value(hash, m.displacementMode); }
+    if (material_has_rules(m)) state_hash_value(hash, material_rules_hash(m));
     state_hash_value(hash, m.densityKilogramsPerCubicMeter); state_hash_value(hash, m.structuralStrength);
     state_hash_value(hash, m.fractureResistance); state_hash_value(hash, m.flammability);
     state_hash_value(hash, m.thermalConductivity); state_hash_value(hash, m.transparent);

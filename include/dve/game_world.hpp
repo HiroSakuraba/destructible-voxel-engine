@@ -530,6 +530,18 @@ public:
     // carving; uses the settings' strengths. False for an unknown object or when disabled.
     bool add_surface_mark(GameObjectId id, Float3 worldCenter, float radiusMeters);
     void clear_surface_marks(std::optional<GameObjectId> id = std::nullopt);
+    // Runtime material editing (the Lua texturing controls). object_materials is the object's
+    // own table (empty for markers and polygon objects). set_object_material replaces the
+    // visual part of slot `index`: the slot's physical fields (density, strength, fracture
+    // resistance, flammability, conduction, structural, transparency) are kept, so mass and
+    // destruction behave as before. Layers must reference slots of the same table, with no
+    // cycles. add_object_material appends a slot no voxel uses (a layer's source, e.g. a
+    // weathering recipe) and returns its index. Fragments split off later copy the table;
+    // saves store edited tables inline.
+    [[nodiscard]] std::span<const VoxelMaterialDefinition> object_materials(GameObjectId id) const;
+    bool set_object_material(GameObjectId id, std::size_t index, VoxelMaterialDefinition material, std::string* error = nullptr);
+    [[nodiscard]] std::optional<std::size_t> add_object_material(GameObjectId id, VoxelMaterialDefinition material,
+                                                                 std::string* error = nullptr);
 
     // Nearest hit across every object with voxel data, or nullopt. Static and dynamic objects
     // are both tested at their current transform.

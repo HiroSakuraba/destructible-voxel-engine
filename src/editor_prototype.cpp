@@ -70,6 +70,7 @@ bool export_prototype_project(const EditorDocument& d,const EditorMaterialLibrar
  bool keep{};~Cleanup(){if(!keep){std::error_code ec;
  std::filesystem::remove_all(path,ec);}}} cleanup{root};
  const bool racing=std::any_of(d.objects().begin(),d.objects().end(),[](const auto& p){return find_component_by_type(p.second.components,"dve.prototype.race_car")!=nullptr;});
+ const bool mecha=std::any_of(d.objects().begin(),d.objects().end(),[](const auto& p){return find_component_by_type(p.second.components,"dve.prototype.mech_player")!=nullptr;});
  const bool submarine=std::any_of(d.objects().begin(),d.objects().end(),
      [](const auto& p){for(const auto& c:p.second.components)
         if(c.type=="dve.prototype.water_vessel"){
@@ -79,7 +80,7 @@ bool export_prototype_project(const EditorDocument& d,const EditorMaterialLibrar
         }return false;});
  const bool water=std::any_of(d.objects().begin(),d.objects().end(),[](const auto& p){return find_component_by_type(p.second.components,"dve.prototype.water_ocean")!=nullptr;});
  const bool flying=std::any_of(d.objects().begin(),d.objects().end(),[](const auto& p){return find_component_by_type(p.second.components,"dve.prototype.flight_vehicle")!=nullptr;});
- EditorProject project;project.name=submarine?"Deep Explorer Mini-Sub":water?"Water Ships Test Range":flying?"Wind Garden Flight":racing?"Racing Time Trial":"First Person Prototype";project.root=root;project.recentScenes={"scenes/prototype.dvescene"};
+ EditorProject project;project.name=mecha?"Iron Yard - Mecha Combat":submarine?"Deep Explorer Mini-Sub":water?"Water Ships Test Range":flying?"Wind Garden Flight":racing?"Racing Time Trial":"First Person Prototype";project.root=root;project.recentScenes={"scenes/prototype.dvescene"};
  if(!project.initialize(&reason))return fail(reason);
  auto copy=clone_editor_document(d);
  auto saved=copy.save_transactional(root/"scenes"/"prototype.dvescene");
@@ -88,6 +89,16 @@ bool export_prototype_project(const EditorDocument& d,const EditorMaterialLibrar
  if(!exported.success)return fail(exported.error);
  GameManifest manifest;manifest.name=project.name;manifest.version="0.1.0";manifest.entryScene="scenes/prototype.dvoxscene.json";
  manifest.inputBindings={{"move_x","key:a/-1,key:d/+1,gamepad:leftx"},{"move_y","key:s/-1,key:w/+1,gamepad:lefty/-1"},{"look_x","key:j/-1,key:l/+1,gamepad:rightx"},{"look_y","key:i/-1,key:k/+1,gamepad:righty"},{"jump","key:space,gamepad:south"},{"crouch","key:left ctrl,gamepad:east"},{"interact","key:e,gamepad:west"},{"pause","key:p,gamepad:start"},{"restart","key:r,gamepad:back"},{"prototype_debug","key:f3"}};
+ if(mecha)manifest.inputBindings={
+  {"move_x","key:a/-1,key:d/+1,gamepad:leftx"},
+  {"move_y","key:s/-1,key:w/+1,gamepad:lefty/-1"},
+  {"look_x","key:j/-1,key:l/+1,gamepad:rightx"},
+  {"look_y","key:k/-1,key:i/+1,gamepad:righty/-1"},
+  {"mech_primary","mouse:left,gamepad:righttrigger"},
+  {"mech_secondary","mouse:right,gamepad:lefttrigger"},
+  {"mech_boost","key:left shift,gamepad:south"},
+  {"pause","key:p,gamepad:start"},{"restart","key:r,gamepad:back"},
+  {"prototype_debug","key:f3"}};
  if(racing)manifest.inputBindings["race_brake"]="key:b/+1,gamepad:lefttrigger";
  if(submarine){manifest.inputBindings={
    {"move_y","key:s/-1,key:w/+1,gamepad:lefty/-1"},
@@ -125,6 +136,8 @@ bool export_prototype_project(const EditorDocument& d,const EditorMaterialLibrar
  if(!game)return fail("Cannot write game manifest");
  std::ofstream readme(root/"README.md");readme<<"# First-person prototype\n\nOpen project.dveproject and scenes/prototype.dvescene in the editor, or run dve_player with this directory.\n\nWASD: move; mouse or IJKL: look; Space: jump; Ctrl: crouch; E: use; P: pause; R: restart; F3: event trace. Gamepad sticks, South/East/West/Start/Back are bound too.\n\nCollect three yellow objects. Use the green switch to open the door. Reach the checkpoint, cross the red damage strip and enter the blue goal. Z is up. Lua is optional.\n\nPackage with dve_pack NEW_PROJECT NEW_GAME.dvepak --all, then launch dve_player NEW_GAME.dvepak.\n";if(racing){readme.close();readme.open(root/"README.md",std::ios::trunc);readme<<"# Racing time trial\n\nOpen project.dveproject and scenes/prototype.dvescene in the editor, or launch dve_player with this directory.\n\nW/S: throttle and reverse (opposite direction brakes). B / left trigger: independent service brake. A/D: steer. Space: handbrake. Ctrl: recover to last ordered gate (+5 seconds). E: chase/hood camera. P: pause. R: new attempt. Gamepad left stick drives, South is handbrake, East recovery, West camera, Start pause, Back restart.\n\nWait for the countdown, drive counterclockwise around the central barrier, and pass gates 1, 2, 3, then finish gate 0 in the arrow direction. Complete three laps. Shortcut and reverse crossings do not advance the lap. Best lap survives restart within the session and save/load. Z is up. This is portable arcade capsule collision, not Jolt suspension simulation.\n\nPackage with dve_pack NEW_PROJECT NEW_GAME.dvepak --all; launch dve_player NEW_GAME.dvepak.\n";}if(flying){readme.close();readme.open(root/"README.md",std::ios::trunc);
  readme<<"# Wind Garden: Six Form Flight\n\nOpen project.dveproject in the editor or run dve_player with this project folder.\n\nW/S pitch or hover forward/back; A/D bank or hover strafe; Q/E rudder; Shift/Ctrl throttle; Arrow Up/Down hover climb; Space bird flap; B airbrake; Tab/Backspace mode cycle; 1..6 direct mode requests (Float, Glider, Biplane, Jet, Hover, Bird); C camera; X recovery; P pause; R restart; F3 flight diagnostics. Gamepad sticks, shoulders, triggers and face buttons are bound.\n\nPass the six colored sky gates in order, matching the form written in the HUD. Glide has no motor; Float is buoyant; Hover consumes battery. Fly through the orange updraft around X=50, Y=280 to soar. Transitions preserve position and momentum. Jet cannot instantly stop when changing to Hover.\n\nThis is a portable Z-up arcade aerodynamic prototype, not a certified or high-fidelity simulator. Deeper weather, vehicle morph meshes and flight audio are later batches. Package with dve_pack NEW_PROJECT NEW_GAME.dvepak --all.\n";
+ }if(mecha){readme.close();readme.open(root/"README.md",std::ios::trunc);
+ readme<<"# Iron Yard: M1/M2 Mecha Combat\\n\\nRun dve_player with this project directory.\\nWASD move; mouse or J/L rotate cannon turret; I/K plus J/L aim with gamepad right stick.\\nShift boost, mouse left autocannon, mouse right rockets. P pause, R restart, F3 debug.\\nDestroy three static targets. Chassis and turret rotate independently. The reference renderer is CPU.\\nIn this M1/M2 demo polygon cover blocks shots but is not destructible: voxel cover, AI, sound and combat saves are later batches.\\n";
  }if(submarine){readme.close();readme.open(root/"README.md",std::ios::trunc);
  readme<<"# Deep Explorer: Mini-Submarine\n\nW/S forward/aft; A/D yaw; Space/Ctrl rise/dive; Q/E lateral thrusters; Z/X pump ballast out/in; Up/Down pitch; H toggle depth hold; P pause; R reset; F3 instruments.\n\nDescend toward the wreck at Y=80, Z=-30. The sea and pressure use the shared OceanField plus underwater volume; the seafloor is real collision at Z=-40. Use ballast for neutral trim, thrusters for active movement, and depth hold for station keeping. This S1 prototype does not include depth-dependent rendered fog, submarine headlamps or mission scoring; those are S2/S3.\n";
  }else if(water){readme.close();readme.open(root/"README.md",std::ios::trunc);

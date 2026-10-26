@@ -24,7 +24,7 @@ void mesh_part(CookedPolygonAsset& out,Float3 pos,Float3 size,unsigned mat){
 }
 }
 EditorDocument make_mecha_starter(){
- EditorDocument d("Iron Yard - Mecha Combat M1/M2");
+ EditorDocument d("Iron Yard - Mecha Combat M1-M4");
  auto box=[&](std::string label,Float3 pos,Float3 size,Float4 color,bool collide)->EditorObject&{
   EditorObject o(d.allocate_object_id(),std::move(label));
   o.flags.anchored=true;o.flags.collisionEnabled=collide;o.transform.position=pos;
@@ -41,6 +41,19 @@ EditorDocument make_mecha_starter(){
  box("Freight container A",{-12,11,2},{5,8,4},{.56F,.28F,.13F,1},true);
  box("Freight container B",{12,22,2},{8,4,4},{.22F,.38F,.56F,1},true);
  box("Warehouse wall",{-11,37,3},{14,1.8F,6},{.43F,.43F,.42F,1},true);
+ // M3: exported voxel cover rather than unmodifiable polygon facades.
+ auto voxelWall=[&](std::string name,Float3 pos,int halfWidth){
+  EditorObject o(d.allocate_object_id(),std::move(name));
+  o.flags.anchored=true;o.flags.collisionEnabled=true;o.flags.structural=true;
+  o.transform.position=pos;o.voxelSizeMeters=.65F;
+  for(int x=-halfWidth;x<=halfWidth;++x)
+   for(int y=-1;y<=1;++y)
+    for(int z=0;z<7;++z)
+     (void)o.voxels->set_voxel({x,y,z},MaterialId{2});
+  d.add_object(std::move(o));
+ };
+ voxelWall("Destructible Front Barricade",{0,-3,.03F},8);
+ voxelWall("Destructible Warehouse Cover",{7,39,.03F},6);
 
  // Kinematic player: model has no rigid body, the runtime moves a swept capsule.
  auto& chassis=box("Player Mech Chassis",{0,-23,.05F},{2.7F,3.5F,2.1F},
@@ -75,6 +88,11 @@ EditorDocument make_mecha_starter(){
   target.components.push_back(role("mech_target","target"+std::to_string(i+1)));
   target.components.back().properties["health"]=i==2?160.0:90.0;
   target.components.back().properties["hit_radius"]=1.7;
+   target.components.back().properties["ai_kind"]=std::int64_t(i==0?1:i==1?2:3);
+   target.components.back().properties["move_speed"]=i==0?5.0:i==1?2.8:0.0;
+   target.components.back().properties["attack_range"]=i==2?38.0:30.0;
+   target.components.back().properties["damage_per_shot"]=i==1?8.0:4.0;
+   target.components.back().properties["shot_interval"]=i==1?2.0:1.4;
  }
  EditorObject rules(d.allocate_object_id(),"Mecha Rules");
  rules.flags.anchored=true;rules.flags.collisionEnabled=false;

@@ -33,9 +33,9 @@ jobs:
       - name: Configure isolated region index targets within DVE
         shell: bash
         run: |
-          sanitize=""
+          sanitize_args=()
           if [ "${{ matrix.mode }}" = sanitized ]; then
-            sanitize="-DCMAKE_CXX_FLAGS=-fsanitize=address,undefined -fno-omit-frame-pointer -DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address,undefined"
+            sanitize_args=("-DCMAKE_CXX_FLAGS=-fsanitize=address,undefined -fno-omit-frame-pointer" "-DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address,undefined")
           fi
           cmake -S . -B build-region -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.mode == 'release' && 'Release' || 'Debug' }} \
             -DDVE_EXPERIMENTAL_REGION_INDEX=ON \
@@ -50,7 +50,7 @@ jobs:
             -DDVE_ENABLE_VFX_PARTICLES=OFF -DDVE_ENABLE_PBF_LIQUID=OFF \
             -DDVE_ENABLE_SIMULATION_ENERGY_COMPILER=OFF -DDVE_ENABLE_BSPLINE_CLOTH=OFF \
             -DDVE_ENABLE_GRID_FLUIDS=OFF -DDVE_ENABLE_FLIP_LIQUIDS=OFF \
-            $sanitize
+            "${sanitize_args[@]}"
       - name: Build region contract tests
         run: cmake --build build-region --target dve_region_catalog_tests --parallel 2
       - name: Run region contract tests

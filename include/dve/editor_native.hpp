@@ -644,6 +644,18 @@ public:
     void open_material_panel();
     void close_material_panel();
     bool apply_material_panel(bool editSlot = false);
+    // Adds a weathering recipe (dve/weathering.hpp) as a rule-driven layer: to every material the
+    // selected voxels use (the whole object without a voxel selection) and, on polygon objects,
+    // to the material panel's slot. Each target gets the recipe's source material in a free
+    // slot. One undo step.
+    bool weather_selection(WeatheringKind kind, float amount);
+    // The material a voxel object shows for `id`: its palette entry, else the library's.
+    [[nodiscard]] std::optional<VoxelMaterialDefinition> voxel_layer_material(const EditorObject& object, MaterialId id) const;
+    // Texture-set maps on the material panel's draft (Apply then assigns them to voxels): slot 0
+    // base colour, 1 ORM, 2 height, 3 emission, read as PNG or JPEG (relative paths from the
+    // project). Materials > Import ... Map uses the Assets panel's selected image.
+    bool material_panel_import_map(unsigned slot, const std::filesystem::path& path);
+    void material_panel_clear_maps();
     bool load_material_panel_slot();
     // Layer edits affect assigned polygon slots immediately, one undo transaction each.
     bool material_panel_bake_source(bool showSource);

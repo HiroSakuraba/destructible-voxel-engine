@@ -23,6 +23,7 @@
 #include "dve/render/polygon_renderer.hpp"
 #include "dve/render/cpu_fog.hpp"
 #include "dve/render_environment.hpp"
+#include "dve/surface_marks.hpp"
 #include "dve/prototype_game.hpp"
 #include "dve/water_ocean.hpp"
 #include "dve/underwater_optics.hpp"
@@ -46,6 +47,10 @@ struct PlayerRenderView {
     const WaterVolumeSettings* waterVolume{};
     std::span<const UnderwaterLamp> underwaterLamps{};
     std::span<const WaterSprayEffect> waterSpray{};
+    // Damage marks on voxel objects (object-local metres; GameWorld::surface_marks()) and decals
+    // (world metres). CPU renderer only.
+    std::span<const SurfaceMark> surfaceMarks{};
+    std::span<const MaterialDecal> decals{};
 };
 
 struct PlayerRenderStats {

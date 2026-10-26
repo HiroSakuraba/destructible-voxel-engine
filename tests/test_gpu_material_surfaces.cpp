@@ -29,7 +29,7 @@ std::vector<std::byte> load(const std::filesystem::path& p){std::ifstream in(p,s
 BufferHandle buffer(VulkanDevice& d,std::size_t size){BufferDesc b;b.bytes=size;b.usage=BufferUsage::Storage|BufferUsage::CopySource|BufferUsage::CopyDestination;b.memory=MemoryDomain::Upload;b.initialState=ResourceState::ShaderRead;auto out=d.create_buffer(b,&error);check(bool(out),"Buffer");return out;}
 void analytic_conformance(VulkanDevice& d,const std::filesystem::path& root){
     std::vector<GpuMaterialSurfaceDetail> records;std::vector<Float4> positions,expected;
-    for(unsigned pattern=0;pattern<=5;++pattern)for(unsigned seed:{1U,7U,65520U,0xffffffffU})
+    for(unsigned pattern=0;pattern<=8;++pattern)for(unsigned seed:{1U,7U,65520U,0xffffffffU})
     for(float width:{0.F,.0001F,.003F,.3F})for(float sign:{-1.F,1.F}){
         MaterialSurfaceDetail m;m.pattern=SurfacePattern(pattern);m.periodMeters=.013F;m.rotationRadians={.2F,-.4F,.7F};m.seed=seed;m.grainStretch=31;
         Float3 p{sign*.0123F,.038F,-.024F};auto s=sample_surface_pattern(m,p,width);

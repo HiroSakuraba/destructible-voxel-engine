@@ -38,7 +38,7 @@ constexpr std::array<MaterialPresetControl, unsigned(MaterialPresetProperty::Cou
     {MaterialPresetProperty::CoatRoughness,"Coat roughness","","Spread of coat highlight",0,1,.025F,false},
     {MaterialPresetProperty::DetailScale,"Detail repeat","m","One repeat in object space",.0001F,10000,.01F,true},
     {MaterialPresetProperty::DetailStrength,"Detail strength","","Normal-map tilt; does not displace geometry",0,4,.05F,true},
-    {MaterialPresetProperty::Pattern,"Surface pattern","","0 none, 1 wood, 2 leather, 3 paper, 4 mineral, 5 paint",0,5,1,true},
+    {MaterialPresetProperty::Pattern,"Surface pattern","","0 none, 1 wood, 2 leather, 3 paper, 4 mineral, 5 paint, 6 marble, 7 strata, 8 cellular stone",0,8,1,true},
     {MaterialPresetProperty::DetailSpace,"Detail mapping","","0 object metres, 1 world metres, 2 UV0, 3 UV1",0,3,1,false},
     {MaterialPresetProperty::PatternScale,"Pattern repeat","m","Physical grain/pores repeat; changing geometry size does not stretch it",.00001F,10000,.001F,false},
     {MaterialPresetProperty::PatternRotationX,"Grain turn X","rad","Rotate the complete procedural field about X",-10000,10000,.1F,true},
@@ -60,7 +60,12 @@ constexpr std::array<MaterialPresetControl, unsigned(MaterialPresetProperty::Cou
     {MaterialPresetProperty::SheenRoughness,"Sheen roughness","","Spread of the Charlie sheen lobe",0,1,0.025F,false},
     {MaterialPresetProperty::Iridescence,"Thin-film weight","","Blend ordinary Fresnel with thin-film reflection",0,1,0.05F,false},
     {MaterialPresetProperty::FilmIor,"Film IOR","","Refractive index of the film itself",1,3,0.025F,false},
-    {MaterialPresetProperty::FilmThickness,"Film thickness","nm","Physical thin-film thickness; zero removes the film",0,100000,10.0F,false}
+    {MaterialPresetProperty::FilmThickness,"Film thickness","nm","Physical thin-film thickness; zero removes the film",0,100000,10.0F,false},
+    {MaterialPresetProperty::TextureTile,"Texture repeat","m","One repeat of the texture set (colour, ORM, height, emission maps)",.0001F,10000,.05F,false},
+    {MaterialPresetProperty::TextureSharpness,"Texture blend","","Triplanar blend exponent: higher keeps each face's projection crisper",1,64,1,true},
+    {MaterialPresetProperty::TextureAntiTiling,"Anti-tiling","tiles","Randomly offset tiles blended across this band; 0 shows the plain repeat",0,.5F,.05F,false},
+    {MaterialPresetProperty::DisplacementDepth,"Displacement depth","m","How deep the height map or surface pattern carves voxel faces (capped at half a voxel); 0 is off",0,10,.005F,false},
+    {MaterialPresetProperty::DisplacementMode,"Displacement mode","","0 traced (real relief: outlines, shadows), 1 parallax (shading only)",0,1,1,false}
 }};
 std::string lower(std::string_view s) { std::string r(s); for(char& c:r)c=char(std::tolower(static_cast<unsigned char>(c))); return r; }
 void physical(VoxelMaterialDefinition& to,const VoxelMaterialDefinition& from) {
@@ -86,6 +91,8 @@ float material_preset_value(const VoxelMaterialDefinition& m, MaterialPresetProp
     VALUE(PatternScale,surfaceDetail.periodMeters) VALUE(PatternRotationX,surfaceDetail.rotationRadians.x) VALUE(PatternRotationY,surfaceDetail.rotationRadians.y) VALUE(PatternRotationZ,surfaceDetail.rotationRadians.z)
     VALUE(GrainStretch,surfaceDetail.grainStretch) VALUE(ColorVariation,surfaceDetail.colorVariation) VALUE(RoughnessVariation,surfaceDetail.roughnessVariation) VALUE(BumpHeight,surfaceDetail.bumpHeightMeters) VALUE(UvTileMeters,surfaceDetail.uvTileMeters)
 VALUE(ScatterDistance,subsurfaceScatterDistanceMeters) VALUE(ScatterR,subsurfaceColor.x) VALUE(ScatterG,subsurfaceColor.y) VALUE(ScatterB,subsurfaceColor.z) VALUE(SheenR,sheenColor.x) VALUE(SheenG,sheenColor.y) VALUE(SheenB,sheenColor.z) VALUE(SheenRoughness,sheenRoughness) VALUE(Iridescence,iridescence) VALUE(FilmIor,iridescenceIor) VALUE(FilmThickness,iridescenceThicknessNm)
+    VALUE(TextureTile,textureTileMeters) VALUE(TextureSharpness,textureSharpness) VALUE(TextureAntiTiling,textureAntiTiling) VALUE(DisplacementDepth,displacementDepthMeters)
+    case MaterialPresetProperty::DisplacementMode:return float(m.displacementMode);
 #undef VALUE
     default:return 0;
     }
@@ -94,7 +101,7 @@ bool set_material_preset_value(VoxelMaterialDefinition& m,MaterialPresetProperty
     const auto i=unsigned(p); if(i>=controls.size()||!std::isfinite(v)||v<controls[i].minimum||v>controls[i].maximum)
         return fail(e,"Value outside the displayed finite range");
     auto edited=m;
-    const bool integer=p==MaterialPresetProperty::Pattern||p==MaterialPresetProperty::DetailSpace||p==MaterialPresetProperty::PatternSeed;
+    const bool integer=p==MaterialPresetProperty::Pattern||p==MaterialPresetProperty::DetailSpace||p==MaterialPresetProperty::PatternSeed||p==MaterialPresetProperty::DisplacementMode;
     if(integer&&std::floor(v)!=v)return fail(e,"This control requires an integer");
     switch(p){
 #define SET(P,V) case MaterialPresetProperty::P:edited.V=v;break;
@@ -110,6 +117,8 @@ bool set_material_preset_value(VoxelMaterialDefinition& m,MaterialPresetProperty
     SET(PatternScale,surfaceDetail.periodMeters) SET(PatternRotationX,surfaceDetail.rotationRadians.x) SET(PatternRotationY,surfaceDetail.rotationRadians.y) SET(PatternRotationZ,surfaceDetail.rotationRadians.z)
     SET(GrainStretch,surfaceDetail.grainStretch) SET(ColorVariation,surfaceDetail.colorVariation) SET(RoughnessVariation,surfaceDetail.roughnessVariation) SET(BumpHeight,surfaceDetail.bumpHeightMeters) SET(UvTileMeters,surfaceDetail.uvTileMeters)
 SET(ScatterDistance,subsurfaceScatterDistanceMeters) SET(ScatterR,subsurfaceColor.x) SET(ScatterG,subsurfaceColor.y) SET(ScatterB,subsurfaceColor.z) SET(SheenR,sheenColor.x) SET(SheenG,sheenColor.y) SET(SheenB,sheenColor.z) SET(SheenRoughness,sheenRoughness) SET(Iridescence,iridescence) SET(FilmIor,iridescenceIor) SET(FilmThickness,iridescenceThicknessNm)
+    SET(TextureTile,textureTileMeters) SET(TextureSharpness,textureSharpness) SET(TextureAntiTiling,textureAntiTiling) SET(DisplacementDepth,displacementDepthMeters)
+    case MaterialPresetProperty::DisplacementMode:edited.displacementMode=static_cast<std::uint8_t>(v);break;
 #undef SET
     default:return false;
     }
@@ -304,6 +313,15 @@ MaterialPresetCatalog MaterialPresetCatalog::starter(){
     put(detail("mineral.chalk","Chalk","Mineral",{.74F,.73F,.7F},.98F,SurfacePattern::Mineral,.0008F,.000004F,.06F));
     put(detail("mineral.concrete","Concrete surface","Mineral",{.35F,.36F,.37F},.87F,SurfacePattern::Mineral,.01F,.00015F,.25F));
     auto ceramic=detail("mineral.ceramic-glazed","Glazed ceramic","Mineral",{.55F,.65F,.7F},.5F,SurfacePattern::Mineral,.002F,.000001F,.05F);coat(ceramic,.08F);put(std::move(ceramic));
+    // Solid-texture stone: the pattern continues through the volume, so cuts and craters show it;
+    // with a displacement depth it is also the height that carves the faces.
+    const auto stone=[&](std::string id,std::string name,Float3 color,float rough,SurfacePattern pattern,float repeat,float bump,float variation,float stretch,const char* tags){
+        auto a=detail(std::move(id),std::move(name),"Stone",color,rough,pattern,repeat,bump,variation);a.defaults.surfaceDetail.grainStretch=stretch;a.tags+=tags;
+        a.description="Original procedural solid texture: color, roughness and bump continue through the volume. Set a displacement depth to carve it into voxel faces.";return a;
+    };
+    put(stone("stone.marble","Polished marble",{.80F,.79F,.76F},.3F,SurfacePattern::Marble,.25F,.00002F,.35F,24," veined calcite polished solid"));
+    put(stone("stone.sandstone","Layered sandstone",{.62F,.45F,.30F},.9F,SurfacePattern::Strata,.08F,.002F,.25F,40," strata sedimentary layered cliff solid"));
+    put(stone("stone.cobble","Cobblestone",{.42F,.41F,.40F},.85F,SurfacePattern::Cellular,.2F,.02F,.3F,20," cobbles flagstone voronoi pavement solid"));
     auto lacquer=detail("paint.lacquer","Lacquer","Paint",{.18F,.02F,.01F},.25F,SurfacePattern::Paint,.002F,.000002F,.02F);coat(lacquer,.05F);put(std::move(lacquer));
     for(unsigned i=0;i<3;++i){auto a=add(i==0?"glass.amber":i==1?"glass.smoked":"liquid.water",i==0?"Amber bottle glass":i==1?"Smoked glass":"Clear water",i==2?"Liquid":"Glass",{1,1,1},0);
         a.tags+=" refractive transparent dielectric";a.defaults.transmission=1;a.defaults.transparent=true;a.defaults.indexOfRefraction=i==2?1.333F:1.5F;

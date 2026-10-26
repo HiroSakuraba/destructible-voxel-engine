@@ -24,7 +24,7 @@ namespace {
 
 constexpr std::array<char, 8> kMagic{'D','V','E','M','E','S','H','1'};
 constexpr std::uint16_t kMajor = 1;
-constexpr std::uint16_t kMinor = 8;
+constexpr std::uint16_t kMinor = 10;   // 9: solid-texture surface patterns (no new fields); 10: layer rules, anti-tiling
 // Files without material optics are still written as v1.3 (byte-identical to before).
 constexpr std::uint16_t kMinorWithoutOptics = 3;
 constexpr std::uint64_t kFnvOffset = 1469598103934665603ULL;
@@ -107,6 +107,9 @@ void hash_material(std::uint64_t& h, const VoxelMaterialDefinition& m) noexcept 
     if(m.surfaceDetail.pattern!=SurfacePattern::NoPattern)hash_scalar(h,material_surface_detail_hash(m.surfaceDetail));
     if(!m.preset.id.empty()){hash_string(h,m.preset.id);hash_scalar(h,m.preset.revision);hash_scalar(h,m.preset.overrides);}
     if(material_has_normal_map(m)){hash_scalar(h,m.normalMap->contentHash);hash_scalar(h,m.normalMapTileMeters);hash_scalar(h,m.normalMapStrength);hash_scalar(h,m.normalMapSharpness);}
+    if(material_has_textures(m)){for(const auto* map:{m.baseColorMap.get(),m.ormMap.get(),m.heightMap.get(),m.emissiveMap.get()})hash_scalar(h,map?map->contentHash:std::uint64_t{0});hash_scalar(h,m.textureTileMeters);hash_scalar(h,m.textureSharpness);}
+    if(material_has_displacement_settings(m)){hash_scalar(h,m.displacementDepthMeters);hash_scalar(h,m.displacementMode);}
+    if(material_has_rules(m))hash_scalar(h,material_rules_hash(m));
 }
 
 class Writer {
@@ -177,6 +180,8 @@ void write_material(Writer& w,const VoxelMaterialDefinition& m,std::uint16_t min
     if(minor>=6U){w.u8(static_cast<std::uint8_t>(m.surfaceDetail.pattern));w.u8(static_cast<std::uint8_t>(m.surfaceDetail.space));w.u32(m.surfaceDetail.seed);for(float v:surface_detail_values(m.surfaceDetail))w.f32(v);}
     if(minor>=7U){w.f32(m.sheenColor.x);w.f32(m.sheenColor.y);w.f32(m.sheenColor.z);w.f32(m.sheenRoughness);}
     if(minor>=8U){w.f32(m.iridescence);w.f32(m.iridescenceIor);w.f32(m.iridescenceThicknessNm);}
+    // 10: layer rules and texture anti-tiling.
+    if(minor>=10U){w.f32(m.textureAntiTiling);for(const auto& l:m.layers){w.u8(l.rules.enabled?1U:0U);if(!l.rules.enabled)continue;w.u32(l.rules.seed);for(float v:material_layer_rule_values(l.rules))w.f32(v);}}
 
 }
 VoxelMaterialDefinition read_material(Reader& r,std::uint16_t minor){
@@ -199,9 +204,11 @@ VoxelMaterialDefinition read_material(Reader& r,std::uint16_t minor){
             m.normalMap=make_voxel_normal_map(std::move(name),width,height,std::move(pixels));if(!material_normal_map_valid(m))throw std::runtime_error("invalid normal map");}
     }
     if(minor>=6U){m.surfaceDetail.pattern=SurfacePattern(r.u8());m.surfaceDetail.space=SurfaceDetailSpace(r.u8());m.surfaceDetail.seed=r.u32();
-        std::array<float,kSurfaceDetailFloatCount> values{};for(float& v:values)v=r.f32();set_surface_detail_values(m.surfaceDetail,values);if(!material_surface_detail_valid(m.surfaceDetail))throw std::runtime_error("invalid surface-detail settings");}
+        std::array<float,kSurfaceDetailFloatCount> values{};for(float& v:values)v=r.f32();set_surface_detail_values(m.surfaceDetail,values);if(!material_surface_detail_valid(m.surfaceDetail)||(minor<9U&&surface_pattern_is_solid_texture(m.surfaceDetail.pattern)))throw std::runtime_error("invalid surface-detail settings");}
     if(minor>=7U){m.sheenColor={r.f32(),r.f32(),r.f32()};m.sheenRoughness=r.f32();if(!material_sheen_valid(m))throw std::runtime_error("DMESH material sheen invalid");}
     if(minor>=8U){m.iridescence=r.f32();m.iridescenceIor=r.f32();m.iridescenceThicknessNm=r.f32();if(!material_iridescence_valid(m))throw std::runtime_error("DMESH material iridescence invalid");}
+    if(minor>=10U){m.textureAntiTiling=r.f32();for(auto& l:m.layers){l.rules.enabled=r.u8()!=0;if(!l.rules.enabled)continue;l.rules.seed=r.u32();std::array<float,kMaterialLayerRuleFloatCount> values{};for(float& v:values)v=r.f32();set_material_layer_rule_values(l.rules,values);}
+        if(!material_rules_valid(m))throw std::runtime_error("DMESH material layer rules invalid");}
     return m;
 }
 
@@ -492,7 +499,7 @@ CookedPolygonAsset cook_polygon_scene(const ImportedScene& scene,const PolygonCo
 }
 
 bool write_dmesh(const std::filesystem::path& path,const CookedPolygonAsset& input,std::string* error){
-    try{CookedPolygonAsset a=input;a.contentHash=polygon_asset_content_hash(a);const auto valid=validate_polygon_asset(a);if(!valid)throw std::runtime_error(valid.message);const bool extended=std::any_of(a.materials.begin(),a.materials.end(),[](const auto& m){return !m.preset.id.empty() || material_has_normal_map(m);});const bool details=std::any_of(a.materials.begin(),a.materials.end(),[](const auto& m){return m.surfaceDetail.pattern!=SurfacePattern::NoPattern;});const bool sheen=std::any_of(a.materials.begin(),a.materials.end(),[](const auto& m){return material_has_sheen(m);});const bool irid=std::any_of(a.materials.begin(),a.materials.end(),[](const auto& m){return material_has_iridescence(m);});const std::uint16_t minor=irid?8:sheen?7:details?6:extended?5:std::any_of(a.materials.begin(),a.materials.end(),[](const auto& m){return material_has_optics(m);})?4:kMinorWithoutOptics;Writer w;w.bytes(kMagic.data(),kMagic.size());w.u16(kMajor);w.u16(minor);w.u64(a.objectId);w.u64(a.contentHash);w.u32(static_cast<std::uint32_t>(a.materials.size()));w.u32(static_cast<std::uint32_t>(a.images.size()));w.u32(static_cast<std::uint32_t>(a.samplers.size()));w.u32(static_cast<std::uint32_t>(a.textures.size()));w.u64(a.vertices.size());w.u64(a.indices.size());w.u32(static_cast<std::uint32_t>(a.submeshes.size()));w.u32(0);
+    try{CookedPolygonAsset a=input;a.contentHash=polygon_asset_content_hash(a);const auto valid=validate_polygon_asset(a);if(!valid)throw std::runtime_error(valid.message);const bool extended=std::any_of(a.materials.begin(),a.materials.end(),[](const auto& m){return !m.preset.id.empty() || material_has_normal_map(m);});const bool details=std::any_of(a.materials.begin(),a.materials.end(),[](const auto& m){return m.surfaceDetail.pattern!=SurfacePattern::NoPattern;});const bool sheen=std::any_of(a.materials.begin(),a.materials.end(),[](const auto& m){return material_has_sheen(m);});const bool irid=std::any_of(a.materials.begin(),a.materials.end(),[](const auto& m){return material_has_iridescence(m);});const bool solid=std::any_of(a.materials.begin(),a.materials.end(),[](const auto& m){return surface_pattern_is_solid_texture(m.surfaceDetail.pattern);});const bool rules=std::any_of(a.materials.begin(),a.materials.end(),[](const auto& m){return material_has_rules(m);});const std::uint16_t minor=rules?10:solid?9:irid?8:sheen?7:details?6:extended?5:std::any_of(a.materials.begin(),a.materials.end(),[](const auto& m){return material_has_optics(m);})?4:kMinorWithoutOptics;Writer w;w.bytes(kMagic.data(),kMagic.size());w.u16(kMajor);w.u16(minor);w.u64(a.objectId);w.u64(a.contentHash);w.u32(static_cast<std::uint32_t>(a.materials.size()));w.u32(static_cast<std::uint32_t>(a.images.size()));w.u32(static_cast<std::uint32_t>(a.samplers.size()));w.u32(static_cast<std::uint32_t>(a.textures.size()));w.u64(a.vertices.size());w.u64(a.indices.size());w.u32(static_cast<std::uint32_t>(a.submeshes.size()));w.u32(0);
         for(std::size_t i=0;i<a.materials.size();++i){
             write_material(w,a.materials[i],minor);const auto& b=a.materialBindings[i];
             w.u8(b.doubleSided?1U:0U);w.u8(0);w.u16(0);w.f32(b.alphaCutoff);w.f32(b.normalScale);

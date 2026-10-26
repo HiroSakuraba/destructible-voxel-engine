@@ -20,7 +20,15 @@
 #include "dve/render/ray_lighting_reference.hpp"
 #include "dve/render/subsurface.hpp"
 #include "dve/render/surface_shading.hpp"
+#include "dve/render/atmosphere.hpp"
+#include "dve/render/volumetric_fog.hpp"
 #include "dve/voxel_normal_map.hpp"
+#include "dve/voxel_textures.hpp"
+#include "dve/voxel_displacement.hpp"
+#include "dve/master_material.hpp"
+#include "dve/material_layer_rules.hpp"
+#include "dve/material_decal.hpp"
+#include "dve/surface_marks.hpp"
 
 namespace dve::render {
 namespace {
@@ -170,6 +178,9 @@ struct SunExtras {
     // Polygons that ambient-occlusion rays see (sunOccluders and occlusionPolygons).
     std::vector<Occluder> aoOccluders;
     const CausticMap* caustics{};
+    // Damage marks and decals on the voxel surfaces (ReferenceVoxelRenderer::surfaceMarks, decals).
+    std::span<const SurfaceMark> surfaceMarks{};
+    std::span<const MaterialDecal> decals{};
     [[nodiscard]] bool polygon_occluded(Float3 origin, Float3 direction, float maximumDistance) const {
         return nearest(occluders, origin, direction, maximumDistance, true).has_value();
     }
@@ -377,7 +388,7 @@ Float3 global_illumination(const spwi::VoxelSceneTracer& tracer, Float3 point,
         ? voxel_ambient_occlusion(tracer, extras, point, normal, pixelIndex, environment, distances, stats) : 1.0F;
     if (aoOut) *aoOut = ao;
     if (environment.globalIlluminationMode == GlobalIlluminationMode::AmbientHemisphere)
-        return multiply(environment_radiance(environment, normal), environment.globalIlluminationIntensity * ao);
+        return multiply(sky_irradiance(environment, normal), environment.globalIlluminationIntensity * ao);
 
     const std::uint32_t samples = std::clamp(environment.globalIlluminationSamples, 1U, 16U);
     const Float3 origin = add(point, multiply(normal, distances.shadowBias));
@@ -426,7 +437,7 @@ LightPasses shade_voxel(const VoxelMaterialDefinition& material, const RenderEnv
     if (material.shadingModel == MaterialShadingModel::Unlit) { out.emission = base; return out; }
     if (material.shadingModel == MaterialShadingModel::Emissive) { out.emission = add3(base, material.emissive); return out; }
     const Float3 sun = normalize(environment.sunDirection);
-    const Float3 sunIrradiance = multiply(environment.sunColor, environment.sunIntensity);
+    const Float3 sunIrradiance = sun_irradiance(environment);
     const Float3 v = in.viewDirection;
     // Diffuse: base x (1 - metallic) x (1 - F) x sun x sunTerm (Lambert, as shade_direct_light's
     // diffuse lobe x pi, but with the subsurface-diffused sun term where there is one).
@@ -479,10 +490,7 @@ LightPasses shade_voxel(const VoxelMaterialDefinition& material, const RenderEnv
     return out;
 }
 
-// The material's normal map bends the shading normal (dve/voxel_normal_map.hpp, projected in the
-// instance's own space so it moves with the object). Shadow, AO and GI rays keep the geometric
-// normal; the sun's cosine follows the bent one (the subsurface-diffused sun term is an average
-// over the surface around the point and is left as it is).
+
 void apply_scene_lighting(LightPasses &light, const SceneLighting *scene,
                           Float3 point, const VoxelMaterialDefinition &material,
                           const VoxelSurfaceInput &surface,
@@ -502,16 +510,146 @@ void apply_scene_lighting(LightPasses &light, const SceneLighting *scene,
   }
 }
 
-void apply_voxel_normal_map(const VoxelReferenceInstance& instance, const VoxelMaterialDefinition& material,
-                            const RenderEnvironment& environment, Float3 worldPosition, bool diffused, float metersPerVoxel,
-                            VoxelSurfaceInput& surface) noexcept {
-    if (!material_has_normal_map(material)) return;
-    const Float3 local = inverse_transform_point(instance.transform, worldPosition);
-    const Float3 localNormal = normalize(inverse_transform_vector(instance.transform, surface.normal));
-    const Float3 bent = normalize(transform_vector(
-        instance.transform, voxel_normal_map_normal(material, multiply(local, resolve_meters_per_voxel(metersPerVoxel)), localNormal)));
-    if (!diffused) surface.sunTerm = sun_term(bent, environment, surface.visibility);
-    surface.normal = bent;
+
+// Everything a voxel material's images do to one shaded point, in order: parallax (displacement
+// drawn as shading: a Parallax material, or a Traced one beyond the tracer's focus) moves where
+// the images are read and tilts the normal; the normal map bends it further; the texture set
+// colours the shading copy of the material and its occlusion dims the ambient light. Traced
+// displacement already shaped the hit (position and normal) in the tracer.
+// Returns where the maps were read (object space, metres): the hit, or the parallax point.
+Float3 apply_voxel_surface_maps(const spwi::VoxelSceneTracer& tracer, const VoxelReferenceInstance& instance,
+                                VoxelMaterialDefinition& material, const RenderEnvironment& environment, Float3 worldPosition,
+                                Float3 faceNormalWorld, bool diffused, float metersPerVoxel, float footprintMeters,
+                                VoxelSurfaceInput& surface) noexcept {
+    const float units = resolve_meters_per_voxel(metersPerVoxel);
+    Float3 meters = multiply(inverse_transform_point(instance.transform, worldPosition), units);
+    const bool images = material_has_normal_map(material) || material_has_textures(material) || material_has_displacement(material);
+    if (!images) return meters;
+    // The hit's axis-aligned face in object space (for projections and parallax).
+    Float3 face = inverse_transform_vector(instance.transform, faceNormalWorld);
+    const float ax = std::abs(face.x), ay = std::abs(face.y), az = std::abs(face.z);
+    face = ax >= ay && ax >= az ? Float3{face.x > 0 ? 1.0F : -1.0F, 0, 0}
+         : ay >= az            ? Float3{0, face.y > 0 ? 1.0F : -1.0F, 0}
+                               : Float3{0, 0, face.z > 0 ? 1.0F : -1.0F};
+    bool changed = false;
+    if (material_has_displacement(material) && (material.displacementMode == 1U || !tracer.displacement_in_focus(worldPosition))) {
+        const float level = material.heightMap
+            ? std::max(0.0F, std::log2(std::max(footprintMeters, 1.0e-9F) * static_cast<float>(std::max(material.heightMap->width, material.heightMap->height)) /
+                                       std::max(material.textureTileMeters, 1.0e-4F)))
+            : 0.0F;
+        const VoxelParallaxResult parallax = voxel_parallax(material, meters, face, normalize(inverse_transform_vector(instance.transform,
+                                                                                                                         surface.viewDirection)),
+                                                            voxel_displacement_depth(material, units), level);
+        meters = parallax.positionMeters;
+        surface.normal = normalize(transform_vector(instance.transform, parallax.normal));
+        changed = true;
+    }
+    if (material_has_normal_map(material)) {
+        const Float3 localNormal = normalize(inverse_transform_vector(instance.transform, surface.normal));
+        surface.normal = normalize(transform_vector(instance.transform, voxel_normal_map_normal(material, meters, localNormal)));
+        changed = true;
+    }
+    if (material_has_textures(material)) {
+        const VoxelTextureSample maps = sample_voxel_textures(material, meters, face, footprintMeters);
+        apply_voxel_texture_sample(material, maps);
+        surface.ambient = multiply(surface.ambient, maps.occlusion);
+        surface.ambientOcclusion *= maps.occlusion;
+    }
+    if (changed && !diffused) surface.sunTerm = sun_term(surface.normal, environment, surface.visibility);
+    return meters;
+}
+
+// Material layers on voxels: each enabled layer blends its source material over the shaded one
+// by weight x the layer's rules (dve/material_layer_rules.hpp) at this point. A source's own
+// layers are not applied. Returns how many layers covered the point.
+std::uint32_t apply_voxel_material_layers(const VoxelReferenceInstance& instance, VoxelMaterialDefinition& material,
+                                          Float3 worldPosition, Float3 worldNormal, float ambientOcclusion, Float3 mapMeters,
+                                          float metersPerVoxel, float footprintMeters) noexcept {
+    if (material.layers.empty()) return 0U;
+    const std::size_t count = std::min<std::size_t>(material.layers.size(), kMaximumVoxelMaterialLayers);
+    bool rules = false;
+    for (std::size_t i = 0; i < count; ++i) rules = rules || material.layers[i].rules.enabled;
+    const float units = resolve_meters_per_voxel(metersPerVoxel);
+    MaterialLayerRuleContext context;
+    context.worldPositionMeters = multiply(worldPosition, units);
+    context.worldNormal = worldNormal;
+    context.ambientOcclusion = ambientOcclusion;
+    context.footprintMeters = footprintMeters;
+    if (rules) {
+        // The solid cell under the point, its exposed faces and the distance to their edges.
+        const Float3 localWorld = inverse_transform_point(instance.transform, worldPosition);
+        const Float3 localNormal = inverse_transform_vector(instance.transform, worldNormal);
+        const Float3 spacing = instance.spacing;
+        const Float3 cellPoint{localWorld.x / spacing.x - localNormal.x * 1.0e-3F, localWorld.y / spacing.y - localNormal.y * 1.0e-3F,
+                               localWorld.z / spacing.z - localNormal.z * 1.0e-3F};
+        const Int3 cell{static_cast<int>(std::floor(cellPoint.x)), static_cast<int>(std::floor(cellPoint.y)),
+                        static_cast<int>(std::floor(cellPoint.z))};
+        std::uint8_t exposed = 0U;
+        if (instance.object) {
+            const Int3 neighbours[6] = {{cell.x - 1, cell.y, cell.z}, {cell.x + 1, cell.y, cell.z}, {cell.x, cell.y - 1, cell.z},
+                                        {cell.x, cell.y + 1, cell.z}, {cell.x, cell.y, cell.z - 1}, {cell.x, cell.y, cell.z + 1}};
+            for (int k = 0; k < 6; ++k)
+                if (!instance.object->occupied_at(neighbours[k])) exposed = static_cast<std::uint8_t>(exposed | (1U << k));
+        }
+        const float cellMeters = std::min({spacing.x, spacing.y, spacing.z}) * units;
+        context.edgeDistanceMeters =
+            voxel_exposed_edge_distance({cellPoint.x - static_cast<float>(cell.x), cellPoint.y - static_cast<float>(cell.y),
+                                         cellPoint.z - static_cast<float>(cell.z)},
+                                        exposed) * cellMeters;
+        // The base material's height there (height map, else surface pattern).
+        const float ax = std::abs(localNormal.x), ay = std::abs(localNormal.y), az = std::abs(localNormal.z);
+        const Float3 face = ax >= ay && ax >= az ? Float3{localNormal.x > 0 ? 1.0F : -1.0F, 0, 0}
+                          : ay >= az            ? Float3{0, localNormal.y > 0 ? 1.0F : -1.0F, 0}
+                                                : Float3{0, 0, localNormal.z > 0 ? 1.0F : -1.0F};
+        context.baseHeight = material.heightMap ? sample_voxel_height(material, mapMeters, face, 0.0F)
+                           : surface_pattern_is_height_source(material.surfaceDetail)
+                               ? surface_pattern_height(material.surfaceDetail, mapMeters, footprintMeters)
+                               : 0.5F;
+    }
+    std::uint32_t applied = 0U;
+    const VoxelMaterialDefinition base = material;
+    for (std::size_t i = 0; i < count; ++i) {
+        const VoxelMaterialLayer& layer = base.layers[i];
+        if (!layer.enabled || !(layer.weight > 0.0F) || layer.sourceMaterial >= instance.materials.size()) continue;
+        const float coverage = std::clamp(layer.weight, 0.0F, 1.0F) * material_layer_rule_factor(layer.rules, context);
+        if (!(coverage > 0.0F)) continue;
+        material = blend_material_layer(material, instance.materials[layer.sourceMaterial], coverage, layer.blendMode);
+        ++applied;
+    }
+    return applied;
+}
+
+// Damage marks of this object, then decals, on a shaded voxel point. Returns whether the normal
+// changed (decals can carry normals).
+bool apply_voxel_marks_and_decals(const VoxelReferenceInstance& instance, const SunExtras& extras, VoxelMaterialDefinition& material,
+                                  Float3 worldPosition, Float3 mapMeters, float footprintMeters, Float3& normal,
+                                  VoxelReferenceRenderStats& stats) noexcept {
+    if (!extras.surfaceMarks.empty()) {
+        // The same id the pixel reports (RenderTarget::objectId): the instance's own, else its object's.
+        const std::uint64_t markObjectId = instance.objectId != 0U ? instance.objectId : instance.object->id();
+        const SurfaceMarkSample marks = sample_surface_marks(extras.surfaceMarks, markObjectId, mapMeters, footprintMeters);
+        if (marks.any()) { apply_surface_marks(material, marks); ++stats.markedSurfaces; }
+    }
+    if (extras.decals.empty()) return false;
+    MaterialSurfaceSample surface;
+    surface.baseColor = material.baseColor;
+    surface.normal = normal;
+    surface.metallic = material.metallic;
+    surface.roughness = material.roughness;
+    surface.emissive = material.emissive;
+    surface.opacity = material.baseColor.w;
+    MaterialDecalCompositeStats decalStats;
+    const MaterialSurfaceSample out = composite_material_decals(surface, worldPosition, normal, extras.decals, &decalStats);
+    if (decalStats.applied == 0U) return false;
+    ++stats.decalSurfaces;
+    material.baseColor = out.baseColor;
+    material.baseColor.w = out.opacity;
+    material.metallic = out.metallic;
+    material.roughness = out.roughness;
+    material.emissive = out.emissive;
+    const bool turned = out.normal.x != normal.x || out.normal.y != normal.y || out.normal.z != normal.z;
+    normal = out.normal;
+    return turned;
 }
 
 // Writes the pixel's render passes (polygon_renderer.hpp) when the target has them. The shadow pass
@@ -648,10 +786,18 @@ VoxelReferenceRenderStats render_radiance_cascades(
                                       environment, distances, stats) : 1.0F;
         VoxelSurfaceInput surface{texel.normal, normalize(subtract(gbuffer.cameraPosition, texel.position)), visibility,
                                   sunShare, gi.indirect[index], ao, caustic, transmitted};
-        apply_voxel_normal_map(instance, material, environment, texel.position, diffuses(material, distances),
-                               distances.metersPerVoxel, surface);
+        const Float3 mapMeters = apply_voxel_surface_maps(tracer, instance, material, environment, texel.position, texel.normal, diffuses(material, distances),
+                                 distances.metersPerVoxel,
+                                 length(subtract(gbuffer.cameraPosition, texel.position)) * distances.metersPerVoxel * 2.0F *
+                                     std::tan(camera.verticalFieldOfViewRadians * 0.5F) / static_cast<float>(target.height),
+                                 surface);
         const float footprint=length(subtract(gbuffer.cameraPosition,texel.position))*distances.metersPerVoxel*2*std::tan(camera.verticalFieldOfViewRadians*.5F)/float(target.height);
-        apply_material_surface_detail(material,surface.normal,{multiply(inverse_transform_point(instance.transform,texel.position),distances.metersPerVoxel),multiply(texel.position,distances.metersPerVoxel),{},{},false,instance.transform,{1,0,0},{0,1,0},footprint});
+        apply_material_surface_detail(material,surface.normal,{mapMeters,multiply(transform_point(instance.transform,multiply(mapMeters,1/resolve_meters_per_voxel(distances.metersPerVoxel))),distances.metersPerVoxel),{},{},false,instance.transform,{1,0,0},{0,1,0},footprint});
+        stats.layeredSurfaces += apply_voxel_material_layers(instance, material, texel.position, surface.normal, surface.ambientOcclusion, mapMeters,
+                                                             distances.metersPerVoxel, footprint) > 0U ? 1U : 0U;
+        if (apply_voxel_marks_and_decals(instance, extras, material, texel.position, mapMeters, footprint, surface.normal, stats) &&
+            !diffuses(material, distances))
+            surface.sunTerm = sun_term(surface.normal, environment, surface.visibility);
         if(material.surfaceDetail.pattern!=SurfacePattern::NoPattern && !diffuses(material, distances))surface.sunTerm=sun_term(surface.normal,environment,surface.visibility);
         const LightPasses light = shade_voxel(material, environment, surface);
         target.hdrColor[index] = beauty(light, material.baseColor.w);
@@ -677,7 +823,13 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
         !(camera.farPlane > camera.nearPlane)) return stats;
     if (!preserveExistingDepth) target.clear();
 
-    const spwi::VoxelSceneTracer tracer(instances);
+    spwi::VoxelSceneTracer tracerStorage(instances);
+    {
+        // Traced displacement near the camera; beyond, parallax shading (apply_voxel_surface_maps).
+        const float units = resolve_meters_per_voxel(metersPerVoxel);
+        tracerStorage.set_displacement(units, camera.position, environment.displacementTraceDistanceMeters / units);
+    }
+    const spwi::VoxelSceneTracer& tracer = tracerStorage;
     std::unique_ptr<SceneLighting> ownedLighting;
     const SceneLighting *lighting = sceneLighting;
     if (!lighting &&
@@ -692,6 +844,8 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
     const VoxelLightingDistances distances = voxel_lighting_distances(environment, metersPerVoxel);
     SunExtras extras;
     extras.caustics = caustics;
+    extras.surfaceMarks = surfaceMarks;
+    extras.decals = decals;
     {
         std::vector<std::pair<const CookedPolygonAsset*, std::shared_ptr<const PolygonBvh>>> built;
         std::vector<std::pair<const CookedPolygonAsset*, std::shared_ptr<const std::vector<PolygonTextureMipChain>>>> maskedMips;
@@ -789,10 +943,19 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
                         : sun_term(hit->worldNormal, environment, visibility);
                     VoxelSurfaceInput surface{hit->worldNormal, normalize(subtract(camera.position, hit->worldPosition)),
                                               visibility, sunShare, indirect, ao, caustic, transmitted};
-                    apply_voxel_normal_map(instance, material, environment, hit->worldPosition, diffuses(material, distances),
-                                           distances.metersPerVoxel, surface);
+                    const Float3 mapMeters = apply_voxel_surface_maps(tracer, instance, material, environment, hit->worldPosition,
+                                             hit->worldNormal,
+                                             diffuses(material, distances), distances.metersPerVoxel,
+                                             length(subtract(camera.position, hit->worldPosition)) * distances.metersPerVoxel * 2.0F *
+                                                 std::tan(camera.verticalFieldOfViewRadians * 0.5F) / static_cast<float>(target.height),
+                                             surface);
                     const float footprint=length(subtract(camera.position,hit->worldPosition))*distances.metersPerVoxel*2*std::tan(camera.verticalFieldOfViewRadians*.5F)/float(target.height);
-                    apply_material_surface_detail(material,surface.normal,{multiply(inverse_transform_point(instance.transform,hit->worldPosition),distances.metersPerVoxel),multiply(hit->worldPosition,distances.metersPerVoxel),{},{},false,instance.transform,{1,0,0},{0,1,0},footprint});
+                    apply_material_surface_detail(material,surface.normal,{mapMeters,multiply(transform_point(instance.transform,multiply(mapMeters,1/resolve_meters_per_voxel(distances.metersPerVoxel))),distances.metersPerVoxel),{},{},false,instance.transform,{1,0,0},{0,1,0},footprint});
+                    local.layeredSurfaces += apply_voxel_material_layers(instance, material, hit->worldPosition, surface.normal, surface.ambientOcclusion,
+                                                                         mapMeters, distances.metersPerVoxel, footprint) > 0U ? 1U : 0U;
+                    if (apply_voxel_marks_and_decals(instance, extras, material, hit->worldPosition, mapMeters, footprint, surface.normal, local) &&
+                        !diffuses(material, distances))
+                        surface.sunTerm = sun_term(surface.normal, environment, surface.visibility);
                     if(material.surfaceDetail.pattern!=SurfacePattern::NoPattern && !diffuses(material, distances))surface.sunTerm=sun_term(surface.normal,environment,surface.visibility);
                     LightPasses light = shade_voxel(material, environment, surface);
                     Float3 lightingPoint = hit->worldPosition;
@@ -841,6 +1004,9 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
         stats.tracedRays += local.tracedRays;
         stats.hitRays += local.hitRays;
         stats.materialFallbacks += local.materialFallbacks;
+        stats.layeredSurfaces += local.layeredSurfaces;
+        stats.markedSurfaces += local.markedSurfaces;
+        stats.decalSurfaces += local.decalSurfaces;
         stats.shadowRays += local.shadowRays;
         stats.shadowBlockedRays += local.shadowBlockedRays;
         stats.globalIlluminationRays += local.globalIlluminationRays;
@@ -857,10 +1023,15 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
 
 float reference_sun_visibility(std::span<const VoxelReferenceInstance> instances, Float3 point, Float3 normal,
                                const RenderEnvironment& environment, float metersPerVoxel, std::uint32_t seed) {
-    const spwi::VoxelSceneTracer tracer(instances);
+    spwi::VoxelSceneTracer tracer(instances);
+    tracer.set_displacement(resolve_meters_per_voxel(metersPerVoxel), {}, std::numeric_limits<float>::infinity());
     const VoxelLightingDistances distances = voxel_lighting_distances(environment, metersPerVoxel);
     VoxelReferenceRenderStats stats;
     return shadow_visibility(tracer, point, normal, environment, distances, seed, stats);
+}
+
+void HybridOcclusionScene::set_displacement(float metersPerVoxel, Float3 focus, float focusRadius) noexcept {
+    tracer_->set_displacement(metersPerVoxel, focus, focusRadius);
 }
 
 HybridOcclusionScene::HybridOcclusionScene(std::span<const VoxelReferenceInstance> voxels,
@@ -919,6 +1090,7 @@ HybridReferenceRenderStats render_hybrid_reference(
     voxelRenderer.sunOccluders = polygons;
     voxelRenderer.occlusionPolygons = polygons;   // voxels' AO rays see the polygons too
     stats.voxels = voxelRenderer.render(voxels, camera, environment, target, false);
+    (void)paint_sky_background(target, camera, environment);   // before polygons, so glass blends over it
     PolygonRenderOptions options = polygonOptions;
     options.sceneLighting = lighting.get();
     options.preserveExistingDepth = true;
@@ -928,9 +1100,24 @@ HybridReferenceRenderStats render_hybrid_reference(
     if (!options.occlusionRay && environment.ambientOcclusionSamples > 0U &&
         environment.globalIlluminationMode != GlobalIlluminationMode::Off) {
         occlusion.emplace(voxels, polygons);
+        occlusion->set_displacement(resolve_meters_per_voxel(metersPerVoxel), camera.position,
+                                    environment.displacementTraceDistanceMeters / resolve_meters_per_voxel(metersPerVoxel));
         options.occlusionRay = occlusion->ray();
     }
     stats.polygons = ReferencePolygonRenderer{}.render(polygons, camera, environment, target, options);
+    (void)apply_aerial_perspective(target, camera, environment, metersPerVoxel);
+    if (environment.volumetricFogDensityPerMeter > 0.0F) {
+        // Light shafts: the fog's shadow rays see voxels and polygons alike.
+        const HybridOcclusionScene* scene = occlusion ? &*occlusion : nullptr;
+        std::optional<HybridOcclusionScene> own;
+        if (!scene) {
+            own.emplace(voxels, polygons);
+            own->set_displacement(resolve_meters_per_voxel(metersPerVoxel), camera.position,
+                                  environment.displacementTraceDistanceMeters / resolve_meters_per_voxel(metersPerVoxel));
+            scene = &*own;
+        }
+        stats.volumetricFog = apply_volumetric_fog(target, camera, environment, metersPerVoxel, scene->ray(), 0U, voxelThreadCount);
+    }
     (void)apply_distance_fog(target, camera, environment, metersPerVoxel);
     return stats;
 }

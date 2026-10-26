@@ -24,18 +24,78 @@ float4 SurfaceNoise(float3 p,uint seed) {
     }
     return result;
 }
+// Solid textures (Marble 6, Strata 7, Cellular 8): mirrors src/material_surface_detail.cpp.
+uint SurfaceMix(uint h){h^=h>>16;h*=0x7feb352dU;h^=h>>15;h*=0x846ca68bU;h^=h>>16;return h;}
+uint SurfaceCellHash(int3 c,uint seed){return SurfaceMix(uint(c.x)*0x8da6b343U^uint(c.y)*0xd8163841U^uint(c.z)*0xcb1ab31fU^seed);}
+float SurfaceUnit(uint h){return float(h>>8)*(1.0F/16777215.0F);}
+float SurfaceFbm(float3 q,uint seed){
+    float value=0,amplitude=.55F,frequency=1;
+    [unroll] for(uint i=0;i<3;++i){value+=amplitude*SurfaceNoise(q*frequency,seed+i*0x9e3779b9U).x;amplitude*=.55F;frequency*=2.03F;}
+    return value;
+}
+float SurfaceMarbleExponent(SurfaceDetailRecord d){return clamp(d.grainStretch*.25F,1.0F,64.0F);}
+float SurfaceMarble(SurfaceDetailRecord d,float3 q){
+    float t=q.x+1.1F*SurfaceFbm(q*.7F,d.seed);
+    float vein=pow(1-abs(sin(3.14159265F*t)),SurfaceMarbleExponent(d));
+    return .85F-1.7F*vein+.15F*SurfaceFbm(q*3.0F,d.seed+7U);
+}
+float SurfaceMarbleMean(SurfaceDetailRecord d){
+    float k=SurfaceMarbleExponent(d),sum=0;
+    for(int i=0;i<64;++i)sum+=pow(1-abs(sin(3.14159265F*(float(i)+.5F)/64.0F)),k);
+    return .85F-1.7F*sum/64.0F;
+}
+float SurfaceStrataHardness(int n,uint seed){return 2*SurfaceUnit(SurfaceCellHash(int3(n,0,0),seed^0x51ed270bU))-1;}
+float SurfaceStrata(SurfaceDetailRecord d,float3 q){
+    float run=max(d.grainStretch*.25F,.25F);
+    float y=q.y+.35F*SurfaceFbm(float3(q.x/run,q.y*.2F,q.z/run),d.seed);
+    float layer=floor(y),f=y-layer;int i=int(layer);
+    float s=saturate(f/.12F),blend=s*s*(3-2*s);
+    float a=SurfaceStrataHardness(i-1,d.seed),b=SurfaceStrataHardness(i,d.seed);
+    return .85F*(a+(b-a)*blend)+.15F*SurfaceFbm(q*4.0F,d.seed+11U);
+}
+float SurfaceCellularGap(SurfaceDetailRecord d){return clamp(1.6F/d.grainStretch,.005F,.5F);}
+float SurfaceCellular(SurfaceDetailRecord d,float3 q){
+    int3 c=int3(floor(q));float f1=1e9F,f2=1e9F;uint nearest=0;
+    for(int z=-1;z<=1;++z)for(int y=-1;y<=1;++y)for(int x=-1;x<=1;++x){
+        int3 n=c+int3(x,y,z);uint h=SurfaceCellHash(n,d.seed);
+        float3 cellPoint=float3(n)+.1F+.8F*float3(SurfaceUnit(h),SurfaceUnit(SurfaceMix(h+1U)),SurfaceUnit(SurfaceMix(h+2U)));
+        float distance=length(q-cellPoint);
+        if(distance<f1){f2=f1;f1=distance;nearest=h;}else if(distance<f2)f2=distance;
+    }
+    float s=saturate((f2-f1)/SurfaceCellularGap(d)),stone=s*s*(3-2*s);
+    float top=.55F+.4F*SurfaceUnit(SurfaceMix(nearest+3U))-.6F*f1*f1;
+    return -1+(top+1)*stone;
+}
+float SurfaceSolidValue(SurfaceDetailRecord d,float3 q){
+    return d.pattern==6?SurfaceMarble(d,q):d.pattern==7?SurfaceStrata(d,q):SurfaceCellular(d,q);
+}
+float4 SurfaceSolidSample(SurfaceDetailRecord d,float3 q,float width){
+    float mean=0,band=1;
+    if(d.pattern==6){mean=SurfaceMarbleMean(d);band=1+.5F*SurfaceMarbleExponent(d);}
+    else if(d.pattern==7){mean=0;band=4;}
+    else{float g=SurfaceCellularGap(d);mean=.5768F+g*(-2.6954F+1.5355F*g);band=1/g;}
+    float w=6.2831853F*width*band,attenuation=exp(-.5F*w*w);
+    float v=SurfaceSolidValue(d,q);
+    const float e=1e-3F;
+    float3 g=float3(SurfaceSolidValue(d,q+float3(e,0,0))-SurfaceSolidValue(d,q-float3(e,0,0)),
+                    SurfaceSolidValue(d,q+float3(0,e,0))-SurfaceSolidValue(d,q-float3(0,e,0)),
+                    SurfaceSolidValue(d,q+float3(0,0,e))-SurfaceSolidValue(d,q-float3(0,0,e)))/(2*e);
+    return float4(attenuation*(v-mean),g*attenuation);
+}
 void SurfaceWave(inout float4 result,float argument,float3 derivative,float bound,float weight,float width){
     float w=6.2831853F*width*bound,a=weight*exp(-.5F*w*w);
     result+=a*float4(sin(argument),derivative*cos(argument));
 }
 float4 SampleSurfacePattern(SurfaceDetailRecord d,float3 p,float footprint){
-    if(d.pattern==0||d.pattern>5||d.periodMeters<.00001F||d.grainStretch<1||!all(isfinite(p))||!isfinite(footprint))return 0;
+    if(d.pattern==0||d.pattern>8||d.periodMeters<.00001F||d.grainStretch<1||!all(isfinite(p))||!isfinite(footprint))return 0;
     float4 rotation=float4(d.rotationX,d.rotationY,d.rotationZ,d.rotationW);
     float3 q=SurfaceRotate(float4(-rotation.xyz,rotation.w),p)/d.periodMeters;
     if(!all(isfinite(q))||any(abs(q)>1e8F))return 0;
     float width=max(0,footprint)/d.periodMeters;
     float4 result=0;const float tau=6.2831853F;
-    if(d.pattern==1){
+    if(d.pattern>=6){
+        result=SurfaceSolidSample(d,q,width);
+    }else if(d.pattern==1){
         float phase=float(d.seed%65521)*.61803398875F;
         float warp=.2F*sin(q.x/d.grainStretch+phase);
         float y=q.y+warp,z=q.z+.17F*sin(q.x/d.grainStretch*.7F);

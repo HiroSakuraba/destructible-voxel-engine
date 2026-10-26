@@ -404,6 +404,105 @@ void test_spawn_asset_from_lua() {
     std::filesystem::remove(path);
 }
 
+// Texturing controls from Lua: read a material, change its texturing (one validated change),
+// add weathering, edit a layer's rules, and drive the damage marks.
+void test_texturing_controls_from_lua() {
+    CookedVoxelAsset asset(556);
+    asset.voxelSizeMeters = 0.25F;
+    VoxelMaterialDefinition air;
+    air.name = "Air";
+    air.densityKilogramsPerCubicMeter = 0.0F;
+    asset.materials.push_back(air);
+    VoxelMaterialDefinition stone;
+    stone.name = "Stone";
+    stone.densityKilogramsPerCubicMeter = 2400.0F;
+    asset.materials.push_back(stone);
+    for (int x = 0; x < 4; ++x)
+        for (int y = 0; y < 4; ++y)
+            for (int z = 0; z < 4; ++z) asset.object.set_voxel({x, y, z}, 1);
+    const std::filesystem::path path = std::filesystem::temp_directory_path() / "dve_lua_texturing_asset.dvox";
+    std::string writeError;
+    CHECK(write_dvox(path, asset, {}, &writeError));
+
+    GameWorld world(std::make_unique<ReferenceRigidBodyWorld>());
+    GameScriptHost host(world);
+    const std::string script = "wall = world.spawn_asset(\"" + path.generic_string() + "\", 0.0, 0.0, 0.0, false, true)\n" + R"(
+        world.set_global("wall", wall)
+        local m = world.get_material(wall, 1)
+        world.set_global("read_name", m.name == "Stone" and 1 or 0)
+        world.set_global("no_material", world.get_material(wall, 9) == nil and 1 or 0)
+        local ok = world.set_material_texturing(wall, 1, {pattern = "cellular", pattern_period = 0.2, pattern_stretch = 10,
+                                                          displacement_depth = 0.04, displacement_mode = "parallax", anti_tiling = 0.2})
+        world.set_global("set_ok", ok and 1 or 0)
+        local bad, message = world.set_material_texturing(wall, 1, {pattern = "lava", displacement_depth = 0.09})
+        world.set_global("bad_refused", (bad == nil and type(message) == "string") and 1 or 0)
+        local layer = world.add_weathering(wall, 1, "snow", 0.6, {seed = 7})
+        world.set_global("layer", layer)
+        local layered = world.set_layer(wall, 1, layer, {weight = 0.8, rules = {slope_min = 0.5, noise = 0.1}})
+        world.set_global("layer_ok", layered and 1 or 0)
+        local after = world.get_material(wall, 1)
+        world.set_global("slope", after.layers[layer].rules.slope_min)
+        world.set_global("weight", after.layers[layer].weight)
+        world.set_global("seed", after.layers[layer].rules.seed)
+        world.set_global("cellular", after.pattern == "cellular" and 1 or 0)
+        world.set_global("parallax", after.displacement_mode == "parallax" and 1 or 0)
+        world.set_global("depth", after.displacement_depth)
+        local wrong = world.set_layer(wall, 1, layer, {rules = {slope_min = 4}})
+        world.set_global("bad_rule_refused", wrong == nil and 1 or 0)
+        world.set_layer(wall, 1, layer, {rules = false})
+        world.set_global("rules_off", world.get_material(wall, 1).layers[layer].rules == nil and 1 or 0)
+        world.set_global("bad_kind", world.add_weathering(wall, 1, "lava", 0.5) == nil and 1 or 0)
+
+        world.set_damage_marks({scorch = 0.4, max = 10})
+        world.damage_sphere(wall, 0.5, 0.5, 0.5, 0.3)
+        local marks = world.get_damage_marks()
+        world.set_global("marks", #marks.marks)
+        world.set_global("mark_scorch", marks.scorch)
+        world.set_global("stamped", world.add_damage_mark(wall, 0.9, 0.9, 0.9, 0.2) and 1 or 0)
+        world.set_global("wall_marks", #world.get_damage_marks(wall).marks)
+        world.set_global("bad_marks_refused", world.set_damage_marks({scorch = 3}) == nil and 1 or 0)
+        world.clear_damage_marks(wall)
+        world.set_global("cleared", #world.get_damage_marks().marks)
+    )";
+    CHECK(run_ok(host, script, "texturing_controls"));
+    CHECK(host.global_number("read_name") == 1.0 && host.global_number("no_material") == 1.0);
+    CHECK(host.global_number("set_ok") == 1.0 && host.global_number("bad_refused") == 1.0);
+    CHECK(host.global_number("layer") == 1.0 && host.global_number("layer_ok") == 1.0);
+    CHECK(host.global_number("slope") == 0.5 && host.global_number("seed") == 7.0);
+    CHECK(std::abs(*host.global_number("weight") - 0.8) < 1e-6);
+    CHECK(host.global_number("cellular") == 1.0 && host.global_number("parallax") == 1.0);
+    CHECK(std::abs(*host.global_number("depth") - 0.04) < 1e-6);   // the refused change left it alone
+    CHECK(host.global_number("bad_rule_refused") == 1.0 && host.global_number("rules_off") == 1.0 && host.global_number("bad_kind") == 1.0);
+    CHECK(host.global_number("marks") == 1.0 && std::abs(*host.global_number("mark_scorch") - 0.4) < 1e-6);
+    CHECK(host.global_number("stamped") == 1.0 && host.global_number("wall_marks") == 2.0);
+    CHECK(host.global_number("bad_marks_refused") == 1.0 && host.global_number("cleared") == 0.0);
+    // C++ side: physical fields kept, the source slot appended, cycles refused.
+    const auto wall = static_cast<GameObjectId>(*host.global_number("wall"));
+    const auto table = world.object_materials(wall);
+    CHECK(table.size() == 3U && table[1].densityKilogramsPerCubicMeter == 2400.0F && table[2].name == "Snow");
+    VoxelMaterialDefinition loop = table[2];
+    loop.layers.push_back({});
+    loop.layers.back().sourceMaterial = 1;
+    loop.layers.back().weight = 1.0F;
+    std::string error;
+    CHECK(!world.set_object_material(wall, 2, loop, &error) && !error.empty());   // 1 -> 2 -> 1
+    std::filesystem::remove(path);
+
+    // spawn_box objects have no material table: reads show the default look, the first edit
+    // creates the table (one default entry per used id) without touching mass.
+    CHECK(run_ok(host, R"(
+        box = world.spawn_box("Box", 3, 0.25, 5.0, 0.0, 0.0, false, 1500.0)
+        world.set_global("box", box)
+        world.set_global("box_default", world.get_material(box, 1).name == "default" and 1 or 0)
+        world.set_global("box_layer", world.add_weathering(box, 1, "moss", 0.5) or -1)
+        world.set_global("box_pattern", world.set_material_texturing(box, 1, {pattern = "marble"}) and 1 or 0)
+    )", "box_texturing"));
+    CHECK(host.global_number("box_default") == 1.0 && host.global_number("box_layer") == 1.0 && host.global_number("box_pattern") == 1.0);
+    const auto box = static_cast<GameObjectId>(*host.global_number("box"));
+    const auto boxTable = world.object_materials(box);
+    CHECK(boxTable.size() == 3U && boxTable[1].surfaceDetail.pattern == SurfacePattern::Marble && boxTable[2].name == "Moss");
+}
+
 void test_fragmentation_from_lua() {
     GameWorld world(std::make_unique<ReferenceRigidBodyWorld>());
     GameScriptHost host(world);
@@ -939,7 +1038,8 @@ void test_scene_lights_and_saved_bounces() {
                "assert(world.get_environment().scene_light_count==1)",
                "remove_light"));
   CHECK(next.environment().lights.front().kind == SceneLightKind::Quad);
-  // Version 4 had no lighting extension. Remove just its length-prefixed block.
+  // Version 4 had no lighting extension, and none of the version 6 (sky, 36 bytes) and 7
+  // (volumetric fog, 36 bytes) blocks that follow it. Remove the length-prefixed block and them.
   auto old = *saved;
   const auto extension = encode_scene_lighting(host.environment());
   const auto first = std::search(
@@ -950,7 +1050,7 @@ void test_scene_lights_and_saved_bounces() {
   if (first != old.end()) {
     auto offset = first - old.begin();
     old.erase(old.begin() + offset - 4,
-              old.begin() + offset + extension.size());
+              old.begin() + offset + extension.size() + 36 + 36);
     old[4] = std::byte{4};
     CHECK(next.load_state(old, &error));
     CHECK(next.environment().lights.empty() &&
@@ -976,6 +1076,7 @@ int main() {
     test_input_state_from_lua();
     test_multiple_hosts_do_not_interfere();
     test_spawn_asset_from_lua();
+    test_texturing_controls_from_lua();
     test_fragmentation_from_lua();
     test_material_basic_and_overrides_from_lua();
     test_material_instance_chain_from_lua();

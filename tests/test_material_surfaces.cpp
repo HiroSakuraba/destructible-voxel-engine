@@ -17,7 +17,7 @@ void check(bool ok,const std::string& what){if(!ok)throw std::runtime_error(what
 void near(float a,float b,float tolerance,const std::string& what){if(!std::isfinite(a)||!std::isfinite(b)||std::abs(a-b)>tolerance)throw std::runtime_error(what+": "+std::to_string(a)+" vs "+std::to_string(b));}
 std::filesystem::path dir;
 void gradients_and_filtering(){
-    for(unsigned pattern=1;pattern<=5;++pattern){MaterialSurfaceDetail d;d.pattern=SurfacePattern(pattern);d.seed=7;d.periodMeters=.03F;d.rotationRadians={.2F,.3F,-.1F};
+    for(unsigned pattern=1;pattern<=8;++pattern){MaterialSurfaceDetail d;d.pattern=SurfacePattern(pattern);d.seed=7;d.periodMeters=.03F;d.rotationRadians={.2F,.3F,-.1F};
         const Float3 p{.014F,.023F,.037F};const auto analytic=sample_surface_pattern(d,p,.0001F);
         const float epsilon=.000002F;
         for(unsigned axis=0;axis<3;++axis){auto a=p,b=p;float *ap=axis==0?&a.x:axis==1?&a.y:&a.z,*bp=axis==0?&b.x:axis==1?&b.y:&b.z;*ap+=epsilon;*bp-=epsilon;

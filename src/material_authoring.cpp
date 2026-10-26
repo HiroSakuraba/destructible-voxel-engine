@@ -81,12 +81,16 @@ bool has_usable_tangents(const CookedPolygonAsset& asset) noexcept {
 }
 
 std::uint32_t height_sample_maximum(const MaterialMappingSettings& mapping) noexcept {
+    // Triplanar parallax reads the height on all three projections at every step.
+    const std::uint32_t perStep = mapping.mappingMode == MaterialMappingMode::WorldTriplanar ||
+                                          mapping.mappingMode == MaterialMappingMode::ObjectTriplanar
+                                      ? 3U : 1U;
     switch (mapping.heightMode) {
         case HeightMappingMode::Off: return 0U;
-        case HeightMappingMode::OffsetParallax: return 1U;
-        case HeightMappingMode::SteepParallax: return mapping.maximumHeightSteps;
+        case HeightMappingMode::OffsetParallax: return perStep;
+        case HeightMappingMode::SteepParallax: return mapping.maximumHeightSteps * perStep;
         case HeightMappingMode::ParallaxOcclusion:
-            return mapping.maximumHeightSteps + mapping.refinementSteps;
+            return (mapping.maximumHeightSteps + mapping.refinementSteps) * perStep;
     }
     return 0U;
 }
@@ -407,7 +411,7 @@ PolygonMaterialAuthoringReport analyze_polygon_material_authoring(const CookedPo
         if (binding.mapping.heightMode != HeightMappingMode::Off) {
             add_diagnostic(report, &entry, MaterialDiagnosticSeverity::Warning,
                            "PARALLAX_VISUAL_ONLY", index,
-                           "Height mapping changes UVs only; it does not change geometry, collision, depth, or shadow silhouettes.");
+                           "Height mapping changes where textures are read only; it does not change geometry, collision, depth, or shadow silhouettes.");
             add_diagnostic(report, &entry, MaterialDiagnosticSeverity::Warning,
                            "LIVE_PARALLAX_REFERENCE_ONLY", index,
                            "Height mapping is currently executable only in the CPU reference renderer.");

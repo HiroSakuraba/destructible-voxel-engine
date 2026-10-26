@@ -42,6 +42,7 @@ struct PolygonDisplacementStats {
     std::uint64_t displacedCollisionVertices{};
     std::uint64_t sharedMaterialVertices{};
     std::uint64_t missingHeightBindings{};
+    std::uint64_t triplanarHeightVertices{};   // heights read triplanar (triplanar mappings, voxel height maps)
     float maximumAbsoluteDisplacement{};
 };
 

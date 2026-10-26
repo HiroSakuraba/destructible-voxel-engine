@@ -983,6 +983,17 @@ void hash_transform(std::uint64_t& hash, const RigidTransform& transform) noexce
             hash_value(hash, std::bit_cast<std::uint32_t>(material.normalMapStrength));
             hash_value(hash, std::bit_cast<std::uint32_t>(material.normalMapSharpness));
         }
+        if (material_has_textures(material)) {   // likewise
+            for (const auto* map : {material.baseColorMap.get(), material.ormMap.get(), material.heightMap.get(), material.emissiveMap.get()})
+                hash_value(hash, map ? map->contentHash : 0U);
+            hash_value(hash, std::bit_cast<std::uint32_t>(material.textureTileMeters));
+            hash_value(hash, std::bit_cast<std::uint32_t>(material.textureSharpness));
+        }
+        if (material_has_displacement_settings(material)) {
+            hash_value(hash, std::bit_cast<std::uint32_t>(material.displacementDepthMeters));
+            hash_value(hash, material.displacementMode);
+        }
+        if (material_has_rules(material)) hash_value(hash, material_rules_hash(material));   // likewise
         hash_value(hash, std::bit_cast<std::uint32_t>(material.densityKilogramsPerCubicMeter));
         hash_value(hash, std::bit_cast<std::uint32_t>(material.structuralStrength));
         hash_value(hash, std::bit_cast<std::uint32_t>(material.fractureResistance));

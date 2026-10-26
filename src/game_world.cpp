@@ -28,6 +28,7 @@
 #include "dve/polygon_bvh.hpp"
 #include "dve/fragment.hpp"
 #include "dve/query.hpp"
+#include "dve/master_material.hpp"
 
 namespace dve {
 namespace {
@@ -883,6 +884,7 @@ bool GameWorld::destroy_object_internal(GameObjectId id, bool dispatchDestroy) {
     if (cpuHair_) (void)cpuHair_->unbind(id);
 #endif
     if (it->second.hasBody) physics_->destroy_body(it->second.bodyHandle);
+    surfaceMarks_.remove_object(id);
     objects_.erase(it);
     return true;
 }
@@ -1768,6 +1770,8 @@ bool GameWorld::commit_prepared_destruction(PendingDestruction& pending) {
     }
     const auto origin = resolve_transform(parent);
     const auto oldState = parent.hasBody ? physics_->state(parent.bodyHandle) : std::nullopt;
+    // Where the job actually carved (queued in the object's voxel space).
+    const Float3 craterMeters = multiply_components(pending.state.localCenterVoxels, multiply(parent.voxelScale, parent.voxelSizeMeters));
     std::vector<RigidBodyHandle> handles(components.size(), kInvalidRigidBodyHandle);
     std::vector<Float3> centers(components.size());
     const auto rollback = [&] { for (const auto h : handles) if (h != kInvalidRigidBodyHandle) physics_->destroy_body(h); };
@@ -1823,6 +1827,10 @@ bool GameWorld::commit_prepared_destruction(PendingDestruction& pending) {
         fragments.push_back(fragment.id); objects_.emplace(fragment.id,std::move(fragment));
     }
     if (parent.hasBody) physics_->destroy_body(parent.bodyHandle);
+    // The crater's mark on the parent, then copies on the pieces it reaches (they share the
+    // parent's voxel space and pose).
+    (void)surfaceMarks_.add_crater(parent.id, craterMeters, pending.state.radius);
+    for (const auto fragmentId : fragments) copy_marks_to_fragment(parent.id, fragmentId, objects_.at(fragmentId));
     parent.voxels=std::move(components[primary].voxels); parent.authoredTransform=origin;
     parent.bodyHandle=handles[primary]; parent.hasBody=handles[primary]!=kInvalidRigidBodyHandle;
     parent.localCenterOfMassMeters=centers[primary];
@@ -1830,6 +1838,133 @@ bool GameWorld::commit_prepared_destruction(PendingDestruction& pending) {
     for (const auto id : fragments) dispatch_lifecycle({GameLifecycleEventKind::Spawn,id});
     for (const auto& listener : damageListeners_) listener(event);
     return true;
+}
+
+void GameWorld::copy_marks_to_fragment(GameObjectId parent, GameObjectId fragment, const Object& fragmentObject) {
+    if (!fragmentObject.voxels) return;
+    // Tight occupied bounds (brick bounds can include empty bricks inherited from the parent).
+    const VoxelObject::DerivedBounds occupied = fragmentObject.voxels->occupied_bounds();
+    if (!occupied.valid) return;
+    const DamageClipBounds bounds{occupied.minimum, occupied.maximum};
+    const Float3 cell = multiply(fragmentObject.voxelScale, fragmentObject.voxelSizeMeters);
+    const Float3 lo{static_cast<float>(bounds.minVoxel.x) * cell.x, static_cast<float>(bounds.minVoxel.y) * cell.y,
+                    static_cast<float>(bounds.minVoxel.z) * cell.z};
+    const Float3 hi{static_cast<float>(bounds.maxVoxel.x + 1) * cell.x, static_cast<float>(bounds.maxVoxel.y + 1) * cell.y,
+                    static_cast<float>(bounds.maxVoxel.z + 1) * cell.z};
+    (void)surfaceMarks_.copy_marks(parent, fragment, lo, hi);
+}
+
+bool GameWorld::set_surface_mark_settings(const SurfaceMarkSettings& settings) {
+    if (!surface_mark_settings_valid(settings)) return false;
+    surfaceMarks_.set_settings(settings);
+    return true;
+}
+
+bool GameWorld::add_surface_mark(GameObjectId id, Float3 worldCenter, float radiusMeters) {
+    const auto it = objects_.find(id);
+    if (it == objects_.end() || !surfaceMarks_.settings().enabled || !(radiusMeters > 0.0F) || !std::isfinite(radiusMeters)) return false;
+    return surfaceMarks_.add_crater(id, inverse_transform_point(resolve_transform(it->second), worldCenter), radiusMeters);
+}
+
+namespace {
+// A material table is valid for a world object: every entry passes the same range checks the
+// formats apply, layers reference slots of this table, and there are no cycles.
+bool world_material_valid(const VoxelMaterialDefinition& m) noexcept {
+    const auto unit = [](float v) { return v >= 0.0F && v <= 1.0F; };   // false for NaN
+    const auto finite3 = [](Float3 v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); };
+    return unit(m.baseColor.x) && unit(m.baseColor.y) && unit(m.baseColor.z) && unit(m.baseColor.w) && finite3(m.emissive) &&
+           m.emissive.x >= 0.0F && m.emissive.y >= 0.0F && m.emissive.z >= 0.0F && unit(m.metallic) && unit(m.roughness) &&
+           unit(m.specular) && unit(m.clearCoat) && unit(m.clearCoatRoughness) && m.layers.size() <= kMaximumVoxelMaterialLayers &&
+           std::all_of(m.layers.begin(), m.layers.end(), [&](const VoxelMaterialLayer& l) {
+               return unit(l.weight) && static_cast<unsigned>(l.blendMode) <= static_cast<unsigned>(MaterialLayerBlendMode::Additive);
+           }) &&
+           material_optics_valid(m) && material_sheen_valid(m) && material_iridescence_valid(m) && material_normal_map_valid(m) &&
+           material_textures_valid(m) && material_displacement_settings_valid(m) && material_rules_valid(m) &&
+           material_surface_detail_valid(m.surfaceDetail);
+}
+bool world_material_table_valid(const std::vector<VoxelMaterialDefinition>& table, std::string* error) {
+    if (table.size() > 256U) { if (error) *error = "material table exceeds 256 entries"; return false; }
+    for (std::size_t i = 0; i < table.size(); ++i) {
+        for (const VoxelMaterialLayer& layer : table[i].layers)
+            if (layer.sourceMaterial >= table.size()) { if (error) *error = "a layer references a missing material slot"; return false; }
+        if (!world_material_valid(table[i])) { if (error) *error = "slot " + std::to_string(i) + " has an out-of-range value"; return false; }
+    }
+    return resolve_voxel_material_layers(table, error).has_value();
+}
+} // namespace
+
+VoxelMaterialDefinition default_voxel_material(MaterialId id) {
+    const float hue = static_cast<float>((static_cast<unsigned>(id) * 47U) % 360U) / 60.0F;
+    const float x = 1.0F - std::abs(std::fmod(hue, 2.0F) - 1.0F);
+    Float3 rgb{};
+    if (hue < 1) rgb = {1, x, 0};
+    else if (hue < 2) rgb = {x, 1, 0};
+    else if (hue < 3) rgb = {0, 1, x};
+    else if (hue < 4) rgb = {0, x, 1};
+    else if (hue < 5) rgb = {x, 0, 1};
+    else rgb = {1, 0, x};
+    VoxelMaterialDefinition m;
+    m.name = "default";
+    m.baseColor = {0.25F + 0.5F * rgb.x, 0.25F + 0.5F * rgb.y, 0.25F + 0.5F * rgb.z, 1.0F};
+    m.roughness = 0.8F;
+    return m;
+}
+
+bool GameWorld::ensure_object_material_table(GameObjectId id) {
+    const auto it = objects_.find(id);
+    if (it == objects_.end() || !it->second.voxels) return false;
+    Object& object = it->second;
+    if (!object.materials.empty()) return true;
+    unsigned highest = 0;
+    for (const auto& [key, brick] : object.voxels->bricks()) {
+        (void)key;
+        brick.occupancy().for_each_set([&](std::uint16_t at) { highest = std::max<unsigned>(highest, brick.material(at)); });
+    }
+    for (unsigned i = 0; i <= highest; ++i) object.materials.push_back(default_voxel_material(static_cast<MaterialId>(i)));
+    return true;
+}
+
+std::span<const VoxelMaterialDefinition> GameWorld::object_materials(GameObjectId id) const {
+    const auto it = objects_.find(id);
+    if (it == objects_.end() || !it->second.voxels) return {};
+    return it->second.materials;
+}
+
+bool GameWorld::set_object_material(GameObjectId id, std::size_t index, VoxelMaterialDefinition material, std::string* error) {
+    const auto it = objects_.find(id);
+    if (it == objects_.end() || !it->second.voxels) { if (error) *error = "no voxel object with that id"; return false; }
+    if (!ensure_object_material_table(id)) { if (error) *error = "no voxel object with that id"; return false; }
+    Object& object = it->second;
+    if (index >= object.materials.size()) { if (error) *error = "material slot out of range"; return false; }
+    const VoxelMaterialDefinition& old = object.materials[index];
+    material.densityKilogramsPerCubicMeter = old.densityKilogramsPerCubicMeter;
+    material.structuralStrength = old.structuralStrength;
+    material.fractureResistance = old.fractureResistance;
+    material.flammability = old.flammability;
+    material.thermalConductivity = old.thermalConductivity;
+    material.structural = old.structural;
+    material.transparent = old.transparent;
+    std::vector<VoxelMaterialDefinition> table = object.materials;
+    table[index] = std::move(material);
+    if (!world_material_table_valid(table, error)) return false;
+    object.materials = std::move(table);
+    return true;
+}
+
+std::optional<std::size_t> GameWorld::add_object_material(GameObjectId id, VoxelMaterialDefinition material, std::string* error) {
+    const auto it = objects_.find(id);
+    if (it == objects_.end() || !ensure_object_material_table(id)) { if (error) *error = "no voxel object with that id"; return std::nullopt; }
+    Object& object = it->second;
+    std::vector<VoxelMaterialDefinition> table = object.materials;
+    table.push_back(std::move(material));
+    if (!world_material_table_valid(table, error)) return std::nullopt;
+    object.materials = std::move(table);
+    return object.materials.size() - 1U;
+}
+
+void GameWorld::clear_surface_marks(std::optional<GameObjectId> id) {
+    if (id) surfaceMarks_.remove_object(*id);
+    else surfaceMarks_.clear();
 }
 
 std::optional<std::uint64_t> GameWorld::damage_sphere(GameObjectId id, Float3 worldCenter, float radius) {
@@ -1851,6 +1986,8 @@ std::optional<std::uint64_t> GameWorld::damage_sphere(GameObjectId id, Float3 wo
     if (report.removedVoxelCount == 0) return 0U;
 
     const bool destroyed = object.voxels->occupied_voxel_count() == 0;
+    // The crater's mark, before fragmenting so the pieces that break off keep it.
+    if (!destroyed) (void)surfaceMarks_.add_crater(id, localMeters, radius);
     std::vector<GameObjectId> newFragmentIds;
     // Visual-only voxels are carved but never split into (physical) debris.
     if (!destroyed && !object.visualOnly) newFragmentIds = fragment_after_damage(id, object);
@@ -1967,7 +2104,8 @@ std::vector<GameObjectId> GameWorld::fragment_after_damage(GameObjectId id, Obje
         const GameObjectId fragmentId = allocate_id();
         fragmentObject.id = fragmentId;
         synchronize_membership_component(fragmentObject);
-        objects_.emplace(fragmentId, std::move(fragmentObject));
+        const auto placed = objects_.emplace(fragmentId, std::move(fragmentObject)).first;
+        copy_marks_to_fragment(object.id, fragmentId, placed->second);
         dispatch_lifecycle({GameLifecycleEventKind::Spawn, fragmentId});
         fragmentIds.push_back(fragmentId);
     }
@@ -2587,6 +2725,14 @@ void state_hash_material(std::uint64_t& hash, const VoxelMaterialDefinition& m) 
     }
     if(material_has_normal_map(m)){state_hash_value(hash,m.normalMap->contentHash);state_hash_value(hash,m.normalMapTileMeters);state_hash_value(hash,m.normalMapStrength);state_hash_value(hash,m.normalMapSharpness);}
     if(m.surfaceDetail.pattern!=SurfacePattern::NoPattern)state_hash_value(hash,material_surface_detail_hash(m.surfaceDetail));
+    // Texture sets, displacement, layer rules and anti-tiling: only when used (older hashes keep).
+    if (material_has_textures(m)) {
+        for (const auto* map : {m.baseColorMap.get(), m.ormMap.get(), m.heightMap.get(), m.emissiveMap.get()})
+            state_hash_value(hash, map ? map->contentHash : std::uint64_t{0});
+        state_hash_value(hash, m.textureTileMeters); state_hash_value(hash, m.textureSharpness);
+    }
+    if (material_has_displacement_settings(m)) { state_hash_value(hash, m.displacementDepthMeters); state_hash_value(hash, m.displacementMode); }
+    if (material_has_rules(m)) state_hash_value(hash, material_rules_hash(m));
     state_hash_value(hash, m.densityKilogramsPerCubicMeter); state_hash_value(hash, m.structuralStrength);
     state_hash_value(hash, m.fractureResistance); state_hash_value(hash, m.flammability);
     state_hash_value(hash, m.thermalConductivity); state_hash_value(hash, m.transparent);
@@ -2710,6 +2856,9 @@ GameWorldSaveState GameWorld::capture_save_state() const {
     }
     for (const auto& [id, pool] : pools_)
         state.pools.push_back({id, pool.name, static_cast<std::uint64_t>(pool.capacity), pool.freeIds});
+    state.surfaceMarks.assign(surfaceMarks_.marks().begin(), surfaceMarks_.marks().end());
+    state.surfaceMarkSettings = surfaceMarks_.settings();
+    state.nextSurfaceMarkSeed = surfaceMarks_.next_seed();
     return state;
 }
 
@@ -2777,6 +2926,22 @@ std::uint64_t GameWorld::state_hash() const {
         state_hash_value(hash, timer.fireAtTick);
         state_hash_value(hash, timer.intervalTicks);
         state_hash_value(hash, timer.intervalNanoseconds); state_hash_value(hash,timer.originTick); state_hash_value(hash,timer.releaseIndex);
+    }
+    // Damage marks: hashed only once there are any (or non-default settings), so worlds that
+    // never use them keep their hashes.
+    if (!surfaceMarks_.marks().empty() || !(surfaceMarks_.settings() == SurfaceMarkSettings{})) {
+        const SurfaceMarkSettings& settings = surfaceMarks_.settings();
+        state_hash_value(hash, settings.enabled);
+        for (const float v : {settings.exposure, settings.scorch, settings.cracks, settings.reachScale, settings.crackReach})
+            state_hash_value(hash, v);
+        state_hash_value(hash, static_cast<std::uint64_t>(settings.maximumMarks));
+        state_hash_value(hash, surfaceMarks_.next_seed());
+        for (const SurfaceMark& m : surfaceMarks_.marks()) {
+            state_hash_value(hash, m.objectId);
+            state_hash_float3(hash, m.centerMeters);
+            for (const float v : {m.radiusMeters, m.exposure, m.scorch, m.cracks, m.reachScale, m.crackReach}) state_hash_value(hash, v);
+            state_hash_value(hash, m.seed);
+        }
     }
     return hash;
 }
@@ -3070,6 +3235,13 @@ bool GameWorld::restore_save_state(const GameWorldSaveState& state, GameWorldRes
     std::uint64_t highestTimer = 0U;
     for (const Timer& timer : timers_) highestTimer = std::max<std::uint64_t>(highestTimer, timer.id);
     nextTimerId_ = std::max<std::uint64_t>(state.nextTimerId, highestTimer + 1U);
+    if (surface_mark_settings_valid(state.surfaceMarkSettings)) surfaceMarks_.set_settings(state.surfaceMarkSettings);
+    {
+        std::vector<SurfaceMark> marks;
+        for (const SurfaceMark& m : state.surfaceMarks)
+            if (objects_.contains(m.objectId)) marks.push_back(m);
+        surfaceMarks_.restore(std::move(marks), state.nextSurfaceMarkSeed);
+    }
     pendingDestruction_.clear();
     nextDestructionId_ = state.nextDestructionId;
     destructionUnitsPerTick_ = state.destructionUnitsPerTick;

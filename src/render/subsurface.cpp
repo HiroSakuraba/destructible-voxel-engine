@@ -1,4 +1,5 @@
 #include "dve/render/subsurface.hpp"
+#include "dve/render/atmosphere.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -159,10 +160,11 @@ Float3 subsurface_transmitted_radiance(const VoxelMaterialDefinition& material, 
     // Per channel: the share of light scattered through a slab of this thickness, from the
     // random-walk ground truth (subsurface_transmission.hpp), for that channel's albedo.
     const float x = exit.thickness * metersPerUnit / material.subsurfaceScatterDistanceMeters;
-    const float k = environment.sunIntensity * cosEntry * sunVisibility;
-    return {environment.sunColor.x * k * subsurface_slab_transmission(material.subsurfaceColor.x, x, cosEntry),
-            environment.sunColor.y * k * subsurface_slab_transmission(material.subsurfaceColor.y, x, cosEntry),
-            environment.sunColor.z * k * subsurface_slab_transmission(material.subsurfaceColor.z, x, cosEntry)};
+    const float k = cosEntry * sunVisibility;
+    const Float3 sun = sun_irradiance(environment);   // sun colour x intensity (x the air's transmittance)
+    return {sun.x * k * subsurface_slab_transmission(material.subsurfaceColor.x, x, cosEntry),
+            sun.y * k * subsurface_slab_transmission(material.subsurfaceColor.y, x, cosEntry),
+            sun.z * k * subsurface_slab_transmission(material.subsurfaceColor.z, x, cosEntry)};
 }
 
 } // namespace dve::render

@@ -176,6 +176,11 @@ add_library(dve_core
     src/material_parameter_collection.cpp
     src/material_mapping.cpp
     src/voxel_normal_map.cpp
+    src/voxel_textures.cpp
+    src/voxel_displacement.cpp
+    src/material_layer_rules.cpp
+    src/surface_marks.cpp
+    src/weathering.cpp
     src/dashr_surface.cpp
     src/dashr_seam_map.cpp
     src/material_layers.cpp
@@ -754,10 +759,13 @@ if(DVE_BUILD_RHI)
         src/render/ray_lighting_reference.cpp
         src/render/ambient_occlusion.cpp
         src/render/surface_shading.cpp
+        src/render/atmosphere.cpp
         src/render/scene_lighting.cpp
         src/render/ies_profile.cpp
         src/render/material_bsdf.cpp
+        src/render/volumetric_fog.cpp
         src/render/ambient_occlusion_gpu.cpp
+        src/render/atmosphere_gpu.cpp
         src/render/live_environment_renderer.cpp
         src/render/live_optical_scene.cpp
         src/render/material_resource_residency.cpp
@@ -3416,6 +3424,27 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     add_executable(dve_render_passes_tests tests/test_render_passes.cpp)
     target_link_libraries(dve_render_passes_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_render_passes_tests COMMAND dve_render_passes_tests)
+    add_executable(dve_voxel_textures_tests tests/test_voxel_textures.cpp)
+    target_link_libraries(dve_voxel_textures_tests PRIVATE dve::render_bridge)
+    add_test(NAME dve_voxel_textures_tests COMMAND dve_voxel_textures_tests)
+    add_executable(dve_triplanar_displacement_tests tests/test_triplanar_displacement.cpp)
+    target_link_libraries(dve_triplanar_displacement_tests PRIVATE dve::render_bridge)
+    add_test(NAME dve_triplanar_displacement_tests COMMAND dve_triplanar_displacement_tests)
+    add_executable(dve_solid_textures_tests tests/test_solid_textures.cpp)
+    target_link_libraries(dve_solid_textures_tests PRIVATE dve::render_bridge)
+    add_test(NAME dve_solid_textures_tests COMMAND dve_solid_textures_tests)
+    add_executable(dve_layer_rules_tests tests/test_layer_rules.cpp)
+    target_link_libraries(dve_layer_rules_tests PRIVATE dve::render_bridge)
+    add_test(NAME dve_layer_rules_tests COMMAND dve_layer_rules_tests)
+    add_executable(dve_weathering_damage_tests tests/test_weathering_damage.cpp)
+    target_link_libraries(dve_weathering_damage_tests PRIVATE dve::render_bridge)
+    add_test(NAME dve_weathering_damage_tests COMMAND dve_weathering_damage_tests)
+    add_executable(dve_atmosphere_tests tests/test_atmosphere.cpp)
+    target_link_libraries(dve_atmosphere_tests PRIVATE dve::render_bridge)
+    add_test(NAME dve_atmosphere_tests COMMAND dve_atmosphere_tests)
+    add_executable(dve_volumetric_fog_tests tests/test_volumetric_fog.cpp)
+    target_link_libraries(dve_volumetric_fog_tests PRIVATE dve::render_bridge)
+    add_test(NAME dve_volumetric_fog_tests COMMAND dve_volumetric_fog_tests)
     if(TARGET dve_asset_pipeline)
         add_executable(dve_voxel_normal_maps_tests tests/test_voxel_normal_maps.cpp)
         target_link_libraries(dve_voxel_normal_maps_tests PRIVATE dve::render_bridge dve::asset_pipeline)
@@ -3429,6 +3458,14 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
         target_compile_definitions(dve_ambient_occlusion_gpu_tests PRIVATE DVE_AO_HAS_VULKAN=1)
     endif()
     add_test(NAME dve_ambient_occlusion_gpu_tests COMMAND dve_ambient_occlusion_gpu_tests)
+    add_executable(dve_atmosphere_gpu_tests tests/test_atmosphere_gpu.cpp)
+    target_link_libraries(dve_atmosphere_gpu_tests PRIVATE dve::render_bridge)
+    target_compile_definitions(dve_atmosphere_gpu_tests PRIVATE DVE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    if(TARGET dve_rhi_vulkan)
+        target_link_libraries(dve_atmosphere_gpu_tests PRIVATE dve::rhi_vulkan)
+        target_compile_definitions(dve_atmosphere_gpu_tests PRIVATE DVE_ATMOSPHERE_HAS_VULKAN=1)
+    endif()
+    add_test(NAME dve_atmosphere_gpu_tests COMMAND dve_atmosphere_gpu_tests)
     add_executable(dve_subsurface_translucency_tests tests/test_subsurface_translucency.cpp)
     target_link_libraries(dve_subsurface_translucency_tests PRIVATE dve::render_bridge)
     target_compile_definitions(dve_subsurface_translucency_tests PRIVATE

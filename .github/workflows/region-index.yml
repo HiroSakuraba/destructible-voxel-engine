@@ -1,0 +1,60 @@
+name: R0/R1 region index
+on:
+  pull_request:
+    paths:
+      - "CMakeLists.txt"
+      - "include/dve/region_catalog.hpp"
+      - "src/region_catalog.cpp"
+      - "tests/test_region_catalog.cpp"
+      - "apps/dve_region_bench.cpp"
+      - ".github/workflows/region-index.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  region-catalog:
+    name: region catalog (${{ matrix.compiler }}, ${{ matrix.mode }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: g++
+            mode: release
+          - compiler: clang++
+            mode: sanitized
+    env:
+      CXX: ${{ matrix.compiler }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure isolated region index targets within DVE
+        shell: bash
+        run: |
+          sanitize=""
+          if [ "${{ matrix.mode }}" = sanitized ]; then
+            sanitize="-DCMAKE_CXX_FLAGS=-fsanitize=address,undefined -fno-omit-frame-pointer -DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address,undefined"
+          fi
+          cmake -S . -B build-region -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.mode == 'release' && 'Release' || 'Debug' }} \
+            -DDVE_EXPERIMENTAL_REGION_INDEX=ON \
+            -DDVE_BUILD_TESTS=ON -DDVE_BUILD_BENCHMARK=OFF \
+            -DDVE_BUILD_ASSET_COOKER=OFF -DDVE_BUILD_ASSET_PIPELINE_TESTS=OFF \
+            -DDVE_BUILD_EDITOR=OFF -DDVE_BUILD_NATIVE_EDITOR=OFF \
+            -DDVE_BUILD_PLATFORM=OFF -DDVE_BUILD_RHI=OFF \
+            -DDVE_BUILD_DEVICE_TEST_RUNNER=OFF -DDVE_BUILD_AUDIO_SYNTH=OFF \
+            -DDVE_BUILD_LEGACY_X11_HOST=OFF -DDVE_ENABLE_SDL3_HOST=OFF \
+            -DDVE_ENABLE_VULKAN_BUFFER_BACKEND=OFF -DDVE_ENABLE_FLUODDITY=OFF \
+            -DDVE_ENABLE_SOFT_BODIES=OFF -DDVE_ENABLE_CPU_HAIR=OFF \
+            -DDVE_ENABLE_VFX_PARTICLES=OFF -DDVE_ENABLE_PBF_LIQUID=OFF \
+            -DDVE_ENABLE_SIMULATION_ENERGY_COMPILER=OFF -DDVE_ENABLE_BSPLINE_CLOTH=OFF \
+            -DDVE_ENABLE_GRID_FLUIDS=OFF -DDVE_ENABLE_FLIP_LIQUIDS=OFF \
+            $sanitize
+      - name: Build region contract tests
+        run: cmake --build build-region --target dve_region_catalog_tests --parallel 2
+      - name: Run region contract tests
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: halt_on_error=1
+        run: ctest --test-dir build-region -R '^dve_region_catalog_tests$' --output-on-failure

@@ -3169,7 +3169,7 @@
       "threads": [64, 1, 1],
       "bindings": [
         {"name": "BbvConstants", "kind": "constant_buffer", "access": "read", "register": "b0"},
-        {"name": "gBbvBricks", "kind": "storage_buffer", "access": "read", "register": "t0"},
+        {"name": "gBbvBricks", "kind": "byte_address_buffer", "access": "read", "register": "t0"},
         {"name": "gBbvRays", "kind": "storage_buffer", "access": "read", "register": "t1"},
         {"name": "gBbvResults", "kind": "storage_buffer", "access": "read_write", "register": "u0"}
       ]

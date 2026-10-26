@@ -54,6 +54,9 @@ public:
     // Reconcile edits after PackedBrickmapScene has published the authoritative values.
     [[nodiscard]] BbvUpdateStats refresh(std::span<const BrickKey> changedKeys,
                                           const PackedBrickmapScene& source);
+    // Conservative reconciliation when an authoritative revision changed but
+    // the caller cannot prove its edit-key list is complete.
+    [[nodiscard]] BbvUpdateStats refresh_all(const PackedBrickmapScene& source);
     void mark_all_dirty() noexcept;
     void clear_dirty() noexcept;
 

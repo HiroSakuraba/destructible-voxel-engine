@@ -1,6 +1,7 @@
 #include "dve/prototype_game.hpp"
 #include "dve/racing_game.hpp"
 #include "dve/flying_game.hpp"
+#include "dve/mecha_game.hpp"
 #include "dve/water_game.hpp"
 #include "dve/game_world.hpp"
 #include "dve/gameplay_runtime.hpp"
@@ -37,7 +38,7 @@ struct PrototypeGame::Impl {
  double nextDamage{};};
  struct Link {std::string source,event,target,action;
  float amount{};};
- GameWorld& world;PrototypeHud hud;std::unique_ptr<RacingGame> racing;std::unique_ptr<FlyingGame> flying;std::unique_ptr<WaterGame> water;
+ GameWorld& world;PrototypeHud hud;std::unique_ptr<RacingGame> racing;std::unique_ptr<FlyingGame> flying;std::unique_ptr<WaterGame> water;std::unique_ptr<MechaGame> mecha;
  std::map<std::string,Actor,std::less<>> actors;
  std::vector<Link> links;
  std::map<GameTriggerId,std::string> triggers;
@@ -132,9 +133,9 @@ struct PrototypeGame::Impl {
 };
 PrototypeGame::PrototypeGame(GameWorld& w):impl_(std::make_unique<Impl>(w)){}
 PrototypeGame::~PrototypeGame()=default;
-bool PrototypeGame::active()const noexcept{return impl_->water?impl_->water->hud().active:impl_->flying?impl_->flying->hud().active:impl_->racing?impl_->racing->hud().active:impl_->hud.active;}
-const PrototypeHud& PrototypeGame::hud()const noexcept{return impl_->water?impl_->water->hud():impl_->flying?impl_->flying->hud():impl_->racing?impl_->racing->hud():impl_->hud;}
-PrototypeCamera PrototypeGame::camera()const{return impl_->water?impl_->water->camera():impl_->flying?impl_->flying->camera():impl_->racing?impl_->racing->camera():impl_->camera();}
+bool PrototypeGame::active()const noexcept{return impl_->mecha?impl_->mecha->hud().active:impl_->water?impl_->water->hud().active:impl_->flying?impl_->flying->hud().active:impl_->racing?impl_->racing->hud().active:impl_->hud.active;}
+const PrototypeHud& PrototypeGame::hud()const noexcept{return impl_->mecha?impl_->mecha->hud():impl_->water?impl_->water->hud():impl_->flying?impl_->flying->hud():impl_->racing?impl_->racing->hud():impl_->hud;}
+PrototypeCamera PrototypeGame::camera()const{return impl_->mecha?impl_->mecha->camera():impl_->water?impl_->water->camera():impl_->flying?impl_->flying->camera():impl_->racing?impl_->racing->camera():impl_->camera();}
 const OceanField* PrototypeGame::ocean_field()const noexcept{return impl_->water?&impl_->water->ocean():nullptr;}
 double PrototypeGame::ocean_time()const noexcept{return impl_->water?impl_->water->ocean_time():0;}
 const WaterVolumeSettings* PrototypeGame::water_volume_settings()const noexcept{
@@ -147,9 +148,9 @@ std::span<const WaterSprayEffect> PrototypeGame::water_spray_effects()const noex
  return impl_->water?impl_->water->spray_effects():std::span<const WaterSprayEffect>{};
 }
 std::span<const RacingVisualEffect> PrototypeGame::racing_visual_effects()const noexcept {
- return impl_->racing?impl_->racing->visuals():std::span<const RacingVisualEffect>{};
+ return impl_->mecha?impl_->mecha->impact_visuals():impl_->racing?impl_->racing->visuals():std::span<const RacingVisualEffect>{};
 }
-void PrototypeGame::look(float x,float y){if(impl_->racing||impl_->flying||impl_->water)return;if(std::isfinite(x)&&std::isfinite(y)&&impl_->hud.phase==PrototypePhase::Playing){impl_->lookYaw+=std::clamp(x,-1.F,1.F);impl_->lookPitch+=std::clamp(y,-1.F,1.F);}}
+void PrototypeGame::look(float x,float y){if(impl_->mecha){impl_->mecha->look(x,y);return;}if(impl_->racing||impl_->flying||impl_->water)return;if(std::isfinite(x)&&std::isfinite(y)&&impl_->hud.phase==PrototypePhase::Playing){impl_->lookYaw+=std::clamp(x,-1.F,1.F);impl_->lookPitch+=std::clamp(y,-1.F,1.F);}}
 bool PrototypeGame::start(std::string* error){
  auto& s=*impl_;
  if(s.started){if(error)*error="Prototype runtime already started";
@@ -157,6 +158,7 @@ bool PrototypeGame::start(std::string* error){
  std::vector<PrototypeObjectView> views;
  for(auto id:s.world.object_ids())views.push_back({id,"Object "+std::to_string(id),*s.world.components(id),s.world.geometry_kind(id)==GameGeometryKind::Marker});
  if(!validate_prototype_scene(views,error))return false;
+ if(scene_has_mecha(views)){s.mecha=std::make_unique<MechaGame>(s.world);if(!s.mecha->start(error)){s.mecha.reset();return false;}s.started=true;return true;}
  if(scene_has_water(views)){s.water=std::make_unique<WaterGame>(s.world);if(!s.water->start(error)){s.water.reset();return false;}s.started=true;return true;}
  if(scene_has_flying(views)){s.flying=std::make_unique<FlyingGame>(s.world);if(!s.flying->start(error)){s.flying.reset();return false;}s.started=true;return true;}
  if(scene_has_racing(views)){s.racing=std::make_unique<RacingGame>(s.world);if(!s.racing->start(error)){s.racing.reset();return false;}s.started=true;return true;}
@@ -206,6 +208,7 @@ bool PrototypeGame::start(std::string* error){
 }
 void PrototypeGame::step(float dt){
  auto& s=*impl_;
+ if(s.mecha){s.mecha->step(dt);return;}
  if(s.water){s.water->step(dt);return;}
  if(s.flying){s.flying->step(dt);return;}
  if(s.racing){s.racing->step(dt);return;}
@@ -257,6 +260,7 @@ void PrototypeGame::step(float dt){
 }
 bool PrototypeGame::after_restore(std::string* error){
  auto& s=*impl_;
+ if(s.mecha)return s.mecha->after_restore(error);
  if(s.water)return s.water->after_restore(error);
  if(s.flying)return s.flying->after_restore(error);
  if(s.racing)return s.racing->after_restore(error);

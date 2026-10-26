@@ -101,7 +101,7 @@ static void seeded_churn() {
         const BrickKey brick{static_cast<std::int32_t>(generator()%32)-16,0,0};
         const auto channel=(generator()%4)==0 ? nav : gpu;
         auto result=index.submit(3,0,id,edit(brick,static_cast<std::uint32_t>(generator()%20),
-                                               generator()%512),channel);
+                                               static_cast<unsigned>(generator()%512)),channel);
         require(result!=RegionDirtySubmitResult::Invalid && result!=RegionDirtySubmitResult::CapacityExceeded);
         if(i%19==0) {
             auto tickets=index.lease_box(3,0,{-1,0,0},{0,0,0},8);

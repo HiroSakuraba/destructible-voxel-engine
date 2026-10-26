@@ -152,9 +152,9 @@ bool RegionCatalog::set_object_regions(std::uint64_t objectId, std::span<const R
     // Reserve reverse-map ownership before changing the forward index. This
     // makes all remaining reverse updates noexcept (vector swap).
     const bool firstMembership = previous == objectRegions_.end();
-    if (firstMembership) objectRegions_.try_emplace(objectId);
     std::vector<RegionKey> applied;
     applied.reserve(added.size());
+    if (firstMembership) objectRegions_.try_emplace(objectId);
     try {
         for (RegionKey k : added) {
             try {

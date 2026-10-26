@@ -34,7 +34,17 @@ RegionStreamingTickStats RegionStreamingRuntime::tick(RegionKey camera, std::uin
     const RuntimeScene* scene = world_.scene(sceneHandle_);
     if (!scene) {
         stats.sceneMissing = true;
-        for (auto& [_, job] : pending_) job.cancellation.request_cancel();
+        std::vector<std::uint64_t> finished;
+        for (auto& [id, job] : pending_) {
+            if (!job.cancelRequested) { job.cancellation.request_cancel(); job.cancelRequested = true; ++stats.cancelled; }
+            if (job.future.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+                finished.push_back(id);
+        }
+        for (auto id : finished) {
+            try { (void)pending_.at(id).future.get(); } catch (...) { ++stats.errors; }
+            pending_.erase(id);
+            ++stats.discarded;
+        }
         stats.pending = pending_.size();
         return stats;
     }

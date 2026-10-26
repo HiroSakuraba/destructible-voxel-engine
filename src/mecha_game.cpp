@@ -111,7 +111,7 @@ bool validate_mecha_scene(std::span<const PrototypeObjectView> objects,std::stri
  auto fail=[&](std::string s){if(error)*error=std::move(s);return false;};
  const auto registry=ComponentTypeRegistry::make_default();
  std::set<std::string> keys;
- int players=0,rules=0,torsos=0,targets=0;
+ int players=0,rules=0,torsos=0,targets=0;std::int64_t requiredTargets=0;
  for(const auto& o:objects){
   unsigned roles=0;
   for(const auto& c:o.components)if(c.enabled&&c.type.starts_with(kPrototypePrefix)){
@@ -121,7 +121,7 @@ bool validate_mecha_scene(std::span<const PrototypeObjectView> objects,std::stri
    const auto key=property(c,"key",std::string{});
    if(!key_ok(key)||!keys.insert(key).second)return fail("Duplicate or invalid mech actor key");
    if(!o.marker&&(c.type==rulesType))return fail("Mech rules require bodyless marker");
-   if(c.type==rulesType){++rules;const auto n=property(c,"target_count",std::int64_t{3});if(n<0||n>64)return fail("Invalid target count");}
+   if(c.type==rulesType){++rules;const auto n=property(c,"target_count",std::int64_t{3});if(n<1||n>64)return fail("Invalid target count");requiredTargets=n;}
    if(c.type==playerType){
     ++players;if(o.marker)return fail("Mech chassis must have visible geometry");
     MechMotorConfig cfg;cfg.maximumSpeed=float(property(c,"speed",11.0));
@@ -137,7 +137,7 @@ bool validate_mecha_scene(std::span<const PrototypeObjectView> objects,std::stri
    }
   }
  }
- if(players!=1||rules!=1||torsos>1||targets<1||targets>64)return fail("Mech scene requires one player, one rules marker, at most one torso and 64 targets");
+ if(players!=1||rules!=1||torsos>1||targets<1||targets>64||requiredTargets>targets)return fail("Mech scene requires one player, one rules marker, at most one torso and 64 targets");
  return true;
 }
 struct MechaGame::Impl {
@@ -150,6 +150,7 @@ struct MechaGame::Impl {
  MechMotorConfig config{};
  MechCombatTelemetry telemetry{};
  GameObjectId player{},torso{},rules{};
+ std::uint32_t requiredTargets{3};
  Float3 start{};
  float primaryCooldown{},rocketCooldown{},cameraFollow{};
  bool lastBoost{},lastPause{},lastRestart{},lastDebug{},started{};
@@ -176,7 +177,7 @@ struct MechaGame::Impl {
   hud.active=true;
   hud.stats="MECHA  HP "+std::to_string(int(hud.health))+"  ENERGY "+std::to_string(int(motor.energy));
   hud.vehicleTelemetry="AUTO "+std::to_string(rounds)+"  ROCKET "+std::to_string(missiles)+"  TARGETS "+
-     std::to_string(telemetry.targetsDestroyed)+"/"+std::to_string(targets.size());
+     std::to_string(telemetry.targetsDestroyed)+"/"+std::to_string(requiredTargets);
   hud.prompt="WASD MOVE  SHIFT BOOST  J/L AIM  MOUSE 1/2 FIRE  P PAUSE  R RESET";
   hud.message=hud.phase==PrototypePhase::Won?"TARGETS CLEARED - R TO RESTART":
       hud.phase==PrototypePhase::Paused?"PAUSED - P TO RESUME":"";
@@ -235,7 +236,7 @@ struct MechaGame::Impl {
     (void)world.queue_damage_sphere(id,hit.position,1.6F);
    }
   }
-  if(telemetry.targetsDestroyed>=targets.size())hud.phase=PrototypePhase::Won;
+  if(telemetry.targetsDestroyed>=requiredTargets)hud.phase=PrototypePhase::Won;
  }
  void shoot_primary(){
   if(primaryCooldown>0||rounds==0)return;
@@ -311,7 +312,7 @@ bool MechaGame::start(std::string* error){
    s.config.boostSpeed=float(property(c,"boost_speed",24.0));
    s.config.radius=float(property(c,"radius",.95));s.config.height=float(property(c,"height",3.5));
   }else if(c.type==torsoType)s.torso=o.id;
-  else if(c.type==rulesType)s.rules=o.id;
+  else if(c.type==rulesType){s.rules=o.id;s.requiredTargets=std::uint32_t(property(c,"target_count",std::int64_t{3}));}
   else if(c.type==targetType){
    const auto hp=float(property(c,"health",100.0));
    s.targets.push_back({o.id,property(c,"key",std::string{}),hp,hp,float(property(c,"hit_radius",1.2))});

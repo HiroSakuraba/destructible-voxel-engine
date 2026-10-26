@@ -41,7 +41,8 @@ struct PlayerRenderView {
     const PrototypeHud* prototypeHud{};
     std::span<const RacingVisualEffect> racingEffects{};
     const OceanField* ocean{}; // same deterministic waves used by hull physics
-    double oceanTime{}; // metres; lifetime owned by PrototypeGame
+    double oceanTime{}; // seconds, lifetime owned by PrototypeGame
+    std::span<const WaterSprayEffect> waterSpray{};
 };
 
 struct PlayerRenderStats {

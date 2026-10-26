@@ -80,7 +80,8 @@ bool OceanField::set_preset(OceanPreset preset,Float3 current)noexcept{
 OceanSample OceanField::sample(float x,float y,double seconds)const noexcept{
     OceanSample result{};
     if(!std::isfinite(x)||!std::isfinite(y)||!std::isfinite(seconds))return result;
-    if(count_==0){result.waterVelocity=current_;return result;}
+    if(count_==0){result.waterVelocity=current_;}
+    else {
     float u=x,v=y;
     const auto waveSpan=waves();
     // Invert horizontal displacement so the query is at the *world-space* x,y
@@ -105,6 +106,17 @@ OceanSample OceanField::sample(float x,float y,double seconds)const noexcept{
     if(result.normal.z<0)result.normal=multiply(result.normal,-1);
     result.waterVelocity=add(p.dt,current_);
     result.foam=std::clamp(p.foam*1.3F,0.0F,1.0F);
+    }
+    // Overlay local boat-generated disturbance on the same physical surface
+    // sampled by both the renderer and hull probes.
+    const auto disturbance=wakes_.sample(x,y,seconds);
+    result.height+=disturbance.height;
+    const float nz=(std::max)(result.normal.z,.001F);
+    const Float3 composed={-result.normal.x/nz+disturbance.slopeX,
+                           -result.normal.y/nz+disturbance.slopeY,1.F};
+    result.normal=normalize(Float3{-composed.x,-composed.y,1.F});
+    result.waterVelocity.z+=disturbance.verticalVelocity;
+    result.foam=std::clamp(result.foam+disturbance.foam,0.F,1.F);
     return result;
 }
 }

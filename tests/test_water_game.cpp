@@ -5,6 +5,7 @@
 #include "dve/player/player_app.hpp"
 #include "dve/player/player_renderer.hpp"
 #include <cmath>
+#include <array>
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
@@ -93,20 +94,44 @@ void integration(){
  // Restore existing #2 selection for the legacy save-position round trip.
  input.type=platform::EventType::KeyDown;input.key="2";app->handle_event(input);app->tick(1.F/60.F);
  input.type=platform::EventType::KeyUp;app->handle_event(input);
- auto save=app->save_game("water",&error);check(bool(save),"save W1 state: "+error);
+ std::vector<GameRenderObject> objects;
+ const auto beforeSave=app->render_view(objects,16.F/9.F);
+ check(beforeSave.ocean!=nullptr&&!beforeSave.ocean->wakes().empty(),
+       "fast driven boats emit real water disturbances");
+ const auto savedWakeCount=beforeSave.ocean->wakes().size();
+ const auto firstWake=beforeSave.ocean->wakes().front();
+ const auto savedSample=beforeSave.ocean->sample(firstWake.position.x,firstWake.position.y,beforeSave.oceanTime);
+ auto save=app->save_game("water",&error);check(bool(save),"save W3 state: "+error);
  const auto savedPos=*app->world().position(*ship);
  for(unsigned i=0;i<30;++i)app->tick(1.F/60.F);
  check(bool(app->load_game("water",&error)),"restore W1: "+error);
  check(length(subtract(*app->world().position(*ship),savedPos))<.001F,
        "water save retains ship 6-DOF position");
+ const auto afterLoad=app->render_view(objects,16.F/9.F);
+ check(afterLoad.ocean->wakes().size()==savedWakeCount,
+       "W3 save and restore retain exact active physical wake count");
+ const auto restoredSample=afterLoad.ocean->sample(firstWake.position.x,firstWake.position.y,afterLoad.oceanTime);
+ check(std::abs(restoredSample.height-savedSample.height)<.0001F,
+       "wake surface after reload agrees with saved water surface");
  auto renderer=make_cpu_player_renderer(nullptr);
  check(renderer->resize(320,180,&error),error);
- std::vector<GameRenderObject> objects;
  auto waterView=app->render_view(objects,16.F/9.F);
  check(waterView.ocean!=nullptr&&waterView.ocean->waves().size()>0,
        "player sees authoritative physics ocean waves");
  check(renderer->render(waterView,&error),"render water: "+error);
  const auto pixels=renderer->readback()->pixels;
+ // The W3 spray projection uses the same depth-aware rendering path as the
+ // real spray particles spawned from the ships' fixed-tick bow emitters.
+ WaterSprayEffect spray{};
+ const auto forward=normalize(subtract(waterView.camera.target,waterView.camera.position));
+ spray.position=add(waterView.camera.position,multiply(forward,5.F));
+ spray.radius=.8F;spray.opacity=.95F;spray.lifetime=1;
+ const std::array<WaterSprayEffect,1> effects{spray};
+ waterView.waterSpray=effects;
+ check(renderer->render(waterView,&error),"render injected bow spray: "+error);
+ check(renderer->readback()->pixels!=pixels,
+       "spray is rendered in front of the physical ocean");
+ waterView.waterSpray={};
  waterView.ocean=nullptr;
  check(renderer->render(waterView,&error),"render no water: "+error);
  check(renderer->readback()->pixels!=pixels,

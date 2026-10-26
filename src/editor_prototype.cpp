@@ -87,7 +87,7 @@ bool export_prototype_project(const EditorDocument& d,const EditorMaterialLibrar
   {"water_ship_1","key:1"},{"water_ship_2","key:2"},
   {"water_ship_3","key:3"},{"water_ship_4","key:4"},{"water_ship_5","key:5"},
   {"water_trim","key:q/-1,key:e/+1,gamepad:rightx"},
-  {"interact","key:e,gamepad:west"},{"pause","key:p,gamepad:start"},
+  {"interact","key:tab,gamepad:west"},{"pause","key:p,gamepad:start"},
   {"restart","key:r,gamepad:back"},{"prototype_debug","key:f3"}};}
  if(flying){
    manifest.inputBindings={{"move_x","key:a/-1,key:d/+1,gamepad:leftx"},

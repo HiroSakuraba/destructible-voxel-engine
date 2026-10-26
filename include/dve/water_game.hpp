@@ -11,6 +11,7 @@ struct WaterGameTelemetry {
     float speed{},waterHeight{},immersion{},rollRadians{},pitchRadians{};
     float impactRate{},rudder{},throttle{};
     float apparentWind{},sailDrive{},planingLift{},lateralSlip{},sailTrim{};
+    float localFoam{},wakeHeight{};unsigned activeWakes{};
     WatercraftType type{WatercraftType::Dinghy};
     unsigned activeVessel{},vesselCount{};
 };
@@ -25,6 +26,7 @@ public:
     [[nodiscard]] PrototypeCamera camera()const noexcept;
     [[nodiscard]] const OceanField& ocean()const noexcept;
     [[nodiscard]] double ocean_time()const noexcept;
+    [[nodiscard]] std::span<const WaterSprayEffect> spray_effects()const noexcept;
     [[nodiscard]] const WaterGameTelemetry& telemetry()const noexcept;
 private:struct Impl;std::unique_ptr<Impl> impl_;
 };

@@ -1,5 +1,6 @@
 #pragma once
 #include "dve/transform.hpp"
+#include "dve/water_wake.hpp"
 #include <array>
 #include <cstdint>
 #include <span>
@@ -26,12 +27,18 @@ public:
     [[nodiscard]] Float3 current()const noexcept{return current_;}
     [[nodiscard]] std::span<const OceanWave> waves()const noexcept{return {waves_.data(),count_};}
     [[nodiscard]] float maximum_wave_height()const noexcept{return maxHeight_;}
+    [[nodiscard]] bool emit_wake(const WaterWakeEvent& w)noexcept{return wakes_.emit(w);}
+    [[nodiscard]] bool restore_wakes(std::span<const WaterWakeEvent> w,double t)noexcept{return wakes_.restore(w,t);}
+    void prune_wakes(double t)noexcept{wakes_.prune(t);}
+    void clear_wakes()noexcept{wakes_.clear();}
+    [[nodiscard]] std::span<const WaterWakeEvent> wakes()const noexcept{return wakes_.events();}
 private:
     std::array<OceanWave,16> waves_{};
     std::uint32_t count_{};
     Float3 current_{};
     float maxHeight_{};
     OceanPreset preset_{OceanPreset::Calm};
+    WaterWakeField wakes_{};
 };
 [[nodiscard]] bool valid_ocean_wave(const OceanWave&)noexcept;
 }

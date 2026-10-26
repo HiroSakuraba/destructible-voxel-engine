@@ -151,6 +151,7 @@ add_library(dve_core
     src/racing_game.cpp
     src/water_ocean.cpp
     src/water_hydrodynamics.cpp
+    src/water_wake.cpp
     src/water_vessel_dynamics.cpp
     src/water_game.cpp
     src/flying_game.cpp
@@ -2793,6 +2794,9 @@ if(DVE_BUILD_TESTS)
         add_test(NAME dve_editor_tests COMMAND dve_editor_tests)
 
         if(TARGET dve_player_runtime)
+            add_executable(dve_water_wake_tests tests/test_water_wake.cpp)
+            target_link_libraries(dve_water_wake_tests PRIVATE dve::core)
+            add_test(NAME dve_water_wake_tests COMMAND dve_water_wake_tests)
             add_executable(dve_water_vessel_tests tests/test_water_vessel_dynamics.cpp)
             target_link_libraries(dve_water_vessel_tests PRIVATE dve::core)
             add_test(NAME dve_water_vessel_tests COMMAND dve_water_vessel_tests)

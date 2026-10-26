@@ -144,6 +144,40 @@ void draw_racing_effects(std::span<const RacingVisualEffect> effects,
 }
 
 
+void draw_water_spray(std::span<const WaterSprayEffect> spray,
+                      const render::PolygonCamera& camera,
+                      const render::PolygonRenderTarget& depth,
+                      std::span<std::uint8_t> rgba){
+    if(spray.empty()||!depth.valid()||rgba.size()!=std::size_t(depth.width)*depth.height*4)return;
+    const auto c=racing_camera(camera,depth.width,depth.height);
+    for(const auto& fx:spray){
+        if(fx.lifetime<=0||fx.age>=fx.lifetime)continue;
+        RacingProjected p{};
+        if(!project_racing(c,fx.position,p))continue;
+        const float radius=std::clamp(fx.radius*p.pixelsPerMetre,1.F,25.F);
+        const float life=std::clamp(1.F-fx.age/fx.lifetime,0.F,1.F);
+        const float alpha=std::clamp(fx.opacity*life,0.F,.85F);
+        const int left=(std::max)(0,int(std::floor(p.x-radius)));
+        const int right=(std::min)(int(depth.width)-1,int(std::ceil(p.x+radius)));
+        const int top=(std::max)(0,int(std::floor(p.y-radius)));
+        const int bottom=(std::min)(int(depth.height)-1,int(std::ceil(p.y+radius)));
+        for(int y=top;y<=bottom;++y)for(int x=left;x<=right;++x){
+            const float dx=(x+.5F-p.x)/radius,dy=(y+.5F-p.y)/radius;
+            const float r2=dx*dx+dy*dy;
+            if(r2>=1.F)continue;
+            const auto idx=std::size_t(y)*depth.width+std::size_t(x);
+            if(p.depth>depth.depth[idx]+.0001F)continue;
+            const float mix=alpha*(1-r2)*(1-r2);
+            constexpr float color[3]={195.F,228.F,243.F};
+            for(int channel=0;channel<3;++channel){
+                rgba[4*idx+channel]=std::uint8_t(std::clamp(
+                     float(rgba[4*idx+channel])*(1-mix)+color[channel]*mix,0.F,255.F));
+            }
+            rgba[4*idx+3]=255;
+        }
+    }
+}
+
 void draw_ocean_surface(const OceanField* ocean,double seconds,
                        const render::PolygonCamera& camera,
                        const render::PolygonRenderTarget& depth,
@@ -375,6 +409,7 @@ public:
         if (!render::resolve_polygon_render_rgba8(target_, exposure, environment.tonemapOperator,
                                                   frame_.pixels, error)) return false;
         draw_ocean_surface(view.ocean,view.oceanTime,view.camera,target_,frame_.pixels);
+        draw_water_spray(view.waterSpray,view.camera,target_,frame_.pixels);
         draw_racing_effects(view.racingEffects,view.camera,target_,frame_.pixels);
         if(view.prototypeHud)draw_prototype_hud(frame_.pixels,frame_.width,frame_.height,*view.prototypeHud);
         stats_.resolveMilliseconds = milliseconds_since(resolveStart);

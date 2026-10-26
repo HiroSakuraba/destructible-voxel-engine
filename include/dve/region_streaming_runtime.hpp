@@ -55,6 +55,7 @@ private:
         RuntimeSceneCancellationToken cancellation{};
         bool cancelRequested{};
     };
+    [[nodiscard]] bool in_retry_backoff(std::uint64_t id, std::uint64_t tick) const;
     const RegionCatalog& catalog_;
     RuntimeSceneWorld& world_;
     RuntimeSceneStagingExecutor& executor_;

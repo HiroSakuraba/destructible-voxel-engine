@@ -86,7 +86,7 @@ std::optional<RegionStreamingPlan> RegionStreamingPlanner::plan(
             return key.worldId == camera.worldId && key.lod == camera.lod;
         });
         if (!inWorld) continue; // never evict an unrelated world/LOD's object
-        if (!object.loaded && !object.inFlight && near->contains(object.objectId)) {
+        if (!object.loaded && !object.inFlight && !object.retryBackoff && near->contains(object.objectId)) {
             std::uint64_t nearest = std::numeric_limits<std::uint64_t>::max();
             for (const auto key : memberships) {
                 if (key.worldId == camera.worldId && key.lod == camera.lod)

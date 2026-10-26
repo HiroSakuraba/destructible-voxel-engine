@@ -5,7 +5,41 @@
 using namespace dve;
 static void require(bool condition) { if (!condition) throw std::runtime_error("R2 bridge failed"); }
 
+// Regression (Codex P2 4381912405): objects in retry backoff must not use up the per-tick load
+// slots. With loadsPerTick=1 the failed nearest object used to be the only candidate, starving
+// a third object although maximumInFlight had free capacity.
+static void retry_backoff_does_not_consume_load_slots() {
+    RegionCatalog catalog;
+    for (std::uint64_t id : {201, 202, 203})
+        require(catalog.set_object_regions(id, std::vector<RegionKey>{{1,0,0,0,0}}));
+    RuntimeSceneWorld world;
+    world.store.list = {{{201,false},false},{{202,false},false},{{203,false},false}};
+    RuntimeSceneStagingExecutor jobs;
+    RegionStreamingRuntimeConfig config;
+    config.planner = {1,3,100,1,1,1}; // one load per tick
+    config.maximumInFlight = 3;
+    config.maximumPublicationsPerTick = 3;
+    config.retryDelayTicks = 60;
+    RegionStreamingRuntime streamer(catalog, world, jobs, 1, config);
+    const RegionKey camera{1,0,0,0,0};
+    require(streamer.tick(camera, 0).submitted == 1 && jobs.queued.contains(201));
+    jobs.complete(201, true); // 201 fails and enters 60-tick backoff
+    auto stats = streamer.tick(camera, 1); // consumes the failure; 202 is the planned load
+    require(stats.errors == 1 && stats.submitted == 1 && jobs.queued.contains(202));
+    // Tick 2: 201 is the nearest/lowest-id candidate but backed off. 203 must take the slot.
+    stats = streamer.tick(camera, 2);
+    require(stats.submitted == 1);
+    require(jobs.queued.contains(203));
+    require(jobs.submissions == 3 && !jobs.queued.contains(201));
+    // 201 stays blocked for the full delay and is retried afterwards.
+    require(streamer.tick(camera, 30).submitted == 0 && jobs.submissions == 3);
+    jobs.complete(202); jobs.complete(203);
+    (void)streamer.tick(camera, 31);
+    require(streamer.tick(camera, 62).submitted == 1 && jobs.submissions == 4);
+}
+
 int main() {
+    retry_backoff_does_not_consume_load_slots();
     RegionCatalog catalog;
     require(catalog.set_object_regions(101, std::vector<RegionKey>{{1,0,0,0,0}}));
     require(catalog.set_object_regions(102, std::vector<RegionKey>{{1,0,0,0,0}}));

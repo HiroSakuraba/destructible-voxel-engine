@@ -32,6 +32,11 @@ void RegionStreamingRuntime::allow_static_unload(std::uint64_t id, bool allowed)
     else unloadAllowed_.erase(id);
 }
 
+bool RegionStreamingRuntime::in_retry_backoff(std::uint64_t id, std::uint64_t tick) const {
+    const auto failed = failedAt_.find(id);
+    return failed != failedAt_.end() && (tick < failed->second || tick - failed->second < config_.retryDelayTicks);
+}
+
 RegionStreamingTickStats RegionStreamingRuntime::tick(RegionKey camera, std::uint64_t tick) {
     RegionStreamingTickStats stats{};
     if (std::this_thread::get_id() != authorityThread_) { stats.wrongThread = true; return stats; }
@@ -61,7 +66,8 @@ RegionStreamingTickStats RegionStreamingRuntime::tick(RegionKey camera, std::uin
         else loadedAt_.erase(id);
         objects.push_back({id, object.loaded(), pins_.contains(id),
             config_.enableStaticUnloads && object.metadata().anchored && unloadAllowed_.contains(id),
-            loadedAt_.contains(id) ? loadedAt_.at(id) : tick, pending_.contains(id)});
+            loadedAt_.contains(id) ? loadedAt_.at(id) : tick, pending_.contains(id),
+            in_retry_backoff(id, tick)});
     }
     const auto plan = planner_.plan(catalog_, camera, objects, tick);
     if (!plan) {
@@ -142,8 +148,9 @@ RegionStreamingTickStats RegionStreamingRuntime::tick(RegionKey camera, std::uin
         const auto* current = world_.scene(sceneHandle_);
         const auto* object = current ? current->find_object(id) : nullptr;
         if (!object || object->loaded()) continue;
-        if (const auto failed = failedAt_.find(id); failed != failedAt_.end() &&
-            (tick < failed->second || tick - failed->second < config_.retryDelayTicks)) continue;
+        // Backed-off objects were already filtered out of the plan before its load limit; this
+        // also covers an object that failed earlier in this very tick.
+        if (in_retry_backoff(id, tick)) continue;
         try {
             RuntimeSceneStageOptions stage = config_.stage;
             stage.cancellation = RuntimeSceneCancellationToken{};

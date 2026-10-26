@@ -32,6 +32,8 @@ struct RuntimeDeferredObjectStaging {
 struct RuntimeDeferredObjectStageResult {
     RuntimeDeferredObjectStaging staging{};
     RuntimeSceneError error{};
+    // Models the retained-memory reservation the real executor attaches to a delivered result.
+    std::shared_ptr<void> reservation{};
 };
 struct RuntimeSceneObjectMetadata {
     std::uint64_t id{};
@@ -73,6 +75,7 @@ class RuntimeSceneStagingExecutor {
 public:
     std::map<std::uint64_t, std::promise<RuntimeDeferredObjectStageResult>> queued;
     std::map<std::uint64_t, RuntimeSceneCancellationToken> tokens;
+    std::map<std::uint64_t, std::weak_ptr<void>> reservations; // alive while a result still holds it
     std::uint64_t submissions{};
     std::future<RuntimeDeferredObjectStageResult> submit_deferred_object(
         const RuntimeSceneWorld&, RuntimeSceneHandle, std::uint64_t id,
@@ -82,9 +85,11 @@ public:
         auto& p = queued[id];
         return p.get_future();
     }
-    void complete(std::uint64_t id) {
+    void complete(std::uint64_t id, bool fail = false) {
         auto p=std::move(queued.at(id)); queued.erase(id);
-        p.set_value({{1,id},{false}});
+        auto reservation = std::make_shared<int>(0);
+        reservations[id] = reservation;
+        p.set_value({{1,id},{fail},reservation});
     }
 };
 }

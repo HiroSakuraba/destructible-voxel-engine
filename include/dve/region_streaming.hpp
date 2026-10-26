@@ -26,6 +26,9 @@ struct RegionStreamingObject {
     bool mayUnload{};
     std::uint64_t loadedSinceTick{};
     bool inFlight{};
+    // Retry backoff after a failed load: still near, but not a load candidate. Excluded
+    // before loadsPerTick is applied so it cannot consume slots that other objects could use.
+    bool retryBackoff{};
 };
 
 struct RegionStreamingPlan {

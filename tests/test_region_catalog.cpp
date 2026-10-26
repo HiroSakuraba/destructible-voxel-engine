@@ -38,7 +38,9 @@ void run_backend(RegionIndexBackend backend) {
     RegionWorldAabb local{{0,0,0},{16,8,8}};
     auto bounds = RegionCatalog::transformed_brick_bounds(local, transform, 1.0);
     assert(bounds && bounds->minimum == (BrickKey{9,-2,0}));
-    assert(bounds->maximum == (BrickKey{9,-1,0}));
+    // x' = 80 - localY is reflected: local y in [0,8) maps to (72,80], so the
+    // included local y=0 face sits at world x=80 and belongs to brick 10.
+    assert(bounds->maximum == (BrickKey{10,-1,0}));
     assert(!RegionCatalog::transformed_brick_bounds(local, transform, 0));
     assert(!RegionCatalog::transformed_brick_bounds({{0,0,0},{INFINITY,1,1}}, transform, 1));
     assert(!RegionCatalog::transformed_brick_bounds({{0,0,0},{1,1,1}},
@@ -69,6 +71,48 @@ void run_backend(RegionIndexBackend backend) {
     assert(catalog.object_regions(300) == (std::vector<RegionKey>{{5,0,0,-1,0}}));
 }
 
+// Regression (Codex P2 4381518130): reflected axes keep their inclusive upper endpoint.
+void reflected_bounds_keep_inclusive_upper_endpoint(RegionIndexBackend backend) {
+    // worldX = 128 - localX over local [0,8)^3, 1 m voxels (8 m bricks), default 16-brick regions.
+    const RegionWorldAabb local{{0,0,0},{8,8,8}};
+    const RegionAffine3x4 mirrorX{{-1,0,0,128, 0,1,0,0, 0,0,1,0}};
+    auto bounds = RegionCatalog::transformed_brick_bounds(local, mirrorX, 1.0);
+    // local x in [0,8) -> world x in (120,128]; x=128 is included and is in brick 16.
+    assert(bounds && bounds->minimum == (BrickKey{15,0,0}));
+    assert(bounds->maximum == (BrickKey{16,0,0}));
+
+    RegionCatalog catalog({16, backend, 48});
+    assert(catalog.set_object_bounds(7, 1, 0, local, mirrorX, 1.0));
+    // Brick 16 is region x=1; the object must be registered in both regions 0 and 1.
+    assert(catalog.object_regions(7) == (std::vector<RegionKey>{{1,0,0,0,0},{1,0,1,0,0}}));
+    // query() takes inclusive *region* coordinates: region x=1 must find the object.
+    auto hit = catalog.query(1, 0, {1,0,0}, {1,0,0});
+    assert(hit && hit->size() == 1 && (*hit)[0].key == (RegionKey{1,0,1,0,0}) &&
+           (*hit)[0].objectIds == (std::vector<std::uint64_t>{7}));
+
+    // Every axis reflected, and the same for a reflection through a negative-coordinate boundary.
+    const RegionAffine3x4 mirrorAll{{-1,0,0,0, 0,-1,0,0, 0,0,-1,0}};
+    auto all = RegionCatalog::transformed_brick_bounds(local, mirrorAll, 1.0);
+    // world (-8,0] on each axis: bricks -1 (exclusive low) .. 0 (inclusive 0).
+    assert(all && all->minimum == (BrickKey{-1,-1,-1}) && all->maximum == (BrickKey{0,0,0}));
+
+    // Unreflected axes remain half-open: [0,8) -> brick 0 only (no over-extension).
+    const RegionAffine3x4 shift{{1,0,0,128, 0,1,0,0, 0,0,1,0}};
+    auto plain = RegionCatalog::transformed_brick_bounds(local, shift, 1.0);
+    assert(plain && plain->minimum == (BrickKey{16,0,0}) && plain->maximum == (BrickKey{16,0,0}));
+
+    // Rotation about Z by 90 degrees: world x = 128 - localY (reflected), world y = localX (half-open).
+    const RegionAffine3x4 rot{{0,-1,0,128, 1,0,0,0, 0,0,1,0}};
+    auto rotated = RegionCatalog::transformed_brick_bounds(local, rot, 1.0);
+    assert(rotated && rotated->maximum == (BrickKey{16,0,0}));
+
+    // Mixed-sign combination never attains its supremum -> stays exclusive.
+    const RegionAffine3x4 mixed{{1,-1,0,16, 0,1,0,0, 0,0,1,0}};
+    auto mix = RegionCatalog::transformed_brick_bounds(local, mixed, 1.0);
+    // x' = lx - ly + 16 in (9,24) -> bricks 1..2 (24 itself is not attained).
+    assert(mix && mix->minimum.x == 1 && mix->maximum.x == 2);
+}
+
 void compare_backends() {
     RegionCatalog hash({8, RegionIndexBackend::HashSorted, 8192});
     RegionCatalog tree({8, RegionIndexBackend::OrderedMap, 8192});
@@ -96,6 +140,8 @@ void compare_backends() {
 int main() {
     run_backend(RegionIndexBackend::HashSorted);
     run_backend(RegionIndexBackend::OrderedMap);
+    reflected_bounds_keep_inclusive_upper_endpoint(RegionIndexBackend::HashSorted);
+    reflected_bounds_keep_inclusive_upper_endpoint(RegionIndexBackend::OrderedMap);
     compare_backends();
     std::cout << "region catalog tests passed\n";
 }

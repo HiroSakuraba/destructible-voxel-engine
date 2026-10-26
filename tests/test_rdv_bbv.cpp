@@ -1,4 +1,5 @@
 #include "dve/render/rdv_bbv.hpp"
+#include "dve/render/rdv_viewport.hpp"
 #include "dve/rhi/null_device.hpp"
 #ifdef DVE_RDV_HAS_VULKAN
 #include "dve/rhi/vulkan_device.hpp"
@@ -129,6 +130,84 @@ void test_clip_map_publication_and_rays() {
           "GPU publication leaked an RHI buffer");
 }
 
+void test_viewport_frame_bridge() {
+    VoxelObject object(2049);
+    object.fill_brick({0,0,0}, 9);
+    PackedBrickmapScene source;
+    source.rebuild(object);
+    rhi::NullDevice device;
+    {
+        BbvViewportBridge bridge(device, {4,2,2});
+        dve::render::CameraFramePlan frame;
+        dve::render::CameraViewportRenderPlan first;
+        first.frame.viewport.id = 11;
+        first.frame.pose.position = {1, 1, 1};
+        first.history.resetOcclusion = true;
+        dve::render::CameraViewportRenderPlan second = first;
+        second.frame.viewport.id = 12;
+        second.frame.pose.position = {9, 1, 1};
+        frame.viewports = {first, second};
+        std::string error;
+        check(bridge.advance(frame, source, 1.0F, 1U, {}, false, {}, &error),
+              error.c_str());
+        check(bridge.size() == 2 && bridge.buffer(11) && bridge.buffer(12),
+              "independent per-viewport GPU buffers were not published");
+        check(bridge.clipmap(11)->occupied_at({0,0,0}) &&
+              bridge.clipmap(12)->occupied_at({0,0,0}),
+              "viewport bridge did not source authoritative bricks");
+        check(bridge.reset_radiance_history(11), "new viewport should reset temporal history");
+        const auto afterFirst = device.statistics().uploadedBytes;
+
+        frame.viewports[0].history = {};
+        frame.viewports[1].history = {};
+        check(bridge.advance(frame, source, 1.0F, 1U, {}, false, {}, &error),
+              error.c_str());
+        check(device.statistics().uploadedBytes == afterFirst,
+              "unchanged viewports uploaded redundant occupancy data");
+        check(!bridge.reset_radiance_history(11), "stable camera reset radiance history");
+
+        // Incomplete edit list must conservatively reconcile a new source revision.
+        (void)object.set_voxel({0,0,0}, kAirMaterial);
+        source.rebuild(object);
+        check(bridge.advance(frame, source, 1.0F, 2U, {}, false, {}, &error),
+              error.c_str());
+        check(!bridge.clipmap(11)->occupied_at({0,0,0}) &&
+              !bridge.clipmap(12)->occupied_at({0,0,0}),
+              "revision without edit keys left stale voxel data");
+
+        (void)object.set_voxel({1,1,1}, kAirMaterial);
+        source.rebuild(object);
+        const BrickKey key{0,0,0};
+        const auto beforeEdit = device.statistics().uploadedBytes;
+        check(bridge.advance(frame, source, 1.0F, 3U, std::span(&key,1), true, {}, &error),
+              error.c_str());
+        check(!bridge.clipmap(11)->occupied_at({1,1,1}),
+              "complete dirty-key publication ignored destruction");
+        check(device.statistics().uploadedBytes - beforeEdit == 2U*sizeof(BbvBrick),
+              "complete dirty key should upload exactly one record per viewport");
+
+        frame.viewports[0].history.resetTaa = true;
+        const auto beforeCut = device.statistics().uploadedBytes;
+        check(bridge.advance(frame, source, 1.0F, 3U, {}, false, {}, &error),
+              error.c_str());
+        check(bridge.reset_radiance_history(11) &&
+              device.statistics().uploadedBytes == beforeCut,
+              "camera cut should reset history without rebuilding occupancy");
+
+        frame.viewports.pop_back();
+        frame.viewports[0].history = {};
+        check(bridge.advance(frame, source, 1.0F, 3U, {}, false, {}, &error),
+              error.c_str());
+        check(bridge.size() == 1 && !bridge.buffer(12),
+              "retired viewport retained its GPU buffer");
+        bridge.reset();
+        check(bridge.size() == 0 && !bridge.buffer(11),
+              "viewport bridge did not release its state");
+    }
+    check(device.statistics().buffersCreated == device.statistics().buffersDestroyed,
+          "viewport bridge leaked GPU allocations");
+}
+
 void test_validation() {
     try { BbvClipmap wrong({0, 4, 4}); (void)wrong; throw std::runtime_error("bad dimensions accepted"); }
     catch (const std::invalid_argument&) {}
@@ -213,6 +292,7 @@ void test_validation() {
 int main() {
     try {
         test_clip_map_publication_and_rays();
+        test_viewport_frame_bridge();
         test_validation();
         std::cout << "dve_rdv_bbv_tests: PASS\n";
         return 0;

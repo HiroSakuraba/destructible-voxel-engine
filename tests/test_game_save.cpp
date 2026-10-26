@@ -509,13 +509,23 @@ void test_material_texture_sets() {
         m.textureSharpness = 6.0F;
         m.displacementDepthMeters = 0.035F;
         m.displacementMode = 1U;
+        m.textureAntiTiling = 0.2F;
     }
+    // A rule-driven layer on the first material.
+    object->materials[0].layers.push_back({});
+    object->materials[0].layers[0].sourceMaterial = 1;
+    object->materials[0].layers[0].weight = 0.7F;
+    object->materials[0].layers[0].rules.enabled = true;
+    object->materials[0].layers[0].rules.slopeMinCos = 0.65F;
+    object->materials[0].layers[0].rules.noiseAmount = 0.25F;
+    object->materials[0].layers[0].rules.seed = 42;
     const auto bytes = codec.encode(saved, nullptr, &error);
     CHECK(bytes.has_value());
     if (!bytes) { std::cerr << "texture set encode: " << error << '\n'; return; }
     const auto document = decode_save_game_document(*bytes, {}, &error);
     CHECK(document && document->sections.contains("dve.material_textures"));
     CHECK(document && document->sections.contains("dve.material_displacement"));
+    CHECK(document && document->sections.contains("dve.material_rules"));
     const auto decoded = codec.decode(*bytes, nullptr, &error);
     CHECK(decoded.has_value());
     if (!decoded) { std::cerr << "texture set decode: " << error << '\n'; return; }
@@ -527,7 +537,10 @@ void test_material_texture_sets() {
                 found = found && m.baseColorMap && m.heightMap && !m.ormMap && m.baseColorMap->contentHash == albedo->contentHash &&
                         m.heightMap->contentHash == height->contentHash && m.baseColorMap->role == 1U && m.heightMap->role == 2U &&
                         m.textureTileMeters == 0.3F && m.textureSharpness == 6.0F && m.displacementDepthMeters == 0.035F &&
-                        m.displacementMode == 1U;
+                        m.displacementMode == 1U && m.textureAntiTiling == 0.2F;
+            found = found && !o.materials.empty() && o.materials[0].layers.size() == 1 && o.materials[0].layers[0].rules.enabled &&
+                    o.materials[0].layers[0].rules.slopeMinCos == 0.65F && o.materials[0].layers[0].rules.noiseAmount == 0.25F &&
+                    o.materials[0].layers[0].rules.seed == 42U;
         }
     CHECK(found);
     const auto again = codec.encode(*decoded, nullptr, &error);

@@ -85,6 +85,7 @@ bool validate_definition(const VoxelMaterialDefinition& value, MaterialId id, st
             static_cast<unsigned>(layer.blendMode) > static_cast<unsigned>(MaterialLayerBlendMode::Additive))
             return fail("material layer is invalid");
     }
+    if (!material_rules_valid(value)) return fail("material layer rules or texture anti-tiling are out of range");
     if (static_cast<unsigned>(value.shadingModel) > static_cast<unsigned>(MaterialShadingModel::ClearCoat) ||
         static_cast<unsigned>(value.blendMode) > static_cast<unsigned>(MaterialBlendMode::Translucent))
         return fail("material shading or blend mode is invalid");
@@ -233,7 +234,9 @@ bool EditorMaterialLibrary::write_stream(std::ostream& output,std::string* error
         const bool displacement=std::any_of(entries_.begin(),entries_.end(),[](const auto& e){return material_has_displacement_settings(e.second.definition);});
         // Version 12: the solid-texture surface patterns (Marble, Strata, Cellular); no new fields.
         const bool solid=std::any_of(entries_.begin(),entries_.end(),[](const auto& e){return surface_pattern_is_solid_texture(e.second.definition.surfaceDetail.pattern);});
-        output << "DVE_EDITOR_MATERIALS " << (solid ? 12 : displacement ? 11 : textures ? 10 : iridescence ? 9 : sheen ? 8 : details ? 7 : origins ? 6 : normalMaps ? 5 : 4) << "\n" << entries_.size() << "\n" << std::setprecision(9);
+        // Version 13: layer rules and texture anti-tiling.
+        const bool rules=std::any_of(entries_.begin(),entries_.end(),[](const auto& e){return material_has_rules(e.second.definition);});
+        output << "DVE_EDITOR_MATERIALS " << (rules ? 13 : solid ? 12 : displacement ? 11 : textures ? 10 : iridescence ? 9 : sheen ? 8 : details ? 7 : origins ? 6 : normalMaps ? 5 : 4) << "\n" << entries_.size() << "\n" << std::setprecision(9);
         for (const auto& [id, entry] : entries_) {
             const auto& m = entry.definition;
             output << static_cast<unsigned>(id) << ' ' << std::quoted(m.name) << ' '
@@ -256,7 +259,7 @@ bool EditorMaterialLibrary::write_stream(std::ostream& output,std::string* error
             }
             output << ' ' << m.transmission << ' ' << m.indexOfRefraction << ' ' << m.attenuationColor.x << ' '
                    << m.attenuationColor.y << ' ' << m.attenuationColor.z << ' ' << m.attenuationDistanceMeters;
-            if (normalMaps || origins || details || sheen || iridescence || textures || displacement || solid) {
+            if (normalMaps || origins || details || sheen || iridescence || textures || displacement || solid || rules) {
                 if (const VoxelNormalMap* map = m.normalMap.get()) {
                     static constexpr char kHex[] = "0123456789abcdef";
                     std::string hex;
@@ -268,11 +271,11 @@ bool EditorMaterialLibrary::write_stream(std::ostream& output,std::string* error
                     output << " 0";
                 }
             }
-            if(origins || details || sheen || iridescence || textures || displacement || solid) output << ' ' << std::quoted(m.preset.id) << ' ' << m.preset.revision << ' ' << m.preset.overrides;
-            if(details || sheen || iridescence || textures || displacement || solid){output << ' ' << unsigned(m.surfaceDetail.pattern) << ' ' << unsigned(m.surfaceDetail.space) << ' ' << m.surfaceDetail.seed;for(float v:surface_detail_values(m.surfaceDetail))output << ' ' << v;}
-            if(sheen || iridescence || textures || displacement || solid){output << ' ' << m.sheenColor.x << ' ' << m.sheenColor.y << ' ' << m.sheenColor.z << ' ' << m.sheenRoughness;}
-            if(iridescence || textures || displacement || solid){output << ' ' << m.iridescence << ' ' << m.iridescenceIor << ' ' << m.iridescenceThicknessNm;}
-            if (textures || displacement || solid) {
+            if(origins || details || sheen || iridescence || textures || displacement || solid || rules) output << ' ' << std::quoted(m.preset.id) << ' ' << m.preset.revision << ' ' << m.preset.overrides;
+            if(details || sheen || iridescence || textures || displacement || solid || rules){output << ' ' << unsigned(m.surfaceDetail.pattern) << ' ' << unsigned(m.surfaceDetail.space) << ' ' << m.surfaceDetail.seed;for(float v:surface_detail_values(m.surfaceDetail))output << ' ' << v;}
+            if(sheen || iridescence || textures || displacement || solid || rules){output << ' ' << m.sheenColor.x << ' ' << m.sheenColor.y << ' ' << m.sheenColor.z << ' ' << m.sheenRoughness;}
+            if(iridescence || textures || displacement || solid || rules){output << ' ' << m.iridescence << ' ' << m.iridescenceIor << ' ' << m.iridescenceThicknessNm;}
+            if (textures || displacement || solid || rules) {
                 // Version 10: a mask of the texture-set maps, the projection, then each map (hex texels).
                 const VoxelNormalMap* maps[4] = {m.baseColorMap.get(), m.ormMap.get(), m.heightMap.get(), m.emissiveMap.get()};
                 unsigned mask = 0U;
@@ -290,7 +293,16 @@ bool EditorMaterialLibrary::write_stream(std::ostream& output,std::string* error
                     }
                 }
             }
-            if (displacement || solid) output << ' ' << m.displacementDepthMeters << ' ' << unsigned(m.displacementMode);   // version 11
+            if (displacement || solid || rules) output << ' ' << m.displacementDepthMeters << ' ' << unsigned(m.displacementMode);   // version 11
+            if (rules) {   // version 13
+                output << ' ' << m.textureAntiTiling;
+                for (const VoxelMaterialLayer& layer : m.layers) {
+                    output << ' ' << (layer.rules.enabled ? 1 : 0);
+                    if (!layer.rules.enabled) continue;
+                    output << ' ' << layer.rules.seed;
+                    for (const float v : material_layer_rule_values(layer.rules)) output << ' ' << v;
+                }
+            }
             output << '\n';
         }
     if(!output){if(error)*error="Failed to write material stream";return false;}return true;
@@ -328,7 +340,7 @@ std::optional<EditorMaterialLibrary> EditorMaterialLibrary::read_stream(std::ist
         unsigned version{};
         std::size_t count{};
         input >> magic >> version >> count;
-        if (magic != "DVE_EDITOR_MATERIALS" || (version < 1 || version > 12) || count > 256)
+        if (magic != "DVE_EDITOR_MATERIALS" || (version < 1 || version > 13) || count > 256)
             throw std::runtime_error("unsupported material library");
         EditorMaterialLibrary result(false);
         for (std::size_t index = 0; index < count; ++index) {
@@ -448,6 +460,20 @@ std::optional<EditorMaterialLibrary> EditorMaterialLibrary::read_stream(std::ist
                 if (mode > 1U) throw std::runtime_error("invalid material displacement record");
                 m.displacementMode = static_cast<std::uint8_t>(mode);
                 if (!material_displacement_settings_valid(m)) throw std::runtime_error("invalid material displacement record");
+            }
+            if (version >= 13) {
+                input >> m.textureAntiTiling;
+                for (VoxelMaterialLayer& layer : m.layers) {
+                    int enabled{};
+                    input >> enabled;
+                    layer.rules.enabled = enabled != 0;
+                    if (!layer.rules.enabled) continue;
+                    std::array<float, kMaterialLayerRuleFloatCount> values{};
+                    input >> layer.rules.seed;
+                    for (float& v : values) input >> v;
+                    set_material_layer_rule_values(layer.rules, values);
+                }
+                if (!input || !material_rules_valid(m)) throw std::runtime_error("invalid material rules record");
             }
             if (version == 1 && m.transparent) m.blendMode = MaterialBlendMode::Translucent;
             if (!input || rawId > 255) throw std::runtime_error("malformed material record");

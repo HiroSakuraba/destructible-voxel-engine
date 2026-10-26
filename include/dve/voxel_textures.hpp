@@ -41,6 +41,12 @@ enum class VoxelImageRole : std::uint8_t {
 // with trilinear filtering at a fractional level. Colour images return linear values.
 [[nodiscard]] Float4 sample_voxel_image(const VoxelNormalMap& image, float u, float v, float level) noexcept;
 
+// The same, anti-tiled (VoxelMaterialDefinition::textureAntiTiling): each tile of the repeat is
+// offset at random, tiles of each projection (0 X, 1 Y, 2 Z) by their own offsets, and
+// neighbouring tiles blend across a band `band` tiles wide (0 = plain sample, at most 0.5).
+[[nodiscard]] Float4 sample_voxel_image_untiled(const VoxelNormalMap& image, float u, float v, float level, float band,
+                                                int projection) noexcept;
+
 struct VoxelTextureSample {
     Float3 baseColor{1.0F, 1.0F, 1.0F};
     float alpha{1.0F};

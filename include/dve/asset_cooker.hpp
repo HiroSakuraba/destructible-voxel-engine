@@ -1,5 +1,6 @@
 #pragma once
 #include "dve/material_preset_origin.hpp"
+#include "dve/material_layer_rules.hpp"
 #include "dve/material_surface_detail.hpp"
 
 #include <array>
@@ -31,6 +32,10 @@ struct VoxelMaterialLayer {
     float weight{0.0F};
     MaterialLayerBlendMode blendMode{MaterialLayerBlendMode::Lerp};
     bool enabled{true};
+    // Where the layer covers the surface (slope, height, occlusion, edges, base height, noise;
+    // dve/material_layer_rules.hpp). Disabled (the default): the uniform weight. CPU reference
+    // renderers only; GPU material tables resolve the uniform weight.
+    MaterialLayerRules rules{};
 };
 
 inline constexpr std::size_t kMaximumVoxelMaterialLayers = 4;
@@ -262,6 +267,10 @@ struct VoxelMaterialDefinition {
     std::shared_ptr<const VoxelNormalMap> emissiveMap;
     float textureTileMeters{1.0F};
     float textureSharpness{4.0F};
+    // Anti-tiling for the texture set (not the normal map): each tile of every projection is
+    // offset at random (the same offset for all maps, so colour and height stay aligned), and
+    // neighbouring tiles blend across a band this wide, in tiles: 0 (off) .. 0.5.
+    float textureAntiTiling{0.0F};
     // Displacement by the height map (dve/voxel_displacement.hpp): how deep h = 0 lies below the
     // original face (0 = none; capped at half a voxel when drawn). Traced (0) reshapes the voxel in
     // the tracer (outlines, shadows, AO, depth); Parallax (1) shifts only the shading.
@@ -325,6 +334,21 @@ inline constexpr std::uint32_t kMaximumVoxelNormalMapDimension = 4096U;
     if (!material_has_textures(m)) return true;
     return ok(m.baseColorMap) && ok(m.ormMap) && ok(m.heightMap) && ok(m.emissiveMap) && in(m.textureTileMeters, 1.0e-4F, 1.0e4F) &&
            in(m.textureSharpness, 1.0F, 64.0F);
+}
+// Rule-driven layers and anti-tiling (written and hashed only when used).
+[[nodiscard]] inline bool material_has_rules(const VoxelMaterialDefinition& m) noexcept {
+    if (m.textureAntiTiling != 0.0F) return true;
+    for (const VoxelMaterialLayer& layer : m.layers)
+        if (layer.rules.enabled) return true;
+    return false;
+}
+// Content hash of the rules and anti-tiling (0 when material_has_rules is false).
+[[nodiscard]] std::uint64_t material_rules_hash(const VoxelMaterialDefinition& m) noexcept;
+[[nodiscard]] inline bool material_rules_valid(const VoxelMaterialDefinition& m) noexcept {
+    if (!(m.textureAntiTiling >= 0.0F && m.textureAntiTiling <= 0.5F)) return false;
+    for (const VoxelMaterialLayer& layer : m.layers)
+        if (!material_layer_rules_valid(layer.rules)) return false;
+    return true;
 }
 // Displacement fields in range: depth 0..10 m, mode 0 (traced) or 1 (parallax). They are written
 // and hashed only when the depth is non-zero.

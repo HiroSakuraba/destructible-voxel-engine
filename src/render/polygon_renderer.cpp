@@ -8,6 +8,7 @@
 #include "dve/render/surface_shading.hpp"
 #include "dve/render/atmosphere.hpp"
 #include "dve/voxel_displacement.hpp"
+#include "dve/material_layer_rules.hpp"
 #include "dve/voxel_textures.hpp"
 #include "dve/render/subsurface.hpp"
 
@@ -845,6 +846,15 @@ void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,con
                         layer.surface.height=sample_mapped_binding(*tri.asset,binding.height,chains,tri.binding->mapping,heightUv,
                             textureWorld,textureObject,tri.binding->mapping.mappingMode==MaterialMappingMode::ObjectTriplanar?inverse_transform_vector(tri.transform,geometryNormal):geometryNormal,tri.binding->mapping.baseTransform,1.0F,textureLod.selected(tri.binding->mapping.mappingMode==MaterialMappingMode::UV1||binding.height.texcoord==1),stats,{0.5F,0.5F,0.5F,1.0F}).x;
                     }
+                }
+                if(authored.rules.enabled){
+                    // Rule masks (dve/material_layer_rules.hpp): meshes have no AO or voxel edges here.
+                    MaterialLayerRuleContext rule;
+                    rule.worldPositionMeters=multiply(textureWorld,resolve_meters_per_voxel(options.metersPerUnit));
+                    rule.worldNormal=normalize(interpolatedNormal);
+                    rule.baseHeight=surface.height;
+                    rule.footprintMeters=(std::max)(length(textureLod.worldDx),length(textureLod.worldDy))*resolve_meters_per_voxel(options.metersPerUnit);
+                    layer.mask*=material_layer_rule_factor(authored.rules,rule);
                 }
                 const Float3 tangentLayerNormal=layer.surface.normal;
                 layer.surface.normal={0.0F,0.0F,1.0F};

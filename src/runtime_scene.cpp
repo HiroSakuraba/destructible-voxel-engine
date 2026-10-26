@@ -993,6 +993,7 @@ void hash_transform(std::uint64_t& hash, const RigidTransform& transform) noexce
             hash_value(hash, std::bit_cast<std::uint32_t>(material.displacementDepthMeters));
             hash_value(hash, material.displacementMode);
         }
+        if (material_has_rules(material)) hash_value(hash, material_rules_hash(material));   // likewise
         hash_value(hash, std::bit_cast<std::uint32_t>(material.densityKilogramsPerCubicMeter));
         hash_value(hash, std::bit_cast<std::uint32_t>(material.structuralStrength));
         hash_value(hash, std::bit_cast<std::uint32_t>(material.fractureResistance));

@@ -94,6 +94,7 @@ void hash_material(std::uint64_t& hash, const VoxelMaterialDefinition& material)
         hash_float(hash, material.displacementDepthMeters);
         hash_integer(hash, material.displacementMode);
     }
+    if (material_has_rules(material)) hash_integer(hash, material_rules_hash(material));
 }
 
 [[nodiscard]] std::uint64_t brick_id(std::uint64_t objectId, BrickKey key) noexcept {

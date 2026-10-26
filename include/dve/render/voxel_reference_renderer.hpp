@@ -42,6 +42,7 @@ struct VoxelReferenceRenderStats {
     std::uint64_t tracedRays{};
     std::uint64_t hitRays{};
     std::uint64_t materialFallbacks{};
+    std::uint64_t layeredSurfaces{};   // pixels where a material layer covered the surface
     std::uint64_t shadowRays{};
     std::uint64_t shadowBlockedRays{};
     std::uint64_t globalIlluminationRays{};

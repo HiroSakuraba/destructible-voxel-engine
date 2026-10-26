@@ -114,11 +114,11 @@ Projection project(Float3 p, Float3 normal, float tileMeters, float sharpness) n
     return out;
 }
 
-Float4 triplanar(const VoxelNormalMap& image, const Projection& pr, float level) noexcept {
+Float4 triplanar(const VoxelNormalMap& image, const Projection& pr, float level, float antiTiling) noexcept {
     Float4 sum{0.0F, 0.0F, 0.0F, 0.0F};
     const float w[3] = {pr.weights.x, pr.weights.y, pr.weights.z};
     for (int k = 0; k < 3; ++k)
-        if (w[k] > 0.0F) sum = add4(sum, sample_voxel_image(image, pr.u[k], pr.v[k], level), w[k]);
+        if (w[k] > 0.0F) sum = add4(sum, sample_voxel_image_untiled(image, pr.u[k], pr.v[k], level, antiTiling, k), w[k]);
     return sum;
 }
 
@@ -175,6 +175,36 @@ Float4 sample_voxel_image(const VoxelNormalMap& image, float u, float v, float l
     return mix4(at(l0), at(l0 + 1U), t);
 }
 
+Float4 sample_voxel_image_untiled(const VoxelNormalMap& image, float u, float v, float level, float band, int projection) noexcept {
+    if (!(band > 0.0F)) return sample_voxel_image(image, u, v, level);
+    band = std::min(band, 0.5F);
+    // Between the centres of tiles j and j + 1 along each axis: blend the two (offset) tiles
+    // across a band centred on their shared edge.
+    const float qx = u - 0.5F, qy = v - 0.5F;
+    const float jx = std::floor(qx), jy = std::floor(qy);
+    const auto blend = [&](float t) {
+        const float s = std::clamp((t - 0.5F) / (2.0F * band) + 0.5F, 0.0F, 1.0F);
+        return s * s * (3.0F - 2.0F * s);
+    };
+    const float bx = blend(qx - jx), by = blend(qy - jy);
+    Float4 sum{0.0F, 0.0F, 0.0F, 0.0F};
+    for (int b = 0; b < 2; ++b)
+        for (int a = 0; a < 2; ++a) {
+            const float w = (a ? bx : 1.0F - bx) * (b ? by : 1.0F - by);
+            if (w <= 0.0F) continue;
+            const auto tx = static_cast<std::int64_t>(jx) + a, ty = static_cast<std::int64_t>(jy) + b;
+            std::uint32_t h = static_cast<std::uint32_t>(tx) * 0x8da6b343U ^ static_cast<std::uint32_t>(ty) * 0xd8163841U ^
+                              static_cast<std::uint32_t>(projection + 1) * 0xcb1ab31fU;
+            const auto next = [&] {
+                h ^= h >> 16; h *= 0x7feb352dU; h ^= h >> 15; h *= 0x846ca68bU; h ^= h >> 16;
+                return static_cast<float>(h >> 8) / 16777216.0F;
+            };
+            const float ox = next(), oy = next();
+            sum = add4(sum, sample_voxel_image(image, u + ox, v + oy, level), w);
+        }
+    return sum;
+}
+
 VoxelTextureSample sample_voxel_textures(const VoxelMaterialDefinition& m, Float3 positionMeters, Float3 normal,
                                          float footprintMeters) noexcept {
     VoxelTextureSample out;
@@ -185,28 +215,28 @@ VoxelTextureSample sample_voxel_textures(const VoxelMaterialDefinition& m, Float
     };
     if (m.baseColorMap) {
         const float l = level(m.baseColorMap);
-        const Float4 c = triplanar(*m.baseColorMap, pr, l);
+        const Float4 c = triplanar(*m.baseColorMap, pr, l, m.textureAntiTiling);
         out.baseColor = {c.x, c.y, c.z};
         out.alpha = c.w;
         out.level = l;
     }
     if (m.ormMap) {
-        const Float4 c = triplanar(*m.ormMap, pr, level(m.ormMap));
+        const Float4 c = triplanar(*m.ormMap, pr, level(m.ormMap), m.textureAntiTiling);
         out.occlusion = c.x;
         out.roughness = c.y;
         out.metallic = c.z;
     }
     if (m.emissiveMap) {
-        const Float4 c = triplanar(*m.emissiveMap, pr, level(m.emissiveMap));
+        const Float4 c = triplanar(*m.emissiveMap, pr, level(m.emissiveMap), m.textureAntiTiling);
         out.emissive = {c.x, c.y, c.z};
     }
-    if (m.heightMap) out.height = triplanar(*m.heightMap, pr, level(m.heightMap)).x;
+    if (m.heightMap) out.height = triplanar(*m.heightMap, pr, level(m.heightMap), m.textureAntiTiling).x;
     return out;
 }
 
 float sample_voxel_height(const VoxelMaterialDefinition& m, Float3 positionMeters, Float3 normal, float level) noexcept {
     if (!m.heightMap) return 0.5F;
-    return triplanar(*m.heightMap, project(positionMeters, normal, m.textureTileMeters, m.textureSharpness), level).x;
+    return triplanar(*m.heightMap, project(positionMeters, normal, m.textureTileMeters, m.textureSharpness), level, m.textureAntiTiling).x;
 }
 
 void apply_voxel_texture_sample(VoxelMaterialDefinition& m, const VoxelTextureSample& s) noexcept {

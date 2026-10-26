@@ -47,6 +47,7 @@ constexpr std::string_view kMaterialSurfaceDetailSection = "dve.material_surface
 constexpr std::string_view kMaterialNormalMapSection = "dve.material_normal_maps";
 constexpr std::string_view kMaterialTextureSection = "dve.material_textures";
 constexpr std::string_view kMaterialDisplacementSection = "dve.material_displacement";
+constexpr std::string_view kMaterialRulesSection = "dve.material_rules";
 constexpr std::string_view kReservedPrefix = "dve.";
 
 constexpr std::uint8_t kFlagDynamic = 1U << 0U;
@@ -264,6 +265,7 @@ std::vector<std::byte> material_bytes(const std::vector<VoxelMaterialDefinition>
             w.f32(m.textureTileMeters); w.f32(m.textureSharpness);
         }
         if (material_has_displacement_settings(m)) { w.f32(m.displacementDepthMeters); w.u8(m.displacementMode); }
+        if (material_has_rules(m)) w.u64(material_rules_hash(m));
     }
     return std::move(w.bytes());
 }
@@ -1267,6 +1269,32 @@ std::optional<SaveGameDocument> GameSaveCodec::to_document(
         }
     }
     {
+        // Layer rules and texture anti-tiling of inline materials.
+        Writer w(limits_);
+        std::uint32_t count = 0U;
+        for (const auto& object : world.objects)
+            for (const VoxelMaterialDefinition& m : object.materials) count += material_has_rules(m) ? 1U : 0U;
+        if (count != 0U) {
+            w.count(count, limits_.maximumObjects * limits_.maximumMaterialsPerObject, "material rules");
+            for (const auto& object : world.objects)
+                for (std::size_t i = 0; i < object.materials.size(); ++i) {
+                    const VoxelMaterialDefinition& m = object.materials[i];
+                    if (!material_has_rules(m)) continue;
+                    if (!material_rules_valid(m)) return fail(error, "invalid material rules"), std::nullopt;
+                    w.u64(object.id); w.u32(static_cast<std::uint32_t>(i)); w.f32(m.textureAntiTiling);
+                    w.u8(static_cast<std::uint8_t>(m.layers.size()));
+                    for (const VoxelMaterialLayer& layer : m.layers) {
+                        w.boolean(layer.rules.enabled);
+                        if (!layer.rules.enabled) continue;
+                        w.u32(layer.rules.seed);
+                        for (const float v : material_layer_rule_values(layer.rules)) w.f32(v);
+                    }
+                }
+            if (w.failed()) return fail(error, w.failure()), std::nullopt;
+            document.sections.emplace(std::string(kMaterialRulesSection), std::move(w.bytes()));
+        }
+    }
+    {
         Writer w(limits_);std::uint32_t count=0;
         for(const auto& object:world.objects)for(const auto& m:object.materials)if(m.surfaceDetail.pattern!=SurfacePattern::NoPattern)++count;
         if(count){w.u32(count);for(const auto& object:world.objects)for(std::size_t i=0;i<object.materials.size();++i){const auto& d=object.materials[i].surfaceDetail;if(d.pattern==SurfacePattern::NoPattern)continue;
@@ -1710,6 +1738,35 @@ std::optional<GameSaveData> GameSaveCodec::from_document(const SaveGameDocument&
         }
         if (!r.finish()) return corrupt(r);
     }
+    if (const auto* bytes = section(kMaterialRulesSection)) {
+        Reader r(*bytes, kMaterialRulesSection, limits_);
+        std::uint32_t count{};
+        if (!r.count(count, limits_.maximumObjects * limits_.maximumMaterialsPerObject, "material rules")) return corrupt(r);
+        for (std::uint32_t i = 0; i < count; ++i) {
+            GameObjectId id{};
+            std::uint32_t materialIndex{};
+            float antiTiling{};
+            std::uint8_t layers{};
+            if (!(r.u64(id) && r.u32(materialIndex) && r.f32(antiTiling) && r.u8(layers))) return corrupt(r);
+            const auto found = indexById.find(id);
+            if (found == indexById.end() || materialIndex >= world.objects[found->second].materials.size())
+                return fail(error, "invalid material rules entry"), std::nullopt;
+            VoxelMaterialDefinition& material = world.objects[found->second].materials[materialIndex];
+            if (layers != material.layers.size()) return fail(error, "material rules do not match the layers"), std::nullopt;
+            material.textureAntiTiling = antiTiling;
+            for (VoxelMaterialLayer& layer : material.layers) {
+                if (!r.boolean(layer.rules.enabled)) return corrupt(r);
+                if (!layer.rules.enabled) continue;
+                std::array<float, kMaterialLayerRuleFloatCount> values{};
+                if (!r.u32(layer.rules.seed)) return corrupt(r);
+                for (float& v : values)
+                    if (!r.f32(v)) return corrupt(r);
+                set_material_layer_rule_values(layer.rules, values);
+            }
+            if (!material_rules_valid(material)) return fail(error, "invalid material rules entry"), std::nullopt;
+        }
+        if (!r.finish()) return corrupt(r);
+    }
     if (const auto* bytes = section(kMaterialTextureSection)) {
         Reader r(*bytes, kMaterialTextureSection, limits_);
         std::uint32_t count{};
@@ -1905,7 +1962,7 @@ std::optional<GameSaveData> GameSaveCodec::from_document(const SaveGameDocument&
             if (name != kMetaSection && name != kWorldSection && name != kVoxelSection && name != kPhysicsSection &&
                 name != kScriptSection && name != kGameplaySection && name != kCameraSection &&
                 name != kAnimationSection && name != kRagdollSection && name != kHairSection && name != kClockSection && name != kRootMotionSection && name != kAxisSection &&
-                name != kMaterialOpticsSection && name != kMaterialNormalMapSection && name != kMaterialTextureSection && name != kMaterialDisplacementSection && name != kMaterialSurfaceDetailSection &&
+                name != kMaterialOpticsSection && name != kMaterialNormalMapSection && name != kMaterialTextureSection && name != kMaterialDisplacementSection && name != kMaterialRulesSection && name != kMaterialSurfaceDetailSection &&
                 name != kMaterialSheenSection && name != kMaterialIridescenceSection)
                 return fail(error, "save has an unknown engine section '" + name + "'"), std::nullopt;
             continue;

@@ -29,7 +29,7 @@ float voxel_face_height(const VoxelMaterialDefinition& m, Float3 p, int axis, fl
     if (!m.heightMap) return surface_pattern_height(m.surfaceDetail, p);
     const float s = 1.0F / std::max(m.textureTileMeters, 1.0e-4F);
     const float u = component(p, u_axis(axis)) * s, v = component(p, v_axis(axis)) * s;
-    return sample_voxel_image(*m.heightMap, u, v, level).x;
+    return sample_voxel_image_untiled(*m.heightMap, u, v, level, m.textureAntiTiling, axis).x;
 }
 
 float voxel_displacement_depth(const VoxelMaterialDefinition& m, float metersPerVoxel) noexcept {

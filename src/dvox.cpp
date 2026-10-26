@@ -402,6 +402,17 @@ void write_material(ByteWriter& writer, const VoxelMaterialDefinition& material,
         writer.write_float(material.displacementDepthMeters);
         writer.write_u8(material.displacementMode);
     }
+    // Rules extension (minor 13): anti-tiling, then per layer whether it has rules and, if so,
+    // its seed and values.
+    if (minor >= 13U) {
+        writer.write_float(material.textureAntiTiling);
+        for (const VoxelMaterialLayer& layer : material.layers) {
+            writer.write_u8(layer.rules.enabled ? 1U : 0U);
+            if (!layer.rules.enabled) continue;
+            writer.write_u32(layer.rules.seed);
+            for (const float v : material_layer_rule_values(layer.rules)) writer.write_float(v);
+        }
+    }
 }
 
 [[nodiscard]] VoxelMaterialDefinition read_material(ByteReader& reader, std::uint16_t minor) {
@@ -524,6 +535,18 @@ void write_material(ByteWriter& writer, const VoxelMaterialDefinition& material,
         material.displacementMode = reader.read_u8();
         if (!material_displacement_settings_valid(material)) throw std::runtime_error("invalid DVOX material displacement");
     }
+    if (minor >= 13U) {
+        material.textureAntiTiling = reader.read_float();
+        for (VoxelMaterialLayer& layer : material.layers) {
+            layer.rules.enabled = reader.read_u8() != 0U;
+            if (!layer.rules.enabled) continue;
+            layer.rules.seed = reader.read_u32();
+            std::array<float, kMaterialLayerRuleFloatCount> values{};
+            for (float& v : values) v = reader.read_float();
+            set_material_layer_rule_values(layer.rules, values);
+        }
+        if (!material_rules_valid(material)) throw std::runtime_error("invalid DVOX material layer rules");
+    }
     return material;
 }
 
@@ -568,7 +591,9 @@ bool write_dvox(
         // 1.12: the solid-texture surface patterns (no new fields).
         const bool solid = std::any_of(asset.materials.begin(), asset.materials.end(),
                                        [](const VoxelMaterialDefinition& m) { return surface_pattern_is_solid_texture(m.surfaceDetail.pattern); });
-        const std::uint16_t versionMinor = solid ? 12 : displacement ? 11 : textures ? 10 : iridescence ? 9 : sheen ? 8 : details ? 7 : origins ? 6 : normalMaps ? 5 : optics ? 4 : unit_voxel_scale(asset.voxelScale) ? kVersionMinor : 3;
+        const bool rules = std::any_of(asset.materials.begin(), asset.materials.end(),
+                                       [](const VoxelMaterialDefinition& m) { return material_has_rules(m); });
+        const std::uint16_t versionMinor = rules ? 13 : solid ? 12 : displacement ? 11 : textures ? 10 : iridescence ? 9 : sheen ? 8 : details ? 7 : origins ? 6 : normalMaps ? 5 : optics ? 4 : unit_voxel_scale(asset.voxelScale) ? kVersionMinor : 3;
         const std::uint32_t headerSize=kHeaderSize+(versionMinor>=3 ? 12 : 0);
         ByteWriter materials;
         for (const VoxelMaterialDefinition& material : asset.materials) {
@@ -578,6 +603,7 @@ bool write_dvox(
             if (!material_normal_map_valid(material)) throw std::runtime_error("invalid DVOX material normal map");
             if (!material_textures_valid(material)) throw std::runtime_error("invalid DVOX material texture set");
             if (!material_displacement_settings_valid(material)) throw std::runtime_error("invalid DVOX material displacement");
+            if (!material_rules_valid(material)) throw std::runtime_error("invalid DVOX material layer rules");
             write_material(materials, material, versionMinor);
         }
 
@@ -663,7 +689,7 @@ namespace {
         if (magic != kMagic) throw std::runtime_error("invalid DVOX magic");
         const std::uint16_t major = reader.read_u16();
         const std::uint16_t minor = reader.read_u16();
-        if (major != kVersionMajor || minor > 12) {
+        if (major != kVersionMajor || minor > 13) {
             throw std::runtime_error("unsupported DVOX version");
         }
         const std::uint32_t flags = reader.read_u32();

@@ -262,6 +262,34 @@ void test_editor_library(const fs::path& dir) {
     check(twelve && twelve->find(cobbleId) && twelve->find(cobbleId)->definition.surfaceDetail.pattern == SurfacePattern::Cellular &&
               twelve->find(carvedId) && twelve->find(carvedId)->definition.displacementDepthMeters == 0.04F,
           "library v12 round trip: " + error);
+
+    // Layer rules and anti-tiling: version 13.
+    VoxelMaterialDefinition snowy = cobble;
+    snowy.name = "Snowy cobble";
+    snowy.textureAntiTiling = 0.25F;
+    snowy.layers.push_back({});
+    snowy.layers[0].sourceMaterial = stoneId;
+    snowy.layers[0].weight = 1.0F;
+    snowy.layers[0].rules.enabled = true;
+    snowy.layers[0].rules.slopeMinCos = 0.7F;
+    snowy.layers[0].rules.heightMaxMeters = 1234.5F;
+    snowy.layers[0].rules.seed = 77;
+    const MaterialId snowyId = library.next_available_id();
+    check(library.upsert({snowyId, snowy, false}, &error), "library add snowy: " + error);
+    check(library.save(dir / "materials13.txt", &error), "library save v13: " + error);
+    {
+        std::ifstream in(dir / "materials13.txt");
+        std::string magic;
+        unsigned version{};
+        in >> magic >> version;
+        check(version == 13U, "layer rules need library version 13");
+    }
+    const auto thirteen = EditorMaterialLibrary::load(dir / "materials13.txt", &error);
+    const auto* s13 = thirteen ? thirteen->find(snowyId) : nullptr;
+    check(s13 && s13->definition.textureAntiTiling == 0.25F && s13->definition.layers.size() == 1 && s13->definition.layers[0].rules.enabled &&
+              s13->definition.layers[0].rules.slopeMinCos == 0.7F && s13->definition.layers[0].rules.heightMaxMeters == 1234.5F &&
+              s13->definition.layers[0].rules.seed == 77U && thirteen->find(cobbleId) && !thirteen->find(cobbleId)->definition.layers.size(),
+          "library v13 round trip: " + error);
 }
 
 void test_gltf_import(const fs::path& dir) {

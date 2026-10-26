@@ -168,6 +168,8 @@ public:
     HybridOcclusionScene(const HybridOcclusionScene&) = delete;
     HybridOcclusionScene& operator=(const HybridOcclusionScene&) = delete;
     [[nodiscard]] std::optional<float> nearest(Float3 origin, Float3 direction, float maximumDistance) const;
+    // Traced displacement for these rays (spwi::VoxelSceneTracer::set_displacement).
+    void set_displacement(float metersPerVoxel, Float3 focus, float focusRadius) noexcept;
     // For PolygonRenderOptions::occlusionRay; valid while this scene lives.
     [[nodiscard]] AmbientOcclusionRay ray() const;
 

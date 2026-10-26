@@ -1,4 +1,5 @@
 #include "dve/material_displacement.hpp"
+#include "dve/voxel_textures.hpp"
 
 #include <algorithm>
 #include <array>
@@ -181,15 +182,35 @@ void apply_displacement(CookedPolygonAsset& asset,
         const bool useNoise=setting.proceduralNoiseEnabled&&
                             std::abs(setting.proceduralNoiseAmplitudeMeters)>0.0F;
         if (!useTexture&&!useNoise) continue;
-        if (useTexture&&(!binding||!binding->height.texture)) ++stats.missingHeightBindings;
+        // A voxel material's own height map (texture sets) is the source when the binding has none.
+        const VoxelMaterialDefinition* voxelMaterial=materialIndex<asset.materials.size()&&asset.materials[materialIndex].heightMap
+            ? &asset.materials[materialIndex] : nullptr;
+        const bool bindingHeight=binding&&binding->height.texture;
+        if (useTexture&&!bindingHeight&&!voxelMaterial) ++stats.missingHeightBindings;
         PolygonVertex& vertex=asset.vertices[index];
         const float fade=material_displacement_lod_fade(distance,setting);
         float displacement=0.0F;
-        if (useTexture&&binding&&binding->height.texture) {
-            Float2 uv=binding->height.texcoord==1U?vertex.texcoord1:vertex.texcoord;
-            uv=transform_texture_coordinates(uv,binding->mapping.baseTransform);
-            const float height=sample_image_red(asset,binding->height,uv);
+        if (useTexture&&bindingHeight) {
+            const MaterialMappingMode mode=binding->mapping.mappingMode;
+            float height=0.5F;
+            if (mode==MaterialMappingMode::WorldTriplanar||mode==MaterialMappingMode::ObjectTriplanar) {
+                // Triplanar height in the asset's own space (a cooked asset has no world placement,
+                // so world triplanar uses object space here too), blended like the renderer's.
+                const TriplanarCoordinates c=make_triplanar_coordinates(vertex.position,normalize3(vertex.normal),
+                    binding->mapping.triplanarScale,binding->mapping.triplanarBlendSharpness);
+                const auto at=[&](Float2 q){return sample_image_red(asset,binding->height,transform_texture_coordinates(q,binding->mapping.baseTransform));};
+                height=at(c.xProjection)*c.weights.x+at(c.yProjection)*c.weights.y+at(c.zProjection)*c.weights.z;
+                ++stats.triplanarHeightVertices;
+            } else {
+                Float2 uv=binding->height.texcoord==1U?vertex.texcoord1:vertex.texcoord;
+                uv=transform_texture_coordinates(uv,binding->mapping.baseTransform);
+                height=sample_image_red(asset,binding->height,uv);
+            }
             displacement+=(height-setting.referencePlane)*setting.scaleMeters*fade;
+        } else if (useTexture&&voxelMaterial) {
+            const float height=sample_voxel_height(*voxelMaterial,vertex.position,normalize3(vertex.normal),0.0F);
+            displacement+=(height-setting.referencePlane)*setting.scaleMeters*fade;
+            ++stats.triplanarHeightVertices;
         }
         Float3 noiseGradient{};
         if (useNoise) {

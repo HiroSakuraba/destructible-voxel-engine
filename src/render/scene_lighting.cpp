@@ -194,6 +194,7 @@ struct SceneLighting::Impl {
       : env(e), scale(resolve_meters_per_voxel(s)),
         bias((std::max)(1e-5F, e.shadowBiasMeters / scale)),
         maximum(e.globalIlluminationMaxDistanceMeters / scale), tracer(voxels) {
+    tracer.set_displacement(scale, {}, std::numeric_limits<float>::infinity());   // traced displacement everywhere
     std::string error;
     if (!env.validate(&error))
       throw std::invalid_argument(error);

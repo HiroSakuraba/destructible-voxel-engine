@@ -46,6 +46,7 @@ constexpr std::string_view kMaterialIridescenceSection = "dve.material_iridescen
 constexpr std::string_view kMaterialSurfaceDetailSection = "dve.material_surface_detail";
 constexpr std::string_view kMaterialNormalMapSection = "dve.material_normal_maps";
 constexpr std::string_view kMaterialTextureSection = "dve.material_textures";
+constexpr std::string_view kMaterialDisplacementSection = "dve.material_displacement";
 constexpr std::string_view kReservedPrefix = "dve.";
 
 constexpr std::uint8_t kFlagDynamic = 1U << 0U;
@@ -262,6 +263,7 @@ std::vector<std::byte> material_bytes(const std::vector<VoxelMaterialDefinition>
             for (const auto* map : {m.baseColorMap.get(), m.ormMap.get(), m.heightMap.get(), m.emissiveMap.get()}) w.u64(map ? map->contentHash : 0U);
             w.f32(m.textureTileMeters); w.f32(m.textureSharpness);
         }
+        if (material_has_displacement_settings(m)) { w.f32(m.displacementDepthMeters); w.u8(m.displacementMode); }
     }
     return std::move(w.bytes());
 }
@@ -1246,6 +1248,25 @@ std::optional<SaveGameDocument> GameSaveCodec::to_document(
         }
     }
     {
+        // Displacement settings of inline materials.
+        Writer w(limits_);
+        std::uint32_t count = 0U;
+        for (const auto& object : world.objects)
+            for (const VoxelMaterialDefinition& m : object.materials) count += material_has_displacement_settings(m) ? 1U : 0U;
+        if (count != 0U) {
+            w.count(count, limits_.maximumObjects * limits_.maximumMaterialsPerObject, "material displacement");
+            for (const auto& object : world.objects)
+                for (std::size_t i = 0; i < object.materials.size(); ++i) {
+                    const VoxelMaterialDefinition& m = object.materials[i];
+                    if (!material_has_displacement_settings(m)) continue;
+                    if (!material_displacement_settings_valid(m)) return fail(error, "invalid material displacement"), std::nullopt;
+                    w.u64(object.id); w.u32(static_cast<std::uint32_t>(i)); w.f32(m.displacementDepthMeters); w.u8(m.displacementMode);
+                }
+            if (w.failed()) return fail(error, w.failure()), std::nullopt;
+            document.sections.emplace(std::string(kMaterialDisplacementSection), std::move(w.bytes()));
+        }
+    }
+    {
         Writer w(limits_);std::uint32_t count=0;
         for(const auto& object:world.objects)for(const auto& m:object.materials)if(m.surfaceDetail.pattern!=SurfacePattern::NoPattern)++count;
         if(count){w.u32(count);for(const auto& object:world.objects)for(std::size_t i=0;i<object.materials.size();++i){const auto& d=object.materials[i].surfaceDetail;if(d.pattern==SurfacePattern::NoPattern)continue;
@@ -1670,6 +1691,25 @@ std::optional<GameSaveData> GameSaveCodec::from_document(const SaveGameDocument&
         if (!r.finish()) return corrupt(r);
     }
 
+    if (const auto* bytes = section(kMaterialDisplacementSection)) {
+        Reader r(*bytes, kMaterialDisplacementSection, limits_);
+        std::uint32_t count{};
+        if (!r.count(count, limits_.maximumObjects * limits_.maximumMaterialsPerObject, "material displacement")) return corrupt(r);
+        for (std::uint32_t i = 0; i < count; ++i) {
+            GameObjectId id{};
+            std::uint32_t materialIndex{};
+            VoxelMaterialDefinition use;
+            if (!(r.u64(id) && r.u32(materialIndex) && r.f32(use.displacementDepthMeters) && r.u8(use.displacementMode))) return corrupt(r);
+            const auto found = indexById.find(id);
+            if (found == indexById.end() || materialIndex >= world.objects[found->second].materials.size() ||
+                !material_displacement_settings_valid(use))
+                return fail(error, "invalid material displacement entry"), std::nullopt;
+            VoxelMaterialDefinition& material = world.objects[found->second].materials[materialIndex];
+            material.displacementDepthMeters = use.displacementDepthMeters;
+            material.displacementMode = use.displacementMode;
+        }
+        if (!r.finish()) return corrupt(r);
+    }
     if (const auto* bytes = section(kMaterialTextureSection)) {
         Reader r(*bytes, kMaterialTextureSection, limits_);
         std::uint32_t count{};
@@ -1865,7 +1905,7 @@ std::optional<GameSaveData> GameSaveCodec::from_document(const SaveGameDocument&
             if (name != kMetaSection && name != kWorldSection && name != kVoxelSection && name != kPhysicsSection &&
                 name != kScriptSection && name != kGameplaySection && name != kCameraSection &&
                 name != kAnimationSection && name != kRagdollSection && name != kHairSection && name != kClockSection && name != kRootMotionSection && name != kAxisSection &&
-                name != kMaterialOpticsSection && name != kMaterialNormalMapSection && name != kMaterialTextureSection && name != kMaterialSurfaceDetailSection &&
+                name != kMaterialOpticsSection && name != kMaterialNormalMapSection && name != kMaterialTextureSection && name != kMaterialDisplacementSection && name != kMaterialSurfaceDetailSection &&
                 name != kMaterialSheenSection && name != kMaterialIridescenceSection)
                 return fail(error, "save has an unknown engine section '" + name + "'"), std::nullopt;
             continue;

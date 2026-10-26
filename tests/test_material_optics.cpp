@@ -214,6 +214,33 @@ void test_editor_library(const fs::path& dir) {
                   entry->definition.textureSharpness == 12.0F,
               "library texture-set round trip");
     }
+
+    // Displacement: version 11, depth and mode round-trip.
+    VoxelMaterialDefinition carved = stone;
+    carved.name = "Carved stone";
+    carved.heightMap = make_voxel_image("carved height", 1U, 1U, {128, 0, 0, 255}, VoxelImageRole::Data);
+    carved.displacementDepthMeters = 0.04F;
+    carved.displacementMode = 1U;
+    const MaterialId carvedId = library.next_available_id();
+    check(library.upsert({carvedId, carved, false}, &error), "library add displaced material: " + error);
+    check(library.save(dir / "materials11.txt", &error), "library save v11: " + error);
+    {
+        std::ifstream in(dir / "materials11.txt");
+        std::string magic;
+        unsigned version{};
+        in >> magic >> version;
+        check(version == 11U, "displacement needs library version 11");
+    }
+    const auto eleven = EditorMaterialLibrary::load(dir / "materials11.txt", &error);
+    check(eleven.has_value(), "library v11 load: " + error);
+    if (eleven) {
+        const auto* entry = eleven->find(carvedId);
+        check(entry && entry->definition.heightMap && entry->definition.displacementDepthMeters == 0.04F &&
+                  entry->definition.displacementMode == 1U && entry->definition.heightMap->contentHash == carved.heightMap->contentHash,
+              "library displacement round trip");
+        const auto* plain = eleven->find(stoneId);
+        check(plain && plain->definition.displacementDepthMeters == 0.0F, "materials without displacement stay at depth 0");
+    }
 }
 
 void test_gltf_import(const fs::path& dir) {

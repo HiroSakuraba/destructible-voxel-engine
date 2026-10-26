@@ -213,6 +213,7 @@ struct PolygonRenderStats {
     std::uint64_t transparentFragments{};
     std::uint64_t textureSamples{};
     std::uint64_t triplanarSamples{};
+    std::uint64_t triplanarParallaxFragments{};   // fragments whose triplanar lookups were parallax-shifted
     std::uint64_t detailSamples{};
     std::uint64_t parallaxSamples{};
     std::uint64_t parallaxFallbacks{}, parallaxShadowSamples{}, bumpSamples{}, reliefDepthWrites{};

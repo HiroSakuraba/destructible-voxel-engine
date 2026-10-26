@@ -57,6 +57,7 @@ bool validate_definition(const VoxelMaterialDefinition& value, MaterialId id, st
     if (!finite(value.metallic) || value.metallic < 0.0F || value.metallic > 1.0F) return fail("metallic must be in [0,1]");
     if (!finite(value.roughness) || value.roughness < 0.0F || value.roughness > 1.0F) return fail("roughness must be in [0,1]");
     if (!material_sheen_valid(value) || !material_iridescence_valid(value)) return fail("Invalid sheen or thin-film settings");
+    if (!material_displacement_settings_valid(value)) return fail("displacement depth must be in [0,10] m and mode 0 or 1");
     if (!material_textures_valid(value))
         return fail("texture-set maps must be 1..4096 per side with tile > 0 and sharpness in [1,64]");
     if (!finite(value.specular) || value.specular < 0.0F || value.specular > 1.0F) return fail("specular must be in [0,1]");
@@ -229,7 +230,8 @@ bool EditorMaterialLibrary::write_stream(std::ostream& output,std::string* error
         const bool sheen=std::any_of(entries_.begin(),entries_.end(),[](const auto& e){return material_has_sheen(e.second.definition);});
         const bool iridescence=std::any_of(entries_.begin(),entries_.end(),[](const auto& e){return material_has_iridescence(e.second.definition);});
         const bool textures=std::any_of(entries_.begin(),entries_.end(),[](const auto& e){return material_has_textures(e.second.definition);});
-        output << "DVE_EDITOR_MATERIALS " << (textures ? 10 : iridescence ? 9 : sheen ? 8 : details ? 7 : origins ? 6 : normalMaps ? 5 : 4) << "\n" << entries_.size() << "\n" << std::setprecision(9);
+        const bool displacement=std::any_of(entries_.begin(),entries_.end(),[](const auto& e){return material_has_displacement_settings(e.second.definition);});
+        output << "DVE_EDITOR_MATERIALS " << (displacement ? 11 : textures ? 10 : iridescence ? 9 : sheen ? 8 : details ? 7 : origins ? 6 : normalMaps ? 5 : 4) << "\n" << entries_.size() << "\n" << std::setprecision(9);
         for (const auto& [id, entry] : entries_) {
             const auto& m = entry.definition;
             output << static_cast<unsigned>(id) << ' ' << std::quoted(m.name) << ' '
@@ -252,7 +254,7 @@ bool EditorMaterialLibrary::write_stream(std::ostream& output,std::string* error
             }
             output << ' ' << m.transmission << ' ' << m.indexOfRefraction << ' ' << m.attenuationColor.x << ' '
                    << m.attenuationColor.y << ' ' << m.attenuationColor.z << ' ' << m.attenuationDistanceMeters;
-            if (normalMaps || origins || details || sheen || iridescence || textures) {
+            if (normalMaps || origins || details || sheen || iridescence || textures || displacement) {
                 if (const VoxelNormalMap* map = m.normalMap.get()) {
                     static constexpr char kHex[] = "0123456789abcdef";
                     std::string hex;
@@ -264,11 +266,11 @@ bool EditorMaterialLibrary::write_stream(std::ostream& output,std::string* error
                     output << " 0";
                 }
             }
-            if(origins || details || sheen || iridescence || textures) output << ' ' << std::quoted(m.preset.id) << ' ' << m.preset.revision << ' ' << m.preset.overrides;
-            if(details || sheen || iridescence || textures){output << ' ' << unsigned(m.surfaceDetail.pattern) << ' ' << unsigned(m.surfaceDetail.space) << ' ' << m.surfaceDetail.seed;for(float v:surface_detail_values(m.surfaceDetail))output << ' ' << v;}
-            if(sheen || iridescence || textures){output << ' ' << m.sheenColor.x << ' ' << m.sheenColor.y << ' ' << m.sheenColor.z << ' ' << m.sheenRoughness;}
-            if(iridescence || textures){output << ' ' << m.iridescence << ' ' << m.iridescenceIor << ' ' << m.iridescenceThicknessNm;}
-            if (textures) {
+            if(origins || details || sheen || iridescence || textures || displacement) output << ' ' << std::quoted(m.preset.id) << ' ' << m.preset.revision << ' ' << m.preset.overrides;
+            if(details || sheen || iridescence || textures || displacement){output << ' ' << unsigned(m.surfaceDetail.pattern) << ' ' << unsigned(m.surfaceDetail.space) << ' ' << m.surfaceDetail.seed;for(float v:surface_detail_values(m.surfaceDetail))output << ' ' << v;}
+            if(sheen || iridescence || textures || displacement){output << ' ' << m.sheenColor.x << ' ' << m.sheenColor.y << ' ' << m.sheenColor.z << ' ' << m.sheenRoughness;}
+            if(iridescence || textures || displacement){output << ' ' << m.iridescence << ' ' << m.iridescenceIor << ' ' << m.iridescenceThicknessNm;}
+            if (textures || displacement) {
                 // Version 10: a mask of the texture-set maps, the projection, then each map (hex texels).
                 const VoxelNormalMap* maps[4] = {m.baseColorMap.get(), m.ormMap.get(), m.heightMap.get(), m.emissiveMap.get()};
                 unsigned mask = 0U;
@@ -286,6 +288,7 @@ bool EditorMaterialLibrary::write_stream(std::ostream& output,std::string* error
                     }
                 }
             }
+            if (displacement) output << ' ' << m.displacementDepthMeters << ' ' << unsigned(m.displacementMode);   // version 11
             output << '\n';
         }
     if(!output){if(error)*error="Failed to write material stream";return false;}return true;
@@ -323,7 +326,7 @@ std::optional<EditorMaterialLibrary> EditorMaterialLibrary::read_stream(std::ist
         unsigned version{};
         std::size_t count{};
         input >> magic >> version >> count;
-        if (magic != "DVE_EDITOR_MATERIALS" || (version < 1 || version > 10) || count > 256)
+        if (magic != "DVE_EDITOR_MATERIALS" || (version < 1 || version > 11) || count > 256)
             throw std::runtime_error("unsupported material library");
         EditorMaterialLibrary result(false);
         for (std::size_t index = 0; index < count; ++index) {
@@ -436,6 +439,13 @@ std::optional<EditorMaterialLibrary> EditorMaterialLibrary::read_stream(std::ist
                     }
                     if (!material_textures_valid(m)) throw std::runtime_error("invalid material texture-set record");
                 }
+            }
+            if (version >= 11) {
+                unsigned mode{};
+                input >> m.displacementDepthMeters >> mode;
+                if (mode > 1U) throw std::runtime_error("invalid material displacement record");
+                m.displacementMode = static_cast<std::uint8_t>(mode);
+                if (!material_displacement_settings_valid(m)) throw std::runtime_error("invalid material displacement record");
             }
             if (version == 1 && m.transparent) m.blendMode = MaterialBlendMode::Translucent;
             if (!input || rawId > 255) throw std::runtime_error("malformed material record");

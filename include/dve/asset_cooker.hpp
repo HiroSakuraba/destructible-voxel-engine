@@ -262,6 +262,11 @@ struct VoxelMaterialDefinition {
     std::shared_ptr<const VoxelNormalMap> emissiveMap;
     float textureTileMeters{1.0F};
     float textureSharpness{4.0F};
+    // Displacement by the height map (dve/voxel_displacement.hpp): how deep h = 0 lies below the
+    // original face (0 = none; capped at half a voxel when drawn). Traced (0) reshapes the voxel in
+    // the tracer (outlines, shadows, AO, depth); Parallax (1) shifts only the shading.
+    float displacementDepthMeters{0.0F};
+    std::uint8_t displacementMode{0};
 };
 
 // True when any optical field differs from its default (formats write the optics block, hashes
@@ -320,6 +325,14 @@ inline constexpr std::uint32_t kMaximumVoxelNormalMapDimension = 4096U;
     if (!material_has_textures(m)) return true;
     return ok(m.baseColorMap) && ok(m.ormMap) && ok(m.heightMap) && ok(m.emissiveMap) && in(m.textureTileMeters, 1.0e-4F, 1.0e4F) &&
            in(m.textureSharpness, 1.0F, 64.0F);
+}
+// Displacement fields in range: depth 0..10 m, mode 0 (traced) or 1 (parallax). They are written
+// and hashed only when the depth is non-zero.
+[[nodiscard]] inline bool material_displacement_settings_valid(const VoxelMaterialDefinition& m) noexcept {
+    return m.displacementDepthMeters >= 0.0F && m.displacementDepthMeters <= 10.0F && m.displacementMode <= 1U;
+}
+[[nodiscard]] inline bool material_has_displacement_settings(const VoxelMaterialDefinition& m) noexcept {
+    return m.displacementDepthMeters != 0.0F || m.displacementMode != 0U;
 }
 // Light enters the material (refraction, caustics).
 [[nodiscard]] inline bool material_is_refractive(const VoxelMaterialDefinition& m) noexcept {

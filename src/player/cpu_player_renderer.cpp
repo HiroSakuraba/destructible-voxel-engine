@@ -334,6 +334,7 @@ public:
             std::optional<render::HybridOcclusionScene> occlusion;
             if (environment.ambientOcclusionSamples > 0U && environment.globalIlluminationMode != GlobalIlluminationMode::Off) {
                 occlusion.emplace(voxels_, polygons_);
+                occlusion->set_displacement(voxelSize, camera.position, environment.displacementTraceDistanceMeters / voxelSize);
                 polygonOptions.occlusionRay = occlusion->ray();
             }
             stats_.polygons = render::ReferencePolygonRenderer{}.render(polygons_, camera, environment, target_, polygonOptions);
@@ -342,7 +343,8 @@ public:
         }
         (void)render::apply_aerial_perspective(target_, camera, environment, voxelSize);
         if (environment.volumetricFogDensityPerMeter > 0.0F) {
-            const render::HybridOcclusionScene fogShadows(voxels_, polygons_);   // light shafts see everything
+            render::HybridOcclusionScene fogShadows(voxels_, polygons_);   // light shafts see everything
+            fogShadows.set_displacement(voxelSize, camera.position, environment.displacementTraceDistanceMeters / voxelSize);
             (void)render::apply_volumetric_fog(target_, camera, environment, voxelSize, fogShadows.ray(),
                                                static_cast<std::uint32_t>(frameIndex_), options_.threadCount);
         }
@@ -366,6 +368,7 @@ public:
             std::optional<render::HybridOcclusionScene> fogOcclusion;
             if(fogSettings.scattering&&!fogSettings.sceneVisibility){
                 fogOcclusion.emplace(voxels_,polygons_);
+                fogOcclusion->set_displacement(voxelSize, camera.position, environment.displacementTraceDistanceMeters / voxelSize);
                 fogSettings.sceneVisibility=[&](Float3 p,Float3 d,float maximum){
                     return fogOcclusion->nearest(add(p,multiply(d,0.001F*toUnits)),d,maximum)?0.0F:1.0F;
                 };

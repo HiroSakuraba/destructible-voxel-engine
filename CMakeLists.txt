@@ -171,6 +171,7 @@ add_library(dve_core
     src/material_mapping.cpp
     src/voxel_normal_map.cpp
     src/voxel_textures.cpp
+    src/voxel_displacement.cpp
     src/dashr_surface.cpp
     src/dashr_seam_map.cpp
     src/material_layers.cpp
@@ -3396,6 +3397,9 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     add_executable(dve_voxel_textures_tests tests/test_voxel_textures.cpp)
     target_link_libraries(dve_voxel_textures_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_voxel_textures_tests COMMAND dve_voxel_textures_tests)
+    add_executable(dve_triplanar_displacement_tests tests/test_triplanar_displacement.cpp)
+    target_link_libraries(dve_triplanar_displacement_tests PRIVATE dve::render_bridge)
+    add_test(NAME dve_triplanar_displacement_tests COMMAND dve_triplanar_displacement_tests)
     add_executable(dve_atmosphere_tests tests/test_atmosphere.cpp)
     target_link_libraries(dve_atmosphere_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_atmosphere_tests COMMAND dve_atmosphere_tests)

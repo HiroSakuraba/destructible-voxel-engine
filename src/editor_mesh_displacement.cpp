@@ -37,8 +37,10 @@ MeshDisplacementBakeResult bake_editor_mesh_displacement(
     bool anyHeightBound = false;
     for (std::size_t i = 0; i < source.materials.size() && i < source.materialBindings.size(); ++i)
         anyHeightBound = anyHeightBound || source.materialBindings[i].height.texture.has_value();
+    // A voxel material's own height map (texture sets) is a height source too.
+    for (const auto& material : source.materials) anyHeightBound = anyHeightBound || material.heightMap != nullptr;
     if (!anyHeightBound)
-        return fail("No vertices were displaced: bind a height texture to a material first");
+        return fail("No vertices were displaced: bind a height texture or height map to a material first");
 
     // One VisualOnly entry per material: the visual asset is the bake target,
     // sampled at camera distance 0 so the LOD fade is exactly 1.

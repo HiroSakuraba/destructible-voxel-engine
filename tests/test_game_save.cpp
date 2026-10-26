@@ -507,12 +507,15 @@ void test_material_texture_sets() {
         m.heightMap = height;
         m.textureTileMeters = 0.3F;
         m.textureSharpness = 6.0F;
+        m.displacementDepthMeters = 0.035F;
+        m.displacementMode = 1U;
     }
     const auto bytes = codec.encode(saved, nullptr, &error);
     CHECK(bytes.has_value());
     if (!bytes) { std::cerr << "texture set encode: " << error << '\n'; return; }
     const auto document = decode_save_game_document(*bytes, {}, &error);
     CHECK(document && document->sections.contains("dve.material_textures"));
+    CHECK(document && document->sections.contains("dve.material_displacement"));
     const auto decoded = codec.decode(*bytes, nullptr, &error);
     CHECK(decoded.has_value());
     if (!decoded) { std::cerr << "texture set decode: " << error << '\n'; return; }
@@ -523,7 +526,8 @@ void test_material_texture_sets() {
             for (const auto& m : o.materials)
                 found = found && m.baseColorMap && m.heightMap && !m.ormMap && m.baseColorMap->contentHash == albedo->contentHash &&
                         m.heightMap->contentHash == height->contentHash && m.baseColorMap->role == 1U && m.heightMap->role == 2U &&
-                        m.textureTileMeters == 0.3F && m.textureSharpness == 6.0F;
+                        m.textureTileMeters == 0.3F && m.textureSharpness == 6.0F && m.displacementDepthMeters == 0.035F &&
+                        m.displacementMode == 1U;
         }
     CHECK(found);
     const auto again = codec.encode(*decoded, nullptr, &error);

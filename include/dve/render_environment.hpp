@@ -180,6 +180,10 @@ struct RenderEnvironment {
     // anisotropy the Henyey-Greenstein g (forward scattering: bright toward the sun). The march
     // covers volumetricFogMaxDistanceMeters from the camera in volumetricFogSamples steps.
     // 0 density = off.
+    // Traced displacement (VoxelMaterialDefinition::displacementDepthMeters) reshapes voxels within
+    // this distance of the camera; beyond it the same materials fall back to parallax shading.
+    float displacementTraceDistanceMeters{100.0F};
+
     float volumetricFogDensityPerMeter{0.0F};
     float volumetricFogHeightFalloffPerMeter{0.05F};
     float volumetricFogBaseHeightMeters{0.0F};

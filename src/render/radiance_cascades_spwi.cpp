@@ -1,5 +1,6 @@
 #include "dve/render/radiance_cascades_spwi.hpp"
 #include "dve/render/atmosphere.hpp"
+#include "dve/voxel_displacement.hpp"
 #include "dve/voxel_metric.hpp"
 
 #include <algorithm>
@@ -450,6 +451,89 @@ std::optional<RayHit> VoxelSceneTracer::raycast_local(const Grid& grid, Float3 o
     return std::nullopt;
 }
 
+MaterialId VoxelSceneTracer::cell_material(const Grid& grid, Int3 voxel) const noexcept {
+    const Int3 lo = grid.minimum, hi = grid.maximum;
+    if (voxel.x < lo.x || voxel.x > hi.x || voxel.y < lo.y || voxel.y > hi.y || voxel.z < lo.z || voxel.z > hi.z) return kAirMaterial;
+    if (grid.dense) {
+        const std::uint64_t index = (static_cast<std::uint64_t>(voxel.z - lo.z) * grid.extent.y + static_cast<std::uint64_t>(voxel.y - lo.y)) *
+                                        grid.extent.x +
+                                    static_cast<std::uint64_t>(voxel.x - lo.x);
+        return grid.cells[index];
+    }
+    return grid.object->material_at(voxel);
+}
+
+bool VoxelSceneTracer::displacement_in_focus(Float3 world) const noexcept {
+    if (!std::isfinite(focusRadius_)) return true;
+    return length(subtract(world, focus_)) <= focusRadius_;
+}
+
+// raycast_local, then for displaced voxels the carved height field inside the hit cell
+// (trace_displaced_voxel); a ray that crosses the cell through carved-away space continues from
+// where it leaves the cell.
+std::optional<VoxelSceneTracer::LocalHit> VoxelSceneTracer::raycast_displaced(std::size_t instanceIndex, const Grid& grid, Float3 origin,
+                                                                           Float3 direction, float maximumDistance,
+                                                                           Float3 cellMeters) const {
+    const float magnitude = length(direction);
+    if (!(magnitude > 0.0F)) return std::nullopt;
+    const Float3 unitDirection = multiply(direction, 1.0F / magnitude);
+    const VoxelReferenceInstance& instance = instances_[instanceIndex];
+    const bool unitSpacing = unit_voxel_scale(instance.spacing);
+    Float3 o = origin;
+    float travelled = 0.0F, remaining = maximumDistance;
+    Int3 entryNormal{};
+    for (int guard = 0; guard < 64; ++guard) {
+        const auto raw = raycast_local(grid, o, direction, remaining);
+        if (!raw) return std::nullopt;
+        RayHit hit = *raw;
+        if (guard > 0 && hit.distance == 0.0F && hit.normal.x == 0 && hit.normal.y == 0 && hit.normal.z == 0) hit.normal = entryNormal;
+        const VoxelMaterialDefinition& material = this->material(static_cast<std::uint32_t>(instanceIndex), hit.material);
+        const Float3 local = add(o, multiply(unitDirection, hit.distance));
+        const Float3 world = unitSpacing ? transform_point(instance.transform, local) : voxel_to_world(instance.transform, instance.spacing, local);
+        if (!material_has_displacement(material) || material.displacementMode != 0U || !displacement_in_focus(world)) {
+            hit.distance += travelled;
+            return LocalHit{hit, false, {}};
+        }
+        // The cell's exposed faces and where the ray leaves it.
+        const Int3 v = hit.voxel;
+        std::uint8_t exposed = 0U;
+        const Int3 neighbours[6] = {{v.x - 1, v.y, v.z}, {v.x + 1, v.y, v.z}, {v.x, v.y - 1, v.z},
+                                    {v.x, v.y + 1, v.z}, {v.x, v.y, v.z - 1}, {v.x, v.y, v.z + 1}};
+        for (int k = 0; k < 6; ++k)
+            if (cell_material(grid, neighbours[k]) == kAirMaterial) exposed = static_cast<std::uint8_t>(exposed | (1U << k));
+        float tExit = std::numeric_limits<float>::infinity();
+        int exitAxis = 0;
+        const float dirs[3] = {unitDirection.x, unitDirection.y, unitDirection.z}, os[3] = {o.x, o.y, o.z};
+        const int cells[3] = {v.x, v.y, v.z};
+        for (int a = 0; a < 3; ++a) {
+            if (dirs[a] == 0.0F) continue;
+            const float plane = dirs[a] > 0.0F ? static_cast<float>(cells[a] + 1) : static_cast<float>(cells[a]);
+            const float t = (plane - os[a]) / dirs[a];
+            if (t < tExit) { tExit = t; exitAxis = a; }
+        }
+        tExit = std::max(tExit, hit.distance);
+        const auto refined = trace_displaced_voxel(material, v, exposed, o, unitDirection, hit.distance, tExit, cellMeters, 0.0F);
+        if (refined) {
+            hit.distance = refined->t + travelled;
+            LocalHit out{hit, refined->axis >= 0, refined->normal};
+            if (!out.displaced) out.normal = {static_cast<float>(hit.normal.x), static_cast<float>(hit.normal.y), static_cast<float>(hit.normal.z)};
+            out.displaced = true;
+            return out;
+        }
+        // Through carved-away space: continue just past the cell.
+        const float advance = tExit + 1.0e-4F;
+        if (advance >= remaining) return std::nullopt;
+        o = add(o, multiply(unitDirection, advance));
+        travelled += advance;
+        remaining -= advance;
+        entryNormal = {0, 0, 0};
+        if (exitAxis == 0) entryNormal.x = dirs[0] > 0.0F ? -1 : 1;
+        else if (exitAxis == 1) entryNormal.y = dirs[1] > 0.0F ? -1 : 1;
+        else entryNormal.z = dirs[2] > 0.0F ? -1 : 1;
+    }
+    return std::nullopt;
+}
+
 std::optional<VoxelTraceHit> VoxelSceneTracer::trace_instance(std::size_t instanceIndex,
                                                               Float3 origin, Float3 direction,
                                                               float maximumDistance) const {
@@ -463,24 +547,29 @@ std::optional<VoxelTraceHit> VoxelSceneTracer::trace_instance(std::size_t instan
         const Float3 localDirection=divide_components(inverse_transform_vector(instance.transform,normalize(direction)),instance.spacing);
         const float metric=length(localDirection);
         if (!(metric>0) || !std::isfinite(metric)) return std::nullopt;
-        auto hit=raycast_local(grid,localOrigin,localDirection,maximumDistance*metric);
-        if (!hit) return std::nullopt;
-        const Float3 localPosition=add(localOrigin,multiply(normalize(localDirection),hit->distance));
-        const Float3 normal{float(hit->normal.x),float(hit->normal.y),float(hit->normal.z)};
-        hit->distance/=metric;
-        return VoxelTraceHit{static_cast<std::uint32_t>(instanceIndex),*hit,
+        const auto found=raycast_displaced(instanceIndex,grid,localOrigin,localDirection,maximumDistance*metric,
+                                           multiply(instance.spacing,metersPerVoxel_));
+        if (!found) return std::nullopt;
+        RayHit hit=found->hit;
+        const Float3 localPosition=add(localOrigin,multiply(normalize(localDirection),hit.distance));
+        const Float3 normal=found->displaced?found->normal:Float3{float(hit.normal.x),float(hit.normal.y),float(hit.normal.z)};
+        hit.distance/=metric;
+        return VoxelTraceHit{static_cast<std::uint32_t>(instanceIndex),hit,
             voxel_to_world(instance.transform,instance.spacing,localPosition),
             voxel_normal_to_world(instance.transform,instance.spacing,normal)};
     }
     // Same sequence as raycast_voxels_transformed.
     const Float3 localOrigin = inverse_transform_point(instance.transform, origin);
     const Float3 localDirection = inverse_transform_vector(instance.transform, direction);
-    const auto hit = raycast_local(grid, localOrigin, localDirection, maximumDistance);
-    if (!hit) return std::nullopt;
-    const Float3 localPosition = add(localOrigin, multiply(normalize(localDirection), hit->distance));
-    const Float3 localNormal{static_cast<float>(hit->normal.x), static_cast<float>(hit->normal.y),
-                             static_cast<float>(hit->normal.z)};
-    return VoxelTraceHit{static_cast<std::uint32_t>(instanceIndex), *hit,
+    const auto found = raycast_displaced(instanceIndex, grid, localOrigin, localDirection, maximumDistance,
+                                         Float3{metersPerVoxel_, metersPerVoxel_, metersPerVoxel_});
+    if (!found) return std::nullopt;
+    const RayHit& hit = found->hit;
+    const Float3 localPosition = add(localOrigin, multiply(normalize(localDirection), hit.distance));
+    const Float3 localNormal = found->displaced ? found->normal
+                                                : Float3{static_cast<float>(hit.normal.x), static_cast<float>(hit.normal.y),
+                                                         static_cast<float>(hit.normal.z)};
+    return VoxelTraceHit{static_cast<std::uint32_t>(instanceIndex), hit,
                          transform_point(instance.transform, localPosition),
                          normalize(transform_vector(instance.transform, localNormal))};
 }

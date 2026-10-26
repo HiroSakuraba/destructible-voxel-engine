@@ -397,6 +397,11 @@ void write_material(ByteWriter& writer, const VoxelMaterialDefinition& material,
             }
         }
     }
+    // Displacement extension (minor 11): depth and mode.
+    if (minor >= 11U) {
+        writer.write_float(material.displacementDepthMeters);
+        writer.write_u8(material.displacementMode);
+    }
 }
 
 [[nodiscard]] VoxelMaterialDefinition read_material(ByteReader& reader, std::uint16_t minor) {
@@ -513,6 +518,11 @@ void write_material(ByteWriter& writer, const VoxelMaterialDefinition& material,
             if (!material_textures_valid(material)) throw std::runtime_error("invalid DVOX material texture set");
         }
     }
+    if (minor >= 11U) {
+        material.displacementDepthMeters = reader.read_float();
+        material.displacementMode = reader.read_u8();
+        if (!material_displacement_settings_valid(material)) throw std::runtime_error("invalid DVOX material displacement");
+    }
     return material;
 }
 
@@ -552,7 +562,9 @@ bool write_dvox(
                                        [](const VoxelMaterialDefinition& m) { return material_has_iridescence(m); });
         const bool textures = std::any_of(asset.materials.begin(), asset.materials.end(),
                                           [](const VoxelMaterialDefinition& m) { return material_has_textures(m); });
-        const std::uint16_t versionMinor = textures ? 10 : iridescence ? 9 : sheen ? 8 : details ? 7 : origins ? 6 : normalMaps ? 5 : optics ? 4 : unit_voxel_scale(asset.voxelScale) ? kVersionMinor : 3;
+        const bool displacement = std::any_of(asset.materials.begin(), asset.materials.end(),
+                                              [](const VoxelMaterialDefinition& m) { return material_has_displacement_settings(m); });
+        const std::uint16_t versionMinor = displacement ? 11 : textures ? 10 : iridescence ? 9 : sheen ? 8 : details ? 7 : origins ? 6 : normalMaps ? 5 : optics ? 4 : unit_voxel_scale(asset.voxelScale) ? kVersionMinor : 3;
         const std::uint32_t headerSize=kHeaderSize+(versionMinor>=3 ? 12 : 0);
         ByteWriter materials;
         for (const VoxelMaterialDefinition& material : asset.materials) {
@@ -561,6 +573,7 @@ bool write_dvox(
             if (!material_iridescence_valid(material)) throw std::runtime_error("invalid DVOX material iridescence");
             if (!material_normal_map_valid(material)) throw std::runtime_error("invalid DVOX material normal map");
             if (!material_textures_valid(material)) throw std::runtime_error("invalid DVOX material texture set");
+            if (!material_displacement_settings_valid(material)) throw std::runtime_error("invalid DVOX material displacement");
             write_material(materials, material, versionMinor);
         }
 
@@ -646,7 +659,7 @@ namespace {
         if (magic != kMagic) throw std::runtime_error("invalid DVOX magic");
         const std::uint16_t major = reader.read_u16();
         const std::uint16_t minor = reader.read_u16();
-        if (major != kVersionMajor || minor > 10) {
+        if (major != kVersionMajor || minor > 11) {
             throw std::runtime_error("unsupported DVOX version");
         }
         const std::uint32_t flags = reader.read_u32();

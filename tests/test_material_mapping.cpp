@@ -26,8 +26,8 @@ void test_validation_and_uv_transform() {
 
     settings.heightMode = dve::HeightMappingMode::ParallaxOcclusion;
     settings.mappingMode = dve::MaterialMappingMode::WorldTriplanar;
-    CHECK(!dve::validate_material_mapping_settings(settings, &error));
-    CHECK(error.find("UV0 or UV1") != std::string::npos);
+    // Triplanar parallax is supported (the march runs in the projection's tangent plane).
+    CHECK(dve::validate_material_mapping_settings(settings, &error));
 }
 
 void test_triplanar_weights() {

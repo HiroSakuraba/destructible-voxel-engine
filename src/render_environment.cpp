@@ -121,6 +121,7 @@ bool RenderEnvironment::validate(std::string* error) const noexcept {
     if (!in(observerAltitudeMeters, 0.0F, 90000.0F)) return fail("observerAltitudeMeters must be in [0,90000]");
     if (!in(aerialPerspectiveScale, 0.0F, 1.0e6F)) return fail("aerialPerspectiveScale must be in [0,1e6]");
     if (!in(sunDisc, 0.0F, 100.0F)) return fail("sunDisc must be in [0,100]");
+    if (!in(displacementTraceDistanceMeters, 0.0F, 1.0e6F)) return fail("displacementTraceDistanceMeters must be in [0,1e6]");
     if (!in(volumetricFogDensityPerMeter, 0.0F, 10.0F)) return fail("volumetricFogDensityPerMeter must be in [0,10]");
     if (!in(volumetricFogHeightFalloffPerMeter, 0.0F, 10.0F)) return fail("volumetricFogHeightFalloffPerMeter must be in [0,10]");
     if (!in(volumetricFogBaseHeightMeters, -1.0e5F, 1.0e5F)) return fail("volumetricFogBaseHeightMeters must be finite");

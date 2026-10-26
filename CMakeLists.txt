@@ -3606,5 +3606,12 @@ if(DVE_EXPERIMENTAL_REGION_INDEX)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/region_streaming_contract_stub)
         target_link_libraries(dve_region_streaming_runtime_contract_tests PRIVATE dve_region_streaming_plan)
         add_test(NAME dve_region_streaming_runtime_contract_tests COMMAND dve_region_streaming_runtime_contract_tests)
+
+        # Actual DVE scene package, staging executor, renderer and physics.
+        add_executable(dve_region_streaming_real_tests tests/test_region_streaming_real.cpp)
+        target_link_libraries(dve_region_streaming_real_tests PRIVATE dve_region_streaming_runtime)
+        target_compile_definitions(dve_region_streaming_real_tests PRIVATE
+            DVE_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+        add_test(NAME dve_region_streaming_real_tests COMMAND dve_region_streaming_real_tests)
     endif()
 endif()

@@ -7,7 +7,8 @@
 - Separate dve_texture_bc7f static target uses BinomialLLC/basis_universal at commit ee771a7f913a3233a252eb6d281b4446f6a3c9f5.
 - Edge-clamped 4×4 block construction, native BC7 mips, analytical and partially analytical encoder presets.
 - GPU upload chooses BC7 sRGB for base color/emissive or linear BC7 for data only when supported; otherwise RGBA8 with fallback telemetry.
-- Resident bytes reflect actual selected GPU format; pending staging budget stays conservatively calculated from RGBA8.
+- Resident bytes and the per-pump upload budget (`pump(maximumUploadBytes)`) use the size of the GPU format actually selected (compressed BC7 bytes, or RGBA8 on fallback); the first upload per pump is always admitted. The `pendingBytes` statistic stays conservatively calculated from RGBA8.
+- enqueue() checks for duplicate/unchanged requests before running the encoder (and again before publishing), so unchanged hot reloads never pay the compression cost.
 - Hot reload preserves old resources on failure and invalidates references on successful replacement. Compression and mip-policy changes defeat source-hash no-op detection.
 - Encoder failures, thrown exceptions, and malformed block payloads fall back safely to RGBA8.
 

@@ -134,6 +134,15 @@ private:
         std::size_t bytes{};
         std::uint64_t sourceHash{};
     };
+    enum class Admission { Proceed, Unchanged, Rejected };
+    struct UploadChoice {
+        bool useBc7{};
+        rhi::TextureFormat format{rhi::TextureFormat::RGBA8Unorm};
+        std::size_t bytes{};
+    };
+    // Both require mutex_ held (choose_upload only queries the device capability table).
+    Admission admit_locked(const Pending& pending, std::string* error);
+    UploadChoice choose_upload(const Pending& pending) const;
     bool evict_until_fits(std::size_t incomingBytes, std::uint64_t replacingAssetId,
                           std::string* error);
     static std::uint64_t image_hash(const PolygonImage& image) noexcept;

@@ -2114,8 +2114,11 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_vulkan_main_material_table_tests tests/test_vulkan_main_material_table.cpp)
         target_link_libraries(dve_vulkan_main_material_table_tests PRIVATE dve::rhi_vulkan dve::render_bridge)
         add_test(NAME dve_vulkan_main_material_table_tests COMMAND dve_vulkan_main_material_table_tests)
+        add_executable(dve_vulkan_texture_t1_format_tests tests/test_vulkan_texture_t1_formats.cpp)
+        target_link_libraries(dve_vulkan_texture_t1_format_tests PRIVATE dve::core dve::rhi_vulkan)
+        add_test(NAME dve_vulkan_texture_t1_format_tests COMMAND dve_vulkan_texture_t1_format_tests)
         if(EXISTS "/usr/lib/chromium/vk_swiftshader_icd.json")
-            set_tests_properties(dve_vulkan_buffer_tests dve_vulkan_graphics_tests dve_v193_vulkan_sprite_tests dve_depth_only_rhi_tests dve_vulkan_compute_tests dve_vulkan_camera_outputs_tests dve_vulkan_environment_lighting_tests dve_vulkan_live_environment_renderer_tests dve_vulkan_dashr_tests dve_vulkan_shadow_material_table_tests dve_vulkan_main_material_table_tests PROPERTIES
+            set_tests_properties(dve_vulkan_buffer_tests dve_vulkan_graphics_tests dve_v193_vulkan_sprite_tests dve_depth_only_rhi_tests dve_vulkan_compute_tests dve_vulkan_camera_outputs_tests dve_vulkan_environment_lighting_tests dve_vulkan_live_environment_renderer_tests dve_vulkan_dashr_tests dve_vulkan_shadow_material_table_tests dve_vulkan_main_material_table_tests dve_vulkan_texture_t1_format_tests PROPERTIES
                 ENVIRONMENT "VK_ICD_FILENAMES=/usr/lib/chromium/vk_swiftshader_icd.json;DVE_REQUIRE_VULKAN=1")
         endif()
     endif()
@@ -2861,6 +2864,9 @@ if(DVE_BUILD_TESTS)
             add_executable(dve_mecha_m3_m4_tests tests/test_mecha_m3_m4.cpp)
             target_link_libraries(dve_mecha_m3_m4_tests PRIVATE dve::editor dve::player_runtime)
             add_test(NAME dve_mecha_m3_m4_tests COMMAND dve_mecha_m3_m4_tests)
+            add_executable(dve_mecha_m5_tests tests/test_mecha_m5.cpp)
+            target_link_libraries(dve_mecha_m5_tests PRIVATE dve::editor dve::player_runtime)
+            add_test(NAME dve_mecha_m5_tests COMMAND dve_mecha_m5_tests)
             add_executable(dve_mecha_game_tests tests/test_mecha_game.cpp)
             target_link_libraries(dve_mecha_game_tests PRIVATE dve::editor dve::player_runtime)
             add_test(NAME dve_mecha_game_tests COMMAND dve_mecha_game_tests)
@@ -3756,16 +3762,17 @@ if(DVE_ENABLE_BC7F_ENCODER AND NOT TARGET dve_render_bridge)
 endif()
 if(DVE_ENABLE_BC7F_POC OR DVE_ENABLE_BC7F_ENCODER)
     include(FetchContent)
-    # No FetchContent_MakeAvailable: Basis CMake changes global compiler options.
+    # Basis' own CMakeLists changes global compiler options, so it must never be add_subdirectory'd.
+    # SOURCE_SUBDIR points MakeAvailable at a directory with no CMakeLists (same pattern as
+    # cmake/DveLua.cmake): the pinned source is only downloaded, not configured. This also avoids
+    # the CMP0169 deprecation of single-argument FetchContent_Populate on CMake >= 3.30.
     if(NOT DVE_BASISU_SOURCE_DIR)
         FetchContent_Declare(dve_basisu_bc7f
             GIT_REPOSITORY https://github.com/BinomialLLC/basis_universal.git
             GIT_TAG ee771a7f913a3233a252eb6d281b4446f6a3c9f5
-            GIT_SHALLOW FALSE)
-        FetchContent_GetProperties(dve_basisu_bc7f)
-        if(NOT dve_basisu_bc7f_POPULATED)
-            FetchContent_Populate(dve_basisu_bc7f)
-        endif()
+            GIT_SHALLOW FALSE
+            SOURCE_SUBDIR dve_no_cmake_project)
+        FetchContent_MakeAvailable(dve_basisu_bc7f)
         set(_dve_bc7f_root "${dve_basisu_bc7f_SOURCE_DIR}")
     else()
         set(_dve_bc7f_root "${DVE_BASISU_SOURCE_DIR}")

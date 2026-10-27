@@ -125,6 +125,62 @@ private:
     audio::SampleId impact_{};
     std::uint64_t lastImpact_{};
 };
+// M5 mecha audio is synthesized into five short resident samples. The callback
+// never synthesizes, allocates, or reads the game world; it only mixes resident voices.
+class MechaAudioDriver {
+public:
+ explicit MechaAudioDriver(audio::AudioMixer& mixer):mixer_(mixer){
+  const auto rate=mixer_.sample_rate();
+  const std::array<float,5> pitches{155.F,67.F,93.F,240.F,315.F};
+  const std::array<float,5> lengths{.085F,.41F,.26F,.12F,.28F};
+  for(std::size_t i=0;i<samples_.size();++i){
+   audio::ResidentSampleDesc desc;
+   desc.name=std::array<std::string,5>{"Autocannon","Rocket","Explosion","Incoming fire","Boost"}[i];
+   desc.sampleRate=rate;desc.channels=1;
+   const auto frames=std::max<std::uint32_t>(128U,std::uint32_t(float(rate)*lengths[i]));
+   desc.samples.resize(frames);
+   std::uint32_t noise=0x9E3779B9U ^ std::uint32_t(i*7919U);
+   for(std::uint32_t n=0;n<frames;++n){
+    const float t=float(n)/float(rate),phase=6.283185307F*pitches[i]*t;
+    noise^=noise<<13;noise^=noise>>17;noise^=noise<<5;
+    const float white=(float(noise&65535U)/32767.5F-1.F);
+    const float decay=std::exp(-(i==1?6.F:18.F)*t);
+    const float amplitude=std::clamp(1.F-float(n)/float(frames),0.F,1.F);
+    const float wave= i==0?.55F*white+.45F*std::sin(phase):
+                      i==1?.8F*std::sin(phase*(1.F-0.8F*t))+.2F*white:
+                      i==2?.65F*white+.35F*std::sin(phase):
+                      i==3?.12F*white+.88F*std::sin(phase):
+                           .4F*white+.6F*std::sin(phase*(1.F+2.F*t));
+    desc.samples[n]=.28F*wave*decay*amplitude;
+   }
+   samples_[i]=mixer_.register_resident_sample(std::move(desc));
+  }
+ }
+ void update(const PrototypeHud* hud){
+  if(!hud||!hud->mecha){ready_=false;return;}
+  const auto& x=hud->mechAudio;
+  const std::array<std::uint64_t,5> counters{
+   x.primaryShots,x.rockets,x.impacts,x.enemyShots,x.boostUses};
+  if(!ready_){last_=counters;ready_=true;return;}
+  for(std::size_t i=0;i<counters.size();++i){
+   if(counters[i]<last_[i]){last_[i]=counters[i];continue;}
+   const auto emitted=std::min<std::uint64_t>(counters[i]-last_[i],2U);
+   for(std::uint64_t j=0;j<emitted;++j)if(samples_[i]){
+    audio::PlaySampleDesc p;
+    p.sample=samples_[i];p.loop=false;p.spatialized=false;
+    p.priority=audio::AudioPriority::Important;
+    p.gain=i==0?.38F:i==2?.48F:.32F;
+    (void)mixer_.play_sample(p);
+   }
+   last_[i]=counters[i];
+  }
+ }
+private:
+ audio::AudioMixer& mixer_;
+ std::array<audio::SampleId,5> samples_{};
+ std::array<std::uint64_t,5> last_{};
+ bool ready_{};
+};
 #endif
 
 constexpr const char* kUsage = R"(usage: dve_player [<game.dvepak> | <project-dir>] [options]
@@ -588,11 +644,14 @@ int run(int argc, char** argv) {
 #if defined(DVE_PLAYER_HAVE_AUDIO)
     std::unique_ptr<audio::AudioMixer> mixer;
     std::unique_ptr<RacingAudioDriver> racingAudio;
+    std::unique_ptr<MechaAudioDriver> mechaAudio;
     std::unique_ptr<audio::SdlSynthAudioDevice> audioDevice;
     if (!options.headless && !options.noAudio) {
         mixer = std::make_unique<audio::AudioMixer>();
         if(const auto* hud=app->prototype_hud();hud&&hud->racing)
             racingAudio=std::make_unique<RacingAudioDriver>(*mixer);
+        if(const auto* hud=app->prototype_hud();hud&&hud->mecha)
+            mechaAudio=std::make_unique<MechaAudioDriver>(*mixer);
         std::string audioError;
         audioDevice = std::make_unique<audio::SdlSynthAudioDevice>(*mixer, &audioError);
         if (audioDevice->valid()) {
@@ -637,6 +696,7 @@ int run(int argc, char** argv) {
         const float aspect = static_cast<float>(renderWidth) / static_cast<float>(renderHeight);
         #if defined(DVE_PLAYER_HAVE_AUDIO)
         if(racingAudio)racingAudio->update(app->prototype_hud());
+        if(mechaAudio)mechaAudio->update(app->prototype_hud());
 #endif
         const PlayerRenderView view = app->render_view(objects, aspect, interpolationAlpha);
         if (!renderer->render(view, &error)) return false;

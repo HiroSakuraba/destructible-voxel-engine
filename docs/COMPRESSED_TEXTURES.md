@@ -48,11 +48,11 @@ The PoC encodes 4,096 deterministic synthetic color/alpha blocks in analytical a
 
 ```sh
 cmake -S . -B build-t1 -DDVE_BUILD_TESTS=ON -DDVE_BUILD_RHI=ON
-cmake --build build-t1 --target dve_compressed_texture_tests dve_texture_t1_format_tests
-ctest --test-dir build-t1 -R '^(dve_compressed_texture_tests|dve_texture_t1_format_tests)$' --output-on-failure
+cmake --build build-t1 --target dve_compressed_texture_tests dve_texture_t1_format_tests dve_vulkan_texture_t1_format_tests
+ctest --test-dir build-t1 -R '^(dve_compressed_texture_tests|dve_texture_t1_format_tests|dve_vulkan_texture_t1_format_tests)$' --output-on-failure
 ```
 
-The test generates native BC/ETC2/EAC/ASTC KTX2 fixtures plus BC4/BC6H/BC7 DX10 DDS fixtures, checks parser mappings, verifies exact GPU-compressed byte counts, checks Null RHI upload/readback, tests ASTC 8×8 non-multiple dimensions, and rejects truncated/supercompressed inputs.
+The test generates native BC/ETC2/EAC/ASTC KTX2 fixtures plus BC4/BC6H/BC7 DX10 DDS fixtures, checks parser mappings, verifies exact GPU-compressed byte counts, checks Null RHI upload/readback, tests ASTC 8×8 non-multiple dimensions, and rejects truncated/supercompressed inputs. `dve_vulkan_texture_t1_format_tests` uploads two-mip 19×11 textures for every T1 format the Vulkan device reports as sampled and requires byte-exact readback; formats the device does not support must report no capability and fail upload explicitly. It skips without a Vulkan device unless `DVE_REQUIRE_VULKAN` is set. Mesa lavapipe (LLVM 19) here exposes BC but not ETC2/EAC/ASTC, so those only exercise the explicit-unsupported path there.
 
 ### Follow-up / T2
 

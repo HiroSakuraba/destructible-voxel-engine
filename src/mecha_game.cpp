@@ -9,6 +9,10 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <optional>
+#include <sstream>
+#include <iomanip>
+#include <locale>
 #include <map>
 #include <set>
 #include <string>
@@ -21,6 +25,7 @@ constexpr std::string_view playerType="dve.prototype.mech_player";
 constexpr std::string_view torsoType="dve.prototype.mech_torso";
 constexpr std::string_view targetType="dve.prototype.mech_target";
 constexpr std::string_view rulesType="dve.prototype.mech_rules";
+constexpr std::string_view extractionType="dve.prototype.mech_extraction";
 constexpr float pi=3.14159265358979323846F;
 Float3 plus(Float3 a,Float3 b){return {a.x+b.x,a.y+b.y,a.z+b.z};}
 Float3 minus(Float3 a,Float3 b){return {a.x-b.x,a.y-b.y,a.z-b.z};}
@@ -40,7 +45,7 @@ template<class T>T property(const Component& c,std::string_view key,T fallback){
  if(it!=c.properties.end())if(const auto v=std::get_if<T>(&it->second))return *v;
  return fallback;
 }
-bool actor_type(std::string_view t){return t==playerType||t==torsoType||t==targetType||t==rulesType;}
+bool actor_type(std::string_view t){return t==playerType||t==torsoType||t==targetType||t==rulesType||t==extractionType;}
 bool key_ok(std::string_view s){
  return !s.empty()&&s.size()<=64&&s.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")==std::string_view::npos;
 }
@@ -110,6 +115,8 @@ void register_mecha_components(ComponentTypeRegistry& r){
   {"attack_range",30.0,false,false,"Enemy maximum firing distance in metres"},
   {"damage_per_shot",4.0,false,false,"Enemy weapon damage to player"},
   {"shot_interval",1.4,false,false,"Seconds between enemy shots"}});
+ add(std::string(extractionType),"Mission extraction beacon (marker)",{
+  {"radius",5.0,false,false,"XY extraction radius in metres"}});
  add(std::string(rulesType),"Mech game rules (marker)",{
   {"target_count",std::int64_t{3},false,false,"Targets to destroy for victory"}});
 }
@@ -117,7 +124,7 @@ bool validate_mecha_scene(std::span<const PrototypeObjectView> objects,std::stri
  auto fail=[&](std::string s){if(error)*error=std::move(s);return false;};
  const auto registry=ComponentTypeRegistry::make_default();
  std::set<std::string> keys;
- int players=0,rules=0,torsos=0,targets=0;std::int64_t requiredTargets=0;
+ int players=0,rules=0,torsos=0,targets=0,extractions=0;std::int64_t requiredTargets=0;
  for(const auto& o:objects){
   unsigned roles=0;
   for(const auto& c:o.components)if(c.enabled&&c.type.starts_with(kPrototypePrefix)){
@@ -126,7 +133,11 @@ bool validate_mecha_scene(std::span<const PrototypeObjectView> objects,std::stri
    std::string issue;if(!registry.validate(c,&issue))return fail(o.name+": "+issue);
    const auto key=property(c,"key",std::string{});
    if(!key_ok(key)||!keys.insert(key).second)return fail("Duplicate or invalid mech actor key");
-   if(!o.marker&&(c.type==rulesType))return fail("Mech rules require bodyless marker");
+   if(!o.marker&&(c.type==rulesType||c.type==extractionType))return fail("Mech rules/extraction require bodyless markers");
+   if(c.type==extractionType){
+    ++extractions;const auto radius=property(c,"radius",5.0);
+    if(!std::isfinite(radius)||radius<1||radius>100)return fail("Invalid extraction radius");
+   }
    if(c.type==rulesType){++rules;const auto n=property(c,"target_count",std::int64_t{3});if(n<1||n>64)return fail("Invalid target count");requiredTargets=n;}
    if(c.type==playerType){
     ++players;if(o.marker)return fail("Mech chassis must have visible geometry");
@@ -150,7 +161,7 @@ bool validate_mecha_scene(std::span<const PrototypeObjectView> objects,std::stri
    }
   }
  }
- if(players!=1||rules!=1||torsos>1||targets<1||targets>64||requiredTargets>targets)return fail("Mech scene requires one player, one rules marker, at most one torso and 64 targets");
+ if(players!=1||rules!=1||torsos>1||extractions>1||targets<1||targets>64||requiredTargets>targets)return fail("Mech scene requires one player, one rules marker, at most one torso and 64 targets");
  return true;
 }
 struct MechaGame::Impl {
@@ -180,7 +191,10 @@ struct MechaGame::Impl {
  MechMotorState motor{};
  MechMotorConfig config{};
  MechCombatTelemetry telemetry{};
- GameObjectId player{},torso{},rules{};
+ GameObjectId player{},torso{},rules{},extraction{};
+ Float3 extractionPosition{};float extractionRadius{5.F};
+ bool extractionReady{};
+ std::optional<GameWorldSaveState> initialWorld;
  std::uint32_t requiredTargets{3};
  Float3 start{};
  float primaryCooldown{},rocketCooldown{},cameraFollow{};
@@ -190,6 +204,7 @@ struct MechaGame::Impl {
  std::vector<RacingVisualEffect> impacts;
  std::uint64_t nextProjectile{1};
  std::uint32_t rounds{200},missiles{12};
+ std::uint64_t boostUses{};
  explicit Impl(GameWorld& w):world(w){hud.active=false;hud.mecha=true;hud.maximumHealth=hud.health=100;}
  void camera(bool snap=false){
   const Float3 focus=plus(motor.position,{0,0,1.5F});
@@ -212,10 +227,14 @@ struct MechaGame::Impl {
      std::to_string(telemetry.targetsDestroyed)+"/"+std::to_string(requiredTargets);
   if(hud.debug)hud.vehicleTelemetry+="  NAV "+std::to_string(telemetry.navigationReplans)+
     "  CARVES "+std::to_string(telemetry.voxelCarvesQueued);
-  hud.prompt="WASD MOVE  SHIFT BOOST  J/L AIM  MOUSE 1/2 FIRE  P PAUSE  R RESET";
-  hud.message=hud.phase==PrototypePhase::Won?"TARGETS CLEARED - R TO RESTART":
+  if(extraction)hud.vehicleTelemetry+=extractionReady?"  OBJECTIVE: EXTRACT":"  OBJECTIVE: DISABLE";
+  hud.mechAudio={telemetry.autocannonShots,telemetry.rocketsFired,
+                  telemetry.impacts,telemetry.enemyShots,boostUses};
+  hud.prompt="WASD MOVE  SHIFT BOOST  J/L AIM  MOUSE 1/2 FIRE  F5 SAVE  F9 LOAD  P PAUSE  R RESET";
+  hud.message=hud.phase==PrototypePhase::Won?"MISSION COMPLETE - R TO RESTART":
       hud.phase==PrototypePhase::Paused?"PAUSED - P TO RESUME":
-      hud.phase==PrototypePhase::Lost?"MECH DISABLED - R TO RESTART":"";
+      hud.phase==PrototypePhase::Lost?"MECH DISABLED - R TO RESTART":
+      extractionReady?"HOSTILES CLEARED - REACH EXTRACTION BEACON":"";
   telemetry.energy=motor.energy;telemetry.primaryCooldown=primaryCooldown;
   telemetry.rocketCooldown=rocketCooldown;telemetry.activeRockets=std::uint32_t(rockets.size());
  }
@@ -223,7 +242,7 @@ struct MechaGame::Impl {
   motor={};motor.position=start;motor.energy=100;
   hud.phase=PrototypePhase::Playing;hud.health=hud.maximumHealth=100;
   primaryCooldown=rocketCooldown=0;rockets.clear();impacts.clear();nextProjectile=1;
-  rounds=200;missiles=12;telemetry={};
+  rounds=200;missiles=12;telemetry={};boostUses=0;extractionReady=false;
   lastBoost=lastPause=lastRestart=lastDebug=false;
   for(std::size_t i=0;i<targets.size();++i){
    auto& t=targets[i];t.hp=t.initial;
@@ -304,7 +323,10 @@ struct MechaGame::Impl {
   }else if(world.geometry_kind(hit.id)==GameGeometryKind::Voxel){
    (void)world.add_surface_mark(hit.id,hit.position,.32F);
   }
-  if(telemetry.targetsDestroyed>=requiredTargets)hud.phase=PrototypePhase::Won;
+  if(telemetry.targetsDestroyed>=requiredTargets){
+   extractionReady=true;
+   if(!extraction)hud.phase=PrototypePhase::Won;
+  }
  }
  void shoot_primary(){
   if(primaryCooldown>0||rounds==0)return;
@@ -418,7 +440,8 @@ struct MechaGame::Impl {
   const bool boost=boost_down();
   const auto input=MechMotorInput{{axis(world.get_axis("move_x")),axis(world.get_axis("move_y")),0},
      boost&&!lastBoost};
-  lastBoost=boost;
+  if(boost&&!lastBoost)++boostUses;
+   lastBoost=boost;
   auto displace=integrate_mech_motor(motor,config,input,dt);
   // Swept capsule handles polygon and voxel blocking; two slide iterations.
   for(int i=0;i<2&&mag(displace)>1.e-5F;++i){
@@ -467,6 +490,10 @@ bool MechaGame::start(std::string* error){
    s.config.boostSpeed=float(property(c,"boost_speed",24.0));
    s.config.radius=float(property(c,"radius",.95));s.config.height=float(property(c,"height",3.5));
   }else if(c.type==torsoType)s.torso=o.id;
+  else if(c.type==extractionType){
+   s.extraction=o.id;s.extractionRadius=float(property(c,"radius",5.0));
+   s.extractionPosition=s.world.position(o.id).value_or(Float3{});
+  }
   else if(c.type==rulesType){s.rules=o.id;s.requiredTargets=std::uint32_t(property(c,"target_count",std::int64_t{3}));}
   else if(c.type==targetType){
    const auto hp=float(property(c,"health",100.0));
@@ -490,6 +517,21 @@ bool MechaGame::start(std::string* error){
   if(error)*error="Mech game requires Z-up gravity";return false;
  }
  s.start=*s.world.position(s.player);s.started=true;s.reset();
+ s.initialWorld=s.world.capture_save_state();
+ // capture_save_state() leaves polygon geometry empty (file saves re-read it from the asset
+ // source), but an in-memory restore_save_state() needs it. Attach the live immutable
+ // geometry so the pristine snapshot can restore polygon scenery, chassis and enemies.
+ {
+  std::map<GameObjectId,const CookedPolygonAsset*> polygons;
+  const auto renderObjects=s.world.render_objects();
+  for(const auto& r:renderObjects)if(r.polygon)polygons.emplace(r.id,r.polygon);
+  for(auto& item:s.initialWorld->objects){
+   if(item.kind!=GameGeometryKind::Polygon||item.polygon)continue;
+   const auto it=polygons.find(item.id);
+   if(it==polygons.end()){if(error)*error="Mech restart snapshot: missing polygon geometry";s.initialWorld.reset();return false;}
+   item.polygon=std::make_shared<const CookedPolygonAsset>(*it->second);
+  }
+ }
  return true;
 }
 void MechaGame::step(float dt){
@@ -497,7 +539,16 @@ void MechaGame::step(float dt){
  auto edge=[&](const char* a,bool& held){const bool pressed=s.world.is_action_pressed(a);
   const bool pressedEdge=pressed&&!held;held=pressed;return pressedEdge;};
  if(edge("prototype_debug",s.lastDebug))s.hud.debug=!s.hud.debug;
- if(edge("restart",s.lastRestart)){s.reset();return;}
+ if(edge("restart",s.lastRestart)){
+  if(s.initialWorld){
+   std::string issue;
+   if(!s.world.restore_save_state(*s.initialWorld,nullptr,&issue)){
+    s.hud.phase=PrototypePhase::Lost;s.hud.message="RESET FAILED: "+issue;
+    return;
+   }
+  }
+  s.reset();s.lastRestart=true;return; // consume the press edge even after world-input restore
+ }
  if(edge("pause",s.lastPause))
   s.hud.phase=s.hud.phase==PrototypePhase::Paused?PrototypePhase::Playing:PrototypePhase::Paused;
  if(s.hud.phase!=PrototypePhase::Playing){s.refresh_hud();return;}
@@ -510,11 +561,156 @@ void MechaGame::step(float dt){
  if(s.secondary_down())s.shoot_rocket();
  s.step_rockets(dt);
  if(s.hud.phase==PrototypePhase::Playing)s.step_enemies(dt);
+  if(s.extractionReady&&s.extraction&&s.hud.phase==PrototypePhase::Playing){
+   const auto offset=minus(s.motor.position,s.extractionPosition);
+   if(std::hypot(offset.x,offset.y)<=s.extractionRadius)s.hud.phase=PrototypePhase::Won;
+  }
  s.world.tick(dt);s.age_effects(dt);s.camera();s.refresh_hud();
 }
-bool MechaGame::after_restore(std::string* error){
- // M5 will serialize full combat state. Do not pretend that quickload restores combat targets.
- if(error)*error="M1/M2 mecha quickload is not supported until combat-state serialization (M5)";
- return false;
+// A small versioned application section in DVESAVE. World voxels, objects, transforms,
+// physics and timing stay in the authoritative GameWorld section; these are ONLY the
+// mecha-controller values absent from GameWorld (ammo, aim, AI cooldowns, mission state).
+std::string MechaGame::save_state() const {
+ const auto& s=*impl_;
+ if(!s.started)return {};
+ // Navigation paths are a cache: a replan is forced when one is empty. A route longer than the
+ // loader accepts (256 points), or a section that would exceed the 64 KiB loader cap, must
+ // not produce a save that cannot be loaded, so such paths are dropped instead.
+ const auto encode=[&](bool paths){
+ std::ostringstream out;out.imbue(std::locale::classic());
+ out<<std::setprecision(9)<<"DVE_MECHA 1 "<<unsigned(s.hud.phase)<<' '
+    <<s.hud.health<<' '<<int(s.hud.debug)<<' '<<int(s.extractionReady)<<' '
+    <<s.motor.position.x<<' '<<s.motor.position.y<<' '<<s.motor.position.z<<' '
+    <<s.motor.velocity.x<<' '<<s.motor.velocity.y<<' '<<s.motor.velocity.z<<' '
+    <<s.motor.legsYaw<<' '<<s.motor.torsoYaw<<' '<<s.motor.energy<<' '
+    <<s.primaryCooldown<<' '<<s.rocketCooldown<<' '
+    <<s.rounds<<' '<<s.missiles<<' '<<s.nextProjectile<<' '<<s.boostUses<<' '
+    <<s.telemetry.autocannonShots<<' '<<s.telemetry.rocketsFired<<' '
+    <<s.telemetry.targetsDestroyed<<' '<<s.telemetry.impacts<<' '
+    <<s.telemetry.voxelCarvesQueued<<' '<<s.telemetry.enemyShots<<' '
+    <<s.telemetry.navigationReplans<<' '<<s.targets.size()<<'\n';
+ for(const auto& t:s.targets){
+  const bool keep=paths&&t.path.size()<=256U&&t.waypoint<=t.path.size();
+  const auto p=s.world.position(t.id).value_or(t.spawn);
+  out<<std::quoted(t.key)<<' '<<t.hp<<' '<<t.cooldown<<' '
+     <<(keep?t.replanCountdown:0.F)<<' '<<t.turretYaw<<' '
+     <<p.x<<' '<<p.y<<' '<<p.z<<' '
+     <<(keep?t.waypoint:std::size_t{0})<<' '<<(keep?t.path.size():std::size_t{0})<<'\n';
+  if(keep)for(const auto& q:t.path)out<<q.x<<' '<<q.y<<' '<<q.z<<'\n';
+ }
+ out<<s.rockets.size()<<'\n';
+ for(const auto& p:s.rockets)
+  out<<p.position.x<<' '<<p.position.y<<' '<<p.position.z<<' '
+     <<p.velocity.x<<' '<<p.velocity.y<<' '<<p.velocity.z<<' '
+     <<p.remainingSeconds<<' '<<p.sequence<<'\n';
+ return out.str();
+ };
+ auto encoded=encode(true);
+ if(encoded.size()>65536U)encoded=encode(false);
+ return encoded;
 }
+bool MechaGame::after_restore(std::string_view encoded,std::string* error){
+ auto& s=*impl_;
+ const auto fail=[&](std::string reason){if(error)*error="Invalid mecha save: "+reason;return false;};
+ if(encoded.empty())return fail("missing mecha game section (older saves cannot restore M1-M4 combat state)");
+ if(encoded.size()>65536U)return fail("section exceeds 64 KiB");
+ std::istringstream in{std::string(encoded)};in.imbue(std::locale::classic());
+ std::string magic;unsigned version{},phase{},debug{},ready{};
+ MechMotorState motor{};
+ float health{},primary{},secondary{};
+ unsigned rounds{},missiles{};
+ std::uint64_t next{},boosts{};
+ MechCombatTelemetry telemetry{};
+ std::size_t nTargets{};
+ in>>magic>>version>>phase>>health>>debug>>ready
+   >>motor.position.x>>motor.position.y>>motor.position.z
+   >>motor.velocity.x>>motor.velocity.y>>motor.velocity.z
+   >>motor.legsYaw>>motor.torsoYaw>>motor.energy
+   >>primary>>secondary>>rounds>>missiles>>next>>boosts
+   >>telemetry.autocannonShots>>telemetry.rocketsFired
+   >>telemetry.targetsDestroyed>>telemetry.impacts
+   >>telemetry.voxelCarvesQueued>>telemetry.enemyShots
+   >>telemetry.navigationReplans>>nTargets;
+ if(!in||magic!="DVE_MECHA"||version!=1||phase>3||debug>1||ready>1
+    ||!finite3(motor.position)||!finite3(motor.velocity)
+    ||!std::isfinite(motor.legsYaw)||!std::isfinite(motor.torsoYaw)
+    ||!std::isfinite(motor.energy)||motor.energy<0||motor.energy>100
+    ||!std::isfinite(health)||health<0||health>s.hud.maximumHealth
+    ||!std::isfinite(primary)||primary<0||primary>1
+    ||!std::isfinite(secondary)||secondary<0||secondary>2
+    ||rounds>200||missiles>12||next==0||next>1000000000000ULL
+    ||nTargets!=s.targets.size()||nTargets>64)return fail("header out of range");
+ struct TargetSnapshot {
+  float hp{},cooldown{},replan{},yaw{};
+  Float3 position{};std::size_t waypoint{};
+  std::vector<Float3> path;
+ };
+ std::map<std::string,TargetSnapshot> saved;
+ std::uint64_t defeated{};
+ for(std::size_t i=0;i<nTargets;++i){
+  std::string key;TargetSnapshot t;std::size_t points{};
+  in>>std::quoted(key)>>t.hp>>t.cooldown>>t.replan>>t.yaw
+    >>t.position.x>>t.position.y>>t.position.z>>t.waypoint>>points;
+  if(!in||!key_ok(key)||!std::isfinite(t.hp)||t.hp<0
+    ||!std::isfinite(t.cooldown)||t.cooldown<0||t.cooldown>30
+    ||!std::isfinite(t.replan)||t.replan<0||t.replan>10
+    ||!std::isfinite(t.yaw)||!finite3(t.position)
+    ||points>256||t.waypoint>points)return fail("enemy state out of range");
+  t.path.resize(points);
+  for(auto& q:t.path){
+   in>>q.x>>q.y>>q.z;
+   if(!in||!finite3(q))return fail("navigation path invalid");
+  }
+  if(t.hp==0)++defeated;
+  if(!saved.emplace(std::move(key),std::move(t)).second)return fail("duplicate enemy key");
+ }
+ std::size_t rocketCount{};in>>rocketCount;
+ if(!in||rocketCount>128)return fail("invalid rocket count");
+ std::vector<MechProjectile> rockets;rockets.reserve(rocketCount);
+ std::set<std::uint64_t> sequences;
+ for(std::size_t i=0;i<rocketCount;++i){
+  MechProjectile p;
+  in>>p.position.x>>p.position.y>>p.position.z
+    >>p.velocity.x>>p.velocity.y>>p.velocity.z
+    >>p.remainingSeconds>>p.sequence;
+  if(!in||!finite3(p.position)||!finite3(p.velocity)
+     ||!std::isfinite(p.remainingSeconds)||p.remainingSeconds<=0||p.remainingSeconds>4
+     ||p.sequence==0||p.sequence>=next||!sequences.insert(p.sequence).second)
+   return fail("invalid rocket");
+  rockets.push_back(p);
+ }
+ in>>std::ws;
+ if(!in.eof())return fail("trailing data");
+ if(defeated!=telemetry.targetsDestroyed||ready!=(defeated>=s.requiredTargets))
+  return fail("mission or kill count inconsistent");
+ if((phase==unsigned(PrototypePhase::Won)&&!ready)||
+    (phase==unsigned(PrototypePhase::Lost)&&health>0))
+  return fail("phase inconsistent with objectives or health");
+ if(auto position=s.world.position(s.player);!position||
+    mag(minus(*position,motor.position))>.015F)return fail("saved chassis transform mismatch");
+ for(const auto& t:s.targets){
+  const auto it=saved.find(t.key);if(it==saved.end())return fail("missing enemy key");
+  const auto& snap=it->second;
+  if(snap.hp>t.initial)return fail("enemy health exceeds authored maximum");
+  if(s.world.is_enabled(t.id)!=(snap.hp>0))return fail("world enemy enabled state mismatch");
+  const auto position=s.world.position(t.id);
+  if(!position||mag(minus(*position,snap.position))>.015F)
+   return fail("saved enemy transform mismatch");
+ }
+ // Parse-and-validate before committing: failed quickloads retain the live PlayerSession.
+ s.motor=motor;s.primaryCooldown=primary;s.rocketCooldown=secondary;
+ s.rounds=rounds;s.missiles=missiles;s.nextProjectile=next;s.boostUses=boosts;
+ s.telemetry=telemetry;s.rockets=std::move(rockets);
+ s.extractionReady=ready!=0;s.hud.phase=PrototypePhase(phase);
+ s.hud.health=health;s.hud.debug=debug!=0;
+ for(auto& t:s.targets){
+  auto& snap=saved.at(t.key);
+  t.hp=snap.hp;t.cooldown=snap.cooldown;t.replanCountdown=snap.replan;
+  t.turretYaw=snap.yaw;t.path=std::move(snap.path);t.waypoint=snap.waypoint;
+ }
+ s.impacts.clear();s.lastBoost=s.lastPause=s.lastRestart=s.lastDebug=false;
+ s.camera(true);s.refresh_hud();
+ return true;
+}
+
 } // namespace dve

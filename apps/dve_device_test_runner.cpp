@@ -191,6 +191,23 @@ std::string texture_format_name(dve::rhi::TextureFormat format) {
     case TextureFormat::BC3RGBAUnorm: return "bc3_rgba_unorm";
     case TextureFormat::BC3RGBASrgb: return "bc3_rgba_srgb";
     case TextureFormat::BC5RGUnorm: return "bc5_rg_unorm";
+    case TextureFormat::BC4RUnorm: return "bc4_r_unorm";
+    case TextureFormat::BC6HRGBUfloat: return "bc6h_rgb_ufloat";
+    case TextureFormat::BC6HRGBSfloat: return "bc6h_rgb_sfloat";
+    case TextureFormat::BC7RGBAUnorm: return "bc7_rgba_unorm";
+    case TextureFormat::BC7RGBASrgb: return "bc7_rgba_srgb";
+    case TextureFormat::ETC2RGBUnorm: return "etc2_rgb_unorm";
+    case TextureFormat::ETC2RGBSrgb: return "etc2_rgb_srgb";
+    case TextureFormat::ETC2RGBAUnorm: return "etc2_rgba_unorm";
+    case TextureFormat::ETC2RGBASrgb: return "etc2_rgba_srgb";
+    case TextureFormat::EACR11Unorm: return "eac_r11_unorm";
+    case TextureFormat::EACRG11Unorm: return "eac_rg11_unorm";
+    case TextureFormat::ASTC4x4RGBAUnorm: return "astc_4x4_rgba_unorm";
+    case TextureFormat::ASTC4x4RGBASrgb: return "astc_4x4_rgba_srgb";
+    case TextureFormat::ASTC6x6RGBAUnorm: return "astc_6x6_rgba_unorm";
+    case TextureFormat::ASTC6x6RGBASrgb: return "astc_6x6_rgba_srgb";
+    case TextureFormat::ASTC8x8RGBAUnorm: return "astc_8x8_rgba_unorm";
+    case TextureFormat::ASTC8x8RGBASrgb: return "astc_8x8_rgba_srgb";
     case TextureFormat::D32Float: return "d32_float";
     case TextureFormat::RGBA8Srgb: return "rgba8_srgb";
     }

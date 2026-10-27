@@ -47,6 +47,10 @@ struct PrototypeHud {
     std::string flightWeather;
     RacingAudioState vehicleAudio{};
     MechAudioState mechAudio{};
+    // M6 perspective target marker measured in projected half-frame-height units.
+    // No camera or rendering backend is stored in the HUD.
+    bool mechLockMarker{};
+    float mechLockX{},mechLockY{};
     PrototypePhase phase{PrototypePhase::Playing};
     float health{},maximumHealth{};
     unsigned collected{},required{};

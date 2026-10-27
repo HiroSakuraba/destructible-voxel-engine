@@ -24,7 +24,7 @@ void mesh_part(CookedPolygonAsset& out,Float3 pos,Float3 size,unsigned mat){
 }
 }
 EditorDocument make_mecha_starter(){
- EditorDocument d("Iron Yard - Mecha Combat M1-M5");
+ EditorDocument d("Iron Yard - Mecha Combat M1-M6");
  auto box=[&](std::string label,Float3 pos,Float3 size,Float4 color,bool collide)->EditorObject&{
   EditorObject o(d.allocate_object_id(),std::move(label));
   o.flags.anchored=true;o.flags.collisionEnabled=collide;o.transform.position=pos;
@@ -59,14 +59,25 @@ EditorDocument make_mecha_starter(){
  auto& chassis=box("Player Mech Chassis",{0,-23,.05F},{2.7F,3.5F,2.1F},
    {.13F,.48F,.52F,1},false);
  chassis.components.push_back(role("mech_player","player"));
- // Replace the placeholder body with a readable two-leg silhouette.
- CookedPolygonAsset legs;legs.objectId=chassis.id;legs.materials.resize(2);legs.materialBindings.resize(2);
- legs.materials[0].baseColor={.14F,.44F,.51F,1};
- legs.materials[1].baseColor={.13F,.15F,.20F,1};
- mesh_part(legs,{-1,0,1.F},{.85F,1.4F,2.F},0);
- mesh_part(legs,{1,0,1.F},{.85F,1.4F,2.F},0);
- mesh_part(legs,{0,0,2.0F},{2.7F,1.4F,.8F},1);
- refresh_editor_polygon(legs,true);chassis.polygon=std::move(legs);
+ chassis.components.back().properties["camera_mode"]=std::int64_t{1};
+ // Mechanical waist and four independent leg segments: non-colliding visual
+ // kinematic segments driven by the M6 gait. Old scenes need no leg roles.
+ CookedPolygonAsset hips;hips.objectId=chassis.id;hips.materials.resize(1);
+ hips.materialBindings.resize(1);hips.materials[0].baseColor={.13F,.15F,.20F,1};
+ mesh_part(hips,{0,0,2.05F},{2.7F,1.5F,.75F},0);
+ refresh_editor_polygon(hips,true);chassis.polygon=std::move(hips);
+ for(int side:{-1,1})for(int segment=0;segment<2;++segment){
+  const auto x=float(side)*1.0F;
+  const float z=segment==0?1.55F:.55F;
+  auto& limb=box(std::string(side<0?"Left":"Right")+
+       (segment==0?" Thigh":" Shin"),{x,-23,z},
+       segment==0?Float3{.85F,1.15F,1.15F}:Float3{.78F,1.15F,1.1F},
+       segment==0?Float4{.12F,.42F,.5F,1}:Float4{.16F,.53F,.57F,1},false);
+  limb.components.push_back(role("mech_leg",std::string(side<0?"left":"right")+
+       (segment==0?"_upper":"_lower")));
+  limb.components.back().properties["side"]=std::int64_t{side};
+  limb.components.back().properties["segment"]=std::int64_t{segment};
+ }
 
  auto& torso=box("Swiveling Cannon Turret",{0,-23,2.05F},{3,2,1.4F},
    {.18F,.65F,.70F,1},false);

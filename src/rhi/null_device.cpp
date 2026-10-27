@@ -1023,7 +1023,7 @@ bool NullDevice::wait(FenceHandle fence, std::string* error) {
     if (!fence || fence.value >= nextFence_) { set_error(error, "unknown fence"); return false; }
     completedFence_ = std::max(completedFence_, fence.value); return true;
 }
-void NullDevice::wait_idle() noexcept { completedFence_ = nextFence_ > 0U ? nextFence_ - 1U : 0U; }
+void NullDevice::wait_idle() noexcept { ++waitIdleCalls_; completedFence_ = nextFence_ > 0U ? nextFence_ - 1U : 0U; }
 void NullDevice::simulate_device_loss(std::string reason) {
     status_ = DeviceStatus::Lost; lossReason_ = reason.empty() ? "simulated device loss" : std::move(reason);
 }

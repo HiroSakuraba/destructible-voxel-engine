@@ -46,6 +46,9 @@ struct MainMaterialDescriptor {
     std::uint32_t texturePresenceMask{};
     std::array<rhi::TextureViewHandle, kMainMaterialTextureChannelCount> textureViews{};
     std::array<rhi::SamplerHandle, kMainMaterialTextureChannelCount> samplers{};
+    // Table-owned (residency-owned) view that textureViews[Normal] started with; used to revert
+    // an external bind_resident_normal() override before the external view is destroyed.
+    rhi::TextureViewHandle authoredNormalView;
     std::uint64_t assetContentHash{};
     std::uint32_t materialIndex{};
 };
@@ -93,11 +96,18 @@ public:
     // The resident's *actual* GPU format controls the BC5 mapping flag.
     // The caller must retain its view until it is rebound or this descriptor
     // table is invalidated; the table does not own the external texture/view.
-    // Publishes a new descriptor only after GPU mapping bytes are updated.
+    // The new bind group is staged first; the shared mapping record, descriptor and old bind
+    // group change only after device.wait_idle(), so frames already submitted never observe a
+    // mismatched flag/view pair. Any failure leaves the previous binding untouched.
+    // Not thread-safe: call from the renderer/control thread between frames.
     bool bind_resident_normal(std::uint64_t assetContentHash,
                               std::uint32_t materialIndex,
                               const ResidentTexture& resident,
                               std::string* error = nullptr);
+    // Undo bind_resident_normal(): rebinds the authored normal view and clears the BC5 flag.
+    // Call this before destroying or evicting an external resident view. No-op if not overridden.
+    bool restore_authored_normal(std::uint64_t assetContentHash, std::uint32_t materialIndex,
+                                 std::string* error = nullptr);
     [[nodiscard]] const MainMaterialDescriptor* find(
         std::uint64_t assetContentHash, std::uint32_t materialIndex) const noexcept;
     [[nodiscard]] rhi::BindGroupLayoutHandle layout() const noexcept { return layout_; }
@@ -141,6 +151,10 @@ private:
     bool resolve_binding(const CookedPolygonAsset& asset, const PolygonTextureBinding& binding,
                          MainMaterialTextureChannel channel, rhi::TextureViewHandle& view,
                          rhi::SamplerHandle& sampler, bool& present, std::string* error);
+    bool publish_normal_binding(MainMaterialDescriptor& descriptor,
+                                rhi::TextureViewHandle normalView,
+                                const GpuPolygonMaterialMappingRecord& updated,
+                                std::string* error);
     bool retain_asset_once(std::uint64_t assetContentHash, bool& retainedNow,
                            std::string* error);
     void rollback_asset_retain(std::uint64_t assetContentHash, bool retainedNow) noexcept;

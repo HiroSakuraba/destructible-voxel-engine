@@ -386,6 +386,7 @@ bool MainMaterialDescriptorTable::ensure_material(const CookedPolygonAsset& asse
     created.descriptor.mappingRecordOffset = mappingOffset;
     created.descriptor.texturePresenceMask = textureMask;
     created.descriptor.textureViews = views;
+    created.descriptor.authoredNormalView = views[static_cast<std::uint32_t>(MainMaterialTextureChannel::Normal)];
     created.descriptor.samplers = samplers;
     created.descriptor.assetContentHash = asset.contentHash;
     created.descriptor.materialIndex = materialIndex;
@@ -399,6 +400,53 @@ bool MainMaterialDescriptorTable::ensure_material(const CookedPolygonAsset& asse
         return false;
     }
     ++stats_.materialDescriptorsCreated;
+    return true;
+}
+
+bool MainMaterialDescriptorTable::publish_normal_binding(
+    MainMaterialDescriptor& descriptor, rhi::TextureViewHandle normalView,
+    const GpuPolygonMaterialMappingRecord& updated, std::string* error) {
+    constexpr std::uint32_t channel = static_cast<std::uint32_t>(MainMaterialTextureChannel::Normal);
+    std::string local;
+    // Stage first: nothing visible to rendering changes until the new group exists.
+    rhi::BindGroupDesc group;
+    group.layout = layout_;
+    group.debugName = "Live material with replaced normal view";
+    group.entries = {
+        {0U, descriptor.materialRecordBuffer, {}, descriptor.materialRecordOffset,
+         sizeof(GpuMaterialRecord), {}},
+        {1U, descriptor.mappingRecordBuffer, {}, descriptor.mappingRecordOffset,
+         sizeof(GpuPolygonMaterialMappingRecord), {}},
+    };
+    for (std::uint32_t i = 0U; i < kMainMaterialTextureChannelCount; ++i) {
+        const auto view = i == channel ? normalView : descriptor.textureViews[i];
+        group.entries.push_back({i + 2U, {}, view, 0U, 0U, descriptor.samplers[i]});
+    }
+    group.entries.push_back({11U, {}, staticShadowDepthView_, 0U, 0U, shadowComparisonSampler_});
+    group.entries.push_back({12U, {}, dynamicShadowDepthView_, 0U, 0U, shadowComparisonSampler_});
+    group.entries.push_back({13U, descriptor.surfaceRecordBuffer, {}, descriptor.surfaceRecordOffset,
+                             sizeof(GpuMaterialSurfaceDetail), {}});
+    group.entries.push_back({14U, descriptor.layerBuffer, {}, 0U,
+                             descriptor.layerPayloadBytes, {}});
+    const auto next = device_.create_bind_group(group, &local);
+    if (!next) { set_error(error, local); return false; }
+    // The mapping record is shared with every frame already submitted, and those frames also
+    // reference the previous bind group. Frames are fenced asynchronously by the renderer, so
+    // the format flag, the view and the old group may only change once the GPU is idle;
+    // otherwise an in-flight frame could decode an RGBA view as BC5 (or use a destroyed set).
+    device_.wait_idle();
+    if (!device_.write_buffer(descriptor.mappingRecordBuffer, descriptor.mappingRecordOffset,
+                              std::as_bytes(std::span(&updated, 1U)), &local)) {
+        (void)device_.destroy_bind_group(next, nullptr);
+        set_error(error, local); return false;
+    }
+    const auto previous = descriptor.bindGroup;
+    descriptor.bindGroup = next;
+    descriptor.textureViews[channel] = normalView;
+    ++stats_.materialDescriptorsCreated;
+    std::string cleanupError;
+    if (!device_.destroy_bind_group(previous, &cleanupError) && error)
+        *error = cleanupError;
     return true;
 }
 
@@ -427,45 +475,39 @@ bool MainMaterialDescriptorTable::bind_resident_normal(
     auto updated = original;
     // Always test the exact view that will be inserted into the new bind group.
     if (!configure_bound_normal_format(updated, &resident, resident.view)) {
-        set_error(error, "resident view is not a valid BC5 or linear RGBA8 normal texture");
+        set_error(error, "resident view is not a valid BC5, BC7 or linear RGBA8 normal texture");
         return false;
     }
     // An incoming texture/view is caller-owned. Keeping it alive through
     // descriptor publication and future rendering is the host's responsibility.
-    rhi::BindGroupDesc group;
-    group.layout = layout_;
-    group.debugName = "Live material with external normal residency";
-    group.entries = {
-        {0U, descriptor.materialRecordBuffer, {}, descriptor.materialRecordOffset,
-         sizeof(GpuMaterialRecord), {}},
-        {1U, descriptor.mappingRecordBuffer, {}, descriptor.mappingRecordOffset,
-         sizeof(GpuPolygonMaterialMappingRecord), {}},
-    };
-    for (std::uint32_t i = 0U; i < kMainMaterialTextureChannelCount; ++i) {
-        const auto view = i == channel ? resident.view : descriptor.textureViews[i];
-        group.entries.push_back({i + 2U, {}, view, 0U, 0U, descriptor.samplers[i]});
+    return publish_normal_binding(descriptor, resident.view, updated, error);
+}
+
+bool MainMaterialDescriptorTable::restore_authored_normal(
+    std::uint64_t assetContentHash, std::uint32_t materialIndex, std::string* error) {
+    if (!valid()) {
+        set_error(error, "live material table is not initialized"); return false;
     }
-    group.entries.push_back({11U, {}, staticShadowDepthView_, 0U, 0U, shadowComparisonSampler_});
-    group.entries.push_back({12U, {}, dynamicShadowDepthView_, 0U, 0U, shadowComparisonSampler_});
-    group.entries.push_back({13U, descriptor.surfaceRecordBuffer, {}, descriptor.surfaceRecordOffset,
-                             sizeof(GpuMaterialSurfaceDetail), {}});
-    group.entries.push_back({14U, descriptor.layerBuffer, {}, 0U,
-                             descriptor.layerPayloadBytes, {}});
-    const auto next = device_.create_bind_group(group, &local);
-    if (!next) { set_error(error, local); return false; }
-    if (!device_.write_buffer(descriptor.mappingRecordBuffer, descriptor.mappingRecordOffset,
-                              std::as_bytes(std::span(&updated, 1U)), &local)) {
-        (void)device_.destroy_bind_group(next, nullptr);
+    const auto found = materials_.find({assetContentHash, materialIndex});
+    if (found == materials_.end()) {
+        set_error(error, "live material is not published"); return false;
+    }
+    auto& descriptor = found->second.descriptor;
+    constexpr std::uint32_t channel = static_cast<std::uint32_t>(MainMaterialTextureChannel::Normal);
+    if (!descriptor.authoredNormalView) {
+        set_error(error, "live material has no authored normal view to restore"); return false;
+    }
+    std::string local;
+    GpuPolygonMaterialMappingRecord record{};
+    if (!device_.read_buffer(descriptor.mappingRecordBuffer, descriptor.mappingRecordOffset,
+                             std::as_writable_bytes(std::span(&record, 1U)), &local)) {
         set_error(error, local); return false;
     }
-    const auto previous = descriptor.bindGroup;
-    descriptor.bindGroup = next;
-    descriptor.textureViews[channel] = resident.view;
-    ++stats_.materialDescriptorsCreated;
-    std::string cleanupError;
-    if (!device_.destroy_bind_group(previous, &cleanupError) && error)
-        *error = cleanupError;
-    return true;
+    if (descriptor.textureViews[channel] == descriptor.authoredNormalView &&
+        (record.mappingFlags & kGpuMaterialMappingNormalBc5) == 0U) return true;
+    // The authored normal channel is always uploaded as linear RGBA8: BC5 flag must be clear.
+    record.mappingFlags &= ~kGpuMaterialMappingNormalBc5;
+    return publish_normal_binding(descriptor, descriptor.authoredNormalView, record, error);
 }
 
 const MainMaterialDescriptor* MainMaterialDescriptorTable::find(

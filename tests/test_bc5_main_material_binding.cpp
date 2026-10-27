@@ -27,6 +27,7 @@ dve::CookedPolygonAsset make_asset() {
     asset.samplers.push_back({});
     asset.textures.push_back({"normal",0U,0U});
     asset.materialBindings[0].normal.texture=0U;
+    asset.materialBindings[0].doubleSided=true; // unrelated mapping bits must survive every rebind
     return asset;
 }
 } // namespace
@@ -61,6 +62,13 @@ int main() {try {
     check(device.read_buffer(initial->mappingRecordBuffer,initial->mappingRecordOffset,
         std::as_writable_bytes(std::span(&mapping,1U)),&error),"default mapping read");
     check((mapping.mappingFlags & kGpuMaterialMappingNormalBc5)==0U,"BC5 bit set on default RGBA normal");
+    check((mapping.mappingFlags & kGpuMaterialMappingDoubleSided)!=0U,"test setup lost double-sided flag");
+    const auto authoredView=initial->textureViews[2U];
+    const auto authoredGroup=initial->bindGroup;
+    check(authoredView && initial->authoredNormalView==authoredView,"authored normal view not recorded");
+    // Nothing is overridden yet: restore is a no-op that keeps the descriptor.
+    check(table.restore_authored_normal(asset.contentHash,0U,&error),"restore without override failed");
+    check(table.find(asset.contentHash,0U)->bindGroup==authoredGroup,"no-op restore rebuilt the group");
 
     TextureResidencyManager compressed(device,4096U,{},make_bc5_normal_encoder());
     check(compressed.enqueue({500U,asset.images[0],TextureSemantic::Normal,
@@ -75,7 +83,10 @@ int main() {try {
     check(device.read_buffer(bc5->mappingRecordBuffer,bc5->mappingRecordOffset,
         std::as_writable_bytes(std::span(&mapping,1U)),&error),"BC5 mapping read");
     check((mapping.mappingFlags & kGpuMaterialMappingNormalBc5)!=0U,"BC5 shader flag not published");
+    check((mapping.mappingFlags & kGpuMaterialMappingDoubleSided)!=0U,"BC5 rebind dropped unrelated flags");
+    check(bc5->authoredNormalView==authoredView,"authored normal view lost by override");
     const auto oldGroup=bc5->bindGroup;
+    check(oldGroup!=authoredGroup,"BC5 rebind did not publish a new group");
 
     TextureResidencyManager fallback(device,4096U);
     check(fallback.enqueue({501U,asset.images[0],TextureSemantic::Normal,
@@ -94,10 +105,50 @@ int main() {try {
     // No authored normal or invalid external residency must not replace valid bound resources.
     ResidentTexture invalid{};
     const auto safeGroup=rgba->bindGroup;
+    const auto idleBeforeReject=device.wait_idle_calls();
     check(!table.bind_resident_normal(asset.contentHash,0U,invalid,&error),
           "invalid resident was published");
     check(table.find(asset.contentHash,0U)->bindGroup==safeGroup,
           "invalid resident destroyed previous descriptor");
+    check(device.wait_idle_calls()==idleBeforeReject,"rejected rebind stalled the GPU");
+    // Wrong semantic, sRGB and unsupported formats are rejected without touching the binding.
+    // BC5 requires the BC5 flag, so first re-publish BC5 and verify rejects keep that state.
+    check(table.bind_resident_normal(asset.contentHash,0U,*resident,&error),"BC5 re-publish");
+    const auto bc5Group=table.find(asset.contentHash,0U)->bindGroup;
+    auto badSemantic=*resident;badSemantic.semantic=TextureSemantic::BaseColor;
+    auto srgb=*uncompressed;srgb.format=rhi::TextureFormat::RGBA8Srgb;
+    auto bc4=*uncompressed;bc4.format=rhi::TextureFormat::BC4RUnorm;
+    for(const auto* bad:{&badSemantic,&srgb,&bc4}) {
+        check(!table.bind_resident_normal(asset.contentHash,0U,*bad,&error),"bad resident format published");
+        check(table.find(asset.contentHash,0U)->bindGroup==bc5Group,"rejected rebind changed bind group");
+        check(device.read_buffer(rgba->mappingRecordBuffer,rgba->mappingRecordOffset,
+            std::as_writable_bytes(std::span(&mapping,1U)),&error),"post-reject mapping read");
+        check((mapping.mappingFlags & kGpuMaterialMappingNormalBc5)!=0U,
+              "rejected rebind cleared the live BC5 flag of the still-bound BC5 view");
+    }
+    check(!table.bind_resident_normal(asset.contentHash,7U,*resident,&error),"unknown material accepted");
+    // Linear BC7 normals (PreferBc7) use the legacy decode: accepted, flag clear.
+    auto bc7=*uncompressed;bc7.format=rhi::TextureFormat::BC7RGBAUnorm;
+    check(table.bind_resident_normal(asset.contentHash,0U,bc7,&error),"linear BC7 normal rejected");
+    check(device.read_buffer(rgba->mappingRecordBuffer,rgba->mappingRecordOffset,
+        std::as_writable_bytes(std::span(&mapping,1U)),&error),"BC7 mapping read");
+    check((mapping.mappingFlags & kGpuMaterialMappingNormalBc5)==0U,"BC7 normal marked as BC5");
+    // Every committed rebind drains in-flight GPU work first (shared mapping record + old group).
+    const auto idleBeforeCommit=device.wait_idle_calls();
+    check(table.bind_resident_normal(asset.contentHash,0U,*resident,&error),"BC5 final publish");
+    check(device.wait_idle_calls()==idleBeforeCommit+1U,"rebind did not wait for in-flight frames");
+    // Undo: authored view returns, BC5 flag clears, other flags survive, repeated undo is a no-op.
+    check(table.restore_authored_normal(asset.contentHash,0U,&error),"restore authored normal");
+    const auto* restored=table.find(asset.contentHash,0U);
+    check(restored->textureViews[2U]==authoredView,"authored view not restored");
+    check(device.read_buffer(restored->mappingRecordBuffer,restored->mappingRecordOffset,
+        std::as_writable_bytes(std::span(&mapping,1U)),&error),"restored mapping read");
+    check((mapping.mappingFlags & kGpuMaterialMappingNormalBc5)==0U,"BC5 flag survived restore");
+    check((mapping.mappingFlags & kGpuMaterialMappingDoubleSided)!=0U,"restore dropped unrelated flags");
+    const auto restoredGroup=restored->bindGroup;
+    check(table.restore_authored_normal(asset.contentHash,0U,&error) &&
+          table.find(asset.contentHash,0U)->bindGroup==restoredGroup,"second restore not a no-op");
+    check(!table.restore_authored_normal(asset.contentHash,9U,&error),"restore of unknown material accepted");
 
     table.clear();
     compressed.clear();

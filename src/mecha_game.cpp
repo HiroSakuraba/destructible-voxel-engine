@@ -533,7 +533,7 @@ void MechaGame::step(float dt){
     return;
    }
   }
-  s.reset();s.lastRestart=s.world.is_action_pressed("restart");return;
+  s.reset();s.lastRestart=true;return; // consume the press edge even after world-input restore
  }
  if(edge("pause",s.lastPause))
   s.hud.phase=s.hud.phase==PrototypePhase::Paused?PrototypePhase::Playing:PrototypePhase::Paused;

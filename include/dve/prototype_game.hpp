@@ -8,6 +8,7 @@
 #include <vector>
 namespace dve {
 class GameWorld;
+struct MechFootstepEvent;
 class OceanField;
 struct WaterVolumeSettings;
 struct UnderwaterLamp;
@@ -78,6 +79,7 @@ public:
     [[nodiscard]] PrototypeCamera camera() const;
     [[nodiscard]] const PrototypeHud& hud() const noexcept;
     [[nodiscard]] std::span<const RacingVisualEffect> racing_visual_effects() const noexcept;
+    [[nodiscard]] std::span<const MechFootstepEvent> mecha_footstep_events() const noexcept;
     [[nodiscard]] const OceanField* ocean_field() const noexcept;
     [[nodiscard]] double ocean_time() const noexcept;
     [[nodiscard]] const WaterVolumeSettings* water_volume_settings()const noexcept;

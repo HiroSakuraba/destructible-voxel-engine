@@ -2007,6 +2007,9 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_compressed_texture_tests tests/test_compressed_texture.cpp)
         target_link_libraries(dve_compressed_texture_tests PRIVATE dve::core dve::rhi)
         add_test(NAME dve_compressed_texture_tests COMMAND dve_compressed_texture_tests)
+        add_executable(dve_texture_t1_format_tests tests/test_texture_t1_formats.cpp)
+        target_link_libraries(dve_texture_t1_format_tests PRIVATE dve::core dve::rhi)
+        add_test(NAME dve_texture_t1_format_tests COMMAND dve_texture_t1_format_tests)
     endif()
 
     if(TARGET dve_rhi_vulkan)
@@ -2110,8 +2113,11 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_vulkan_main_material_table_tests tests/test_vulkan_main_material_table.cpp)
         target_link_libraries(dve_vulkan_main_material_table_tests PRIVATE dve::rhi_vulkan dve::render_bridge)
         add_test(NAME dve_vulkan_main_material_table_tests COMMAND dve_vulkan_main_material_table_tests)
+        add_executable(dve_vulkan_texture_t1_format_tests tests/test_vulkan_texture_t1_formats.cpp)
+        target_link_libraries(dve_vulkan_texture_t1_format_tests PRIVATE dve::core dve::rhi_vulkan)
+        add_test(NAME dve_vulkan_texture_t1_format_tests COMMAND dve_vulkan_texture_t1_format_tests)
         if(EXISTS "/usr/lib/chromium/vk_swiftshader_icd.json")
-            set_tests_properties(dve_vulkan_buffer_tests dve_vulkan_graphics_tests dve_v193_vulkan_sprite_tests dve_depth_only_rhi_tests dve_vulkan_compute_tests dve_vulkan_camera_outputs_tests dve_vulkan_environment_lighting_tests dve_vulkan_live_environment_renderer_tests dve_vulkan_dashr_tests dve_vulkan_shadow_material_table_tests dve_vulkan_main_material_table_tests PROPERTIES
+            set_tests_properties(dve_vulkan_buffer_tests dve_vulkan_graphics_tests dve_v193_vulkan_sprite_tests dve_depth_only_rhi_tests dve_vulkan_compute_tests dve_vulkan_camera_outputs_tests dve_vulkan_environment_lighting_tests dve_vulkan_live_environment_renderer_tests dve_vulkan_dashr_tests dve_vulkan_shadow_material_table_tests dve_vulkan_main_material_table_tests dve_vulkan_texture_t1_format_tests PROPERTIES
                 ENVIRONMENT "VK_ICD_FILENAMES=/usr/lib/chromium/vk_swiftshader_icd.json;DVE_REQUIRE_VULKAN=1")
         endif()
     endif()
@@ -3745,4 +3751,40 @@ if(DVE_EXPERIMENTAL_REGION_INDEX)
         target_link_libraries(dve_region_game_damage_host_real_tests PRIVATE dve_region_game_damage_host)
         add_test(NAME dve_region_game_damage_host_real_tests COMMAND dve_region_game_damage_host_real_tests)
     endif()
+endif()
+
+# T1: external bc7f analytical encoder experiment (NOT part of shipped DVE).
+# Pinned upstream commit and separate target; no dependency or networking when OFF.
+option(DVE_ENABLE_BC7F_POC "Build standalone experimental Basis bc7f encoder benchmark" OFF)
+if(DVE_ENABLE_BC7F_POC)
+    include(FetchContent)
+    # Basis' own CMakeLists changes global compiler options, so it must never be add_subdirectory'd.
+    # SOURCE_SUBDIR points MakeAvailable at a directory with no CMakeLists (same pattern as
+    # cmake/DveLua.cmake): the pinned source is only downloaded, not configured. This also avoids
+    # the CMP0169 deprecation of single-argument FetchContent_Populate on CMake >= 3.30.
+    if(NOT DVE_BASISU_SOURCE_DIR)
+        FetchContent_Declare(dve_basisu_bc7f
+            GIT_REPOSITORY https://github.com/BinomialLLC/basis_universal.git
+            GIT_TAG ee771a7f913a3233a252eb6d281b4446f6a3c9f5
+            GIT_SHALLOW FALSE
+            SOURCE_SUBDIR dve_no_cmake_project)
+        FetchContent_MakeAvailable(dve_basisu_bc7f)
+        set(_dve_bc7f_root "${dve_basisu_bc7f_SOURCE_DIR}")
+    else()
+        set(_dve_bc7f_root "${DVE_BASISU_SOURCE_DIR}")
+    endif()
+    if(NOT EXISTS "${_dve_bc7f_root}/transcoder/basisu_transcoder.cpp")
+        message(FATAL_ERROR "DVE_ENABLE_BC7F_POC requires a full Basis Universal transcoder source tree")
+    endif()
+    add_library(dve_bc7f_transcoder STATIC "${_dve_bc7f_root}/transcoder/basisu_transcoder.cpp")
+    target_include_directories(dve_bc7f_transcoder PUBLIC "${_dve_bc7f_root}/transcoder")
+    target_compile_features(dve_bc7f_transcoder PUBLIC cxx_std_17)
+    target_compile_definitions(dve_bc7f_transcoder PUBLIC
+        BASISD_SUPPORT_KTX2=0 BASISD_SUPPORT_KTX2_ZSTD=0)
+    if(NOT MSVC)
+        target_compile_options(dve_bc7f_transcoder PRIVATE -fno-strict-aliasing)
+    endif()
+    add_executable(dve_bc7f_poc apps/dve_bc7f_poc.cpp)
+    target_link_libraries(dve_bc7f_poc PRIVATE dve_bc7f_transcoder)
+    target_compile_features(dve_bc7f_poc PRIVATE cxx_std_23)
 endif()

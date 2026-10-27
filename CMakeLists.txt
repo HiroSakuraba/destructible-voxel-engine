@@ -3415,6 +3415,12 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     add_executable(dve_bc5_shader_mapping_tests tests/test_bc5_shader_mapping.cpp)
     target_link_libraries(dve_bc5_shader_mapping_tests PRIVATE dve::render_bridge dve::rhi)
     add_test(NAME dve_bc5_shader_mapping_tests COMMAND dve_bc5_shader_mapping_tests)
+    find_program(DVE_BC5_PYTHON_EXECUTABLE NAMES python3 python)
+    if(DVE_BC5_PYTHON_EXECUTABLE)
+        add_test(NAME dve_bc5_shader_source_contracts
+            COMMAND "${DVE_BC5_PYTHON_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_bc5_shader_contract.py")
+    endif()
 
     add_executable(dve_texture_bc5_quality_bench apps/dve_texture_bc5_quality_bench.cpp)
     target_link_libraries(dve_texture_bc5_quality_bench PRIVATE dve::render_bridge)

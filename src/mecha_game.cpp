@@ -518,6 +518,20 @@ bool MechaGame::start(std::string* error){
  }
  s.start=*s.world.position(s.player);s.started=true;s.reset();
  s.initialWorld=s.world.capture_save_state();
+ // capture_save_state() leaves polygon geometry empty (file saves re-read it from the asset
+ // source), but an in-memory restore_save_state() needs it. Attach the live immutable
+ // geometry so the pristine snapshot can restore polygon scenery, chassis and enemies.
+ {
+  std::map<GameObjectId,const CookedPolygonAsset*> polygons;
+  const auto renderObjects=s.world.render_objects();
+  for(const auto& r:renderObjects)if(r.polygon)polygons.emplace(r.id,r.polygon);
+  for(auto& item:s.initialWorld->objects){
+   if(item.kind!=GameGeometryKind::Polygon||item.polygon)continue;
+   const auto it=polygons.find(item.id);
+   if(it==polygons.end()){if(error)*error="Mech restart snapshot: missing polygon geometry";s.initialWorld.reset();return false;}
+   item.polygon=std::make_shared<const CookedPolygonAsset>(*it->second);
+  }
+ }
  return true;
 }
 void MechaGame::step(float dt){

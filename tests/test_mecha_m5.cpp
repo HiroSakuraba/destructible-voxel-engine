@@ -21,6 +21,18 @@ Component role(std::string type,std::string key){
  require(bool(c),"missing component schema "+type);
  c->properties["key"]=std::move(key);return *c;
 }
+// capture_save_state() omits polygon geometry (file saves re-read it from the asset source);
+// an in-memory restore_save_state() needs it, so attach the live immutable geometry.
+GameWorldSaveState capture_restorable(const GameWorld& world){
+ auto state=world.capture_save_state();
+ const auto renderObjects=world.render_objects();
+ for(auto& item:state.objects){
+  if(item.kind!=GameGeometryKind::Polygon||item.polygon)continue;
+  for(const auto& r:renderObjects)if(r.id==item.id&&r.polygon)
+   item.polygon=std::make_shared<const CookedPolygonAsset>(*r.polygon);
+ }
+ return state;
+}
 struct Fixture {
  GameWorld world{create_physics3d_world(Physics3DBackend::Reference)};
  std::unique_ptr<MechaGame> game;
@@ -83,12 +95,14 @@ void save_restore_validates_and_preserves_controller(){
  f.fire("mech_secondary");f.tick(5);
  const auto controller=f.game->save_state();
  require(controller.starts_with("DVE_MECHA 1 "),"versioned serialized combat state");
- const auto worldSnapshot=f.world.capture_save_state();
+ const auto worldSnapshot=capture_restorable(f.world);
  const auto previous=f.game->telemetry().autocannonShots;
  f.tick(80); // let the projectile move; restoring must return it to the earlier position
  std::string error;
- require(f.world.restore_save_state(worldSnapshot,nullptr,&error),"world restore: "+error);
- require(f.game->after_restore(controller,&error),"mecha restore: "+error);
+ const bool worldRestored=f.world.restore_save_state(worldSnapshot,nullptr,&error);
+ require(worldRestored,"world restore: "+error);
+ const bool mechaRestored=f.game->after_restore(controller,&error);
+ require(mechaRestored,"mecha restore: "+error);
  require(f.game->telemetry().autocannonShots==previous,"fire counter restored");
  require(f.game->save_state()==controller,"full controller state roundtrip");
  const auto stable=f.game->save_state();
@@ -100,7 +114,7 @@ void restart_restores_voxels_and_mission(){
  require(f.world.geometry_kind(f.wall)==GameGeometryKind::Voxel,"voxel wall");
  const auto before=f.world.raycast({4,-2,2},{0,1,0},20);
  require(before&&before->objectId==f.wall,"wall blocks ray before damage");
- require(f.world.queue_damage_sphere(f.wall,{4,6,2},3.1F),"queued damage");
+ require(bool(f.world.queue_damage_sphere(f.wall,{4,6,2},3.1F)),"queued damage");
  f.tick(20);
  const auto after=f.world.raycast({4,-2,2},{0,1,0},20);
  require(!after||after->objectId!=f.wall,"damage breaches wall");
@@ -146,6 +160,11 @@ void playerapp_save_reload(){
  require(app->world().state_hash()==baseline,"world restores exact state and geometry");
  require(app->prototype_hud()&&app->prototype_hud()->mecha,
      "full mecha HUD restored after player session swap");
+ // Full restart on the real authored Iron Yard (polygon chassis, scenery and enemies):
+ // the in-memory pristine snapshot must be restorable, not just in synthetic fixtures.
+ app->world().set_action_pressed("restart",true);app->tick(1.F/120);
+ app->world().set_action_pressed("restart",false);app->tick(1.F/120);
+ require(app->prototype_hud()->phase==PrototypePhase::Playing,"restart on authored starter keeps playing: "+app->prototype_hud()->message);
  // The restored save is also loadable directly at game boot (--load).
  auto resumed=makePlayer();require(bool(resumed),"new boot: "+error);
  auto atBoot=resumed->load_game("checkpoint",&error);

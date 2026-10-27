@@ -43,4 +43,27 @@ int main() {
     require(queue.task_count()==2); // collision and persistence remain outstanding
     dispatch.forget_object(obj.id());
     require(queue.task_count()==0);
+
+    // Replacement semantics: the authority loses a brick that the mirror still holds.
+    // Incremental updates never drop slots, so the host flags the replacement.
+    VoxelObject twoBricks(56);
+    twoBricks.fill_brick({0,0,0},1);
+    twoBricks.fill_brick({1,0,0},1);
+    GpuBrickMirror m2;
+    PackedBrickmapScene p2;
+    m2.rebuild(twoBricks);
+    p2.rebuild(twoBricks);
+    VoxelObject oneBrick(56);
+    oneBrick.fill_brick({0,0,0},1);
+    require(!m2.validate_against(oneBrick) && !p2.validate_against(oneBrick));
+    const AppliedBrickEdit survivor{{0,0,0},Bitset512::full(),oneBrick.find_brick({0,0,0})->generation()};
+    require(dispatch.offer(0,0,56,std::span<const AppliedBrickEdit>(&survivor,1),
+        region_dirty_channel(RegionDirtyConsumer::Gpu))==RegionDirtyOfferResult::Accepted);
+    dispatch.mark_geometry_replaced(56);
+    const auto lookup2=[&](std::uint64_t id){
+        return id==56?RegionDirtyTargets{&oneBrick,&m2,&p2,nullptr,0.1F}:RegionDirtyTargets{};
+    };
+    s=dispatch.tick(camera,budget,lookup2);
+    require(s.gpuRebuilds==1 && s.gpuTickets==1 && queue.task_count()==0);
+    require(m2.validate_against(oneBrick) && p2.validate_against(oneBrick));
 }

@@ -8,6 +8,8 @@ This change connects the R3 region dirty queue to an explicit authority-thread *
 - An optional `snapshot_region_game_damage(GameWorld, GameDamageEvent)` producer adapter. Existing `GameWorld::on_damage` supplies the event for both synchronous `damage_sphere` and queued destruction commits. A **full** generation-stamped brick snapshot is used because fragment separation or queued destruction may mutate/replace more than the initial crater bricks; result includes original/fragment IDs and unavailable IDs explicitly.
 - A configurable `WorkDebtGovernor` frame target in milliseconds (default remains 8.333 ms for 120 FPS). The dispatcher honors the governor's existing `patchBrickLimit` and an elapsed-time soft budget between batches. A single GPU publication may run longer than that budget; it is not preemptible.
 - On GPU deliveries: validate source brick generations before publication, batch by stable object ID, submit to existing `GpuBrickMirror::update` and `PackedBrickmapScene::update`, then retire only matching tickets on success. Failures leave tickets queued. A newer source generation requeues a full-brick update, preventing a stale ticket from clearing fresh work.
+- Replacement semantics: `GpuBrickMirror::update` / `PackedBrickmapScene::update` only insert or overwrite slots; they never remove bricks that disappeared from the authority. Snapshots therefore carry `rebuildRequired`, and the host calls `RegionDirtyDispatcher::mark_geometry_replaced(id)` after a queued-destruction commit or fragment split. The next tick rebuilds that object's mirror/packed scene from the authority (at most one explicit rebuild per tick; it is not preemptible and is retained until it succeeds or `forget_object`). A GPU ticket whose brick no longer exists in the authority, or whose generation is older than the ticket's, is reconciled the same way and retired, so it can never retry forever at the head of the queue.
+- Ingress forwarding is time-budgeted: at most half of `maximumDispatcherMicroseconds` (checked every 64 edits) is spent moving buffered edits into the queue, the batch cursor is retained, and publication always keeps the remainder of the tick.
 - On navigation: call `DynamicNavigationWorld::mark_voxel_edit` for safe bounded voxel coordinates, then acknowledge **invalidation delivery**, NOT successful navigation mesh rebuilding. Collision and persistence tickets are intentionally *never* leased by this dispatcher; they still require explicit downstream publication and durability barriers.
 - Strict C++23 contract tests, real `VoxelObject` + actual sphere-damage + both GPU-reference mirrors + nav-invalidation integration test, and a 60/120 FPS governor target regression test.
 
@@ -38,7 +40,8 @@ world.on_damage([&](const GameDamageEvent& event) {
 // discard snapshots that fail admission or contain unavailable IDs.
 // For each snapshot: call dispatcher.forget_object(id) only when that object
 // was destroyed or its generations were intentionally reset; offer each
-// refreshed object's fullEdits using GPU | Navigation channels.
+// refreshed object's fullEdits using GPU | Navigation channels, and call
+// dispatcher.mark_geometry_replaced(id) when refreshed.rebuildRequired.
 // Keep unaccepted snapshots in `committed` until offer returns Accepted.
 
 WorkDebtGovernor governor(240, 1000.0 / 60.0);

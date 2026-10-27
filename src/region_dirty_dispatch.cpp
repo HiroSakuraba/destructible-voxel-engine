@@ -59,13 +59,27 @@ void RegionDirtyDispatcher::forget_object(std::uint64_t id) {
             it=ingress_.erase(it);
         } else ++it;
     }
+    rebuild_.erase(id);
     (void)queue_.forget_object(id);
 }
 
-void RegionDirtyDispatcher::forward_ingress(RegionDirtyDispatchStats& stats) {
+void RegionDirtyDispatcher::mark_geometry_replaced(std::uint64_t id) {
+    if (id != 0) rebuild_.insert(id);
+}
+
+void RegionDirtyDispatcher::forward_ingress(RegionDirtyDispatchStats& stats, Clock::time_point deadline) {
+    // Forwarding is bounded by `deadline` (checked every 64 edits) so a huge accepted
+    // batch cannot consume the whole tick; the batch cursor keeps the remainder for the
+    // next tick.
+    constexpr std::size_t kClockStride = 64U;
+    std::size_t sinceClock = 0;
     while (!ingress_.empty()) {
         auto& batch=ingress_.front();
         while (batch.cursor < batch.edits.size()) {
+            if (++sinceClock >= kClockStride) {
+                sinceClock = 0;
+                if (Clock::now() >= deadline) { stats.hitTimeBudget = true; return; }
+            }
             const auto outcome = queue_.submit(batch.worldId,batch.lod,batch.objectId,
                 batch.edits[batch.cursor],batch.channels);
             if (outcome == RegionDirtySubmitResult::CapacityExceeded) return;
@@ -89,7 +103,9 @@ RegionDirtyDispatchStats RegionDirtyDispatcher::tick(RegionKey camera, const Wor
     stats.pressure=budget.pressure;
     if (!lookup) { stats.failed=1; stats.buffered=bufferedEdits_; stats.pending=queue_.task_count(); return stats; }
     const auto start=Clock::now();
-    forward_ingress(stats);
+    // Ingress forwarding gets at most half of the dispatcher budget so publication is
+    // never starved by sustained ingress.
+    forward_ingress(stats, start + std::chrono::microseconds(std::max<std::uint32_t>(1U, config_.maximumDispatcherMicroseconds / 2U)));
     stats.buffered=bufferedEdits_;
     stats.offered=totalOffered_;
     const auto time_exceeded=[&] {
@@ -97,7 +113,7 @@ RegionDirtyDispatchStats RegionDirtyDispatcher::tick(RegionKey camera, const Wor
             static_cast<std::int64_t>(config_.maximumDispatcherMicroseconds);
     };
     const std::size_t cap=std::min<std::size_t>(config_.maximumTicketsPerTick, budget.patchBrickLimit);
-    if (cap==0 || time_exceeded()) { stats.hitTicketBudget=(cap==0); stats.hitTimeBudget=time_exceeded(); stats.pending=queue_.task_count(); return stats; }
+    if (cap==0 || time_exceeded()) { stats.hitTicketBudget=(cap==0); stats.hitTimeBudget=stats.hitTimeBudget||time_exceeded(); stats.pending=queue_.task_count(); return stats; }
     const BrickKey lo=region_corner(camera,config_.interestRadius,false);
     const BrickKey hi=region_corner(camera,config_.interestRadius,true);
 
@@ -126,6 +142,23 @@ RegionDirtyDispatchStats RegionDirtyDispatcher::tick(RegionKey camera, const Wor
         }
         return nav->size();
     };
+    // Rebuilds the derived GPU state of one object from its authority snapshot. Used for
+    // explicit geometry replacement and for tickets whose brick vanished from, or has an
+    // older generation than, the authority (incremental updates cannot remove slots).
+    const auto rebuild_object=[&](const RegionDirtyTargets& target) -> bool {
+        if (!target.authority || (!target.mirror && !target.packed)) return false;
+        try {
+            if (target.mirror) target.mirror->rebuild(*target.authority);
+            if (target.packed) target.packed->rebuild(*target.authority);
+        } catch (...) { ++stats.failed; return false; }
+        ++stats.gpuRebuilds;
+        return true;
+    };
+    // At most one explicit rebuild per tick: it is not preemptible.
+    for (auto it=rebuild_.begin(); it!=rebuild_.end() && !time_exceeded(); ++it) {
+        if (rebuild_object(lookup(*it))) { rebuild_.erase(it); break; }
+    }
+    if (time_exceeded()) { stats.hitTimeBudget=true; stats.pending=queue_.task_count(); return stats; }
     const bool favorNav=favorNavNext_;
     favorNavNext_=!favorNavNext_;
     const std::size_t preNav=(cap==1 && favorNav)?publish_nav(1):0;
@@ -141,6 +174,24 @@ RegionDirtyDispatchStats RegionDirtyDispatcher::tick(RegionKey camera, const Wor
         const RegionDirtyTargets target=lookup(id);
         if (!target.authority || (!target.mirror && !target.packed)) {
             for (const auto& t:tickets) { (void)queue_.complete(t,false); ++stats.retried; }
+            continue;
+        }
+        // A brick that no longer exists in the authority, or whose generation went backwards
+        // (object storage replaced), cannot be expressed as an incremental update and would
+        // otherwise be retried forever at the head of the queue. Reconcile by rebuilding.
+        const bool diverged=std::any_of(tickets.begin(),tickets.end(),[&](const RegionDirtyTicket& t){
+            const Brick* b=target.authority->find_brick(t.key.brick);
+            return b==nullptr || b->generation() < t.generation;
+        });
+        if (diverged) {
+            const bool rebuilt=rebuild_object(target);
+            for (const auto& t:tickets) {
+                const auto done=queue_.complete(t,rebuilt);
+                if (done==RegionDirtyCompletion::Retired) ++stats.gpuTickets;
+                else if (done==RegionDirtyCompletion::Superseded) ++stats.superseded;
+                else ++stats.retried;
+            }
+            used += tickets.size();
             continue;
         }
         std::vector<AppliedBrickEdit> edits;

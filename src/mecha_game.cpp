@@ -463,6 +463,9 @@ struct MechaGame::Impl {
       const float speed=std::hypot(motor.velocity.x,motor.velocity.y);
       footstepEvents.push_back({f.ankle,f.normal,f.supportObject,
           std::clamp(speed/config.maximumSpeed,.15F,1.F),side});
+      // M8 immediate preview on the existing portable impact-visual path.
+      // Future VFX graph consumers can replace the generic dust with terrain presets.
+      effect(f.ankle,false);
      }
     }else{
      // Missing voxel/floor support: do not leave a weight-bearing foot hovering.

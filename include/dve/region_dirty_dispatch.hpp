@@ -86,6 +86,7 @@ public:
     // is retained until a rebuild succeeds (or forget_object). Authority-thread-only.
     void mark_geometry_replaced(std::uint64_t objectId);
     [[nodiscard]] std::size_t buffered_edit_count() const noexcept { return bufferedEdits_; }
+    [[nodiscard]] std::size_t buffer_capacity() const noexcept { return config_.maximumBufferedEdits; }
 
 private:
     struct Buffered {

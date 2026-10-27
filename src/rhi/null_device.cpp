@@ -64,7 +64,7 @@ std::optional<std::size_t> texture_layer_bytes(const TextureDesc& desc) noexcept
         const std::uint64_t depth = desc.dimension == TextureDimension::Texture3D
             ? mip_dimension(desc.depth, mip) : desc.depth;
         const std::uint64_t bytes = is_block_compressed(desc.format)
-            ? static_cast<std::uint64_t>texture_rows(desc.format, static_cast<std::uint32_t>(height)) *
+            ? static_cast<std::uint64_t>(texture_rows(desc.format, static_cast<std::uint32_t>(height))) *
                   ((width + texture_block_width(desc.format) - 1U) / texture_block_width(desc.format)) *
                   depth * texture_block_bytes(desc.format)
             : width * height * depth * texture_pixel_bytes(desc.format);

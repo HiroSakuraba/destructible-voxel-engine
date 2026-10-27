@@ -17,6 +17,8 @@
 
 namespace dve::render {
 
+struct ResidentTexture; // Optional external BC5/RGBA8 residency snapshot.
+
 inline constexpr std::uint32_t kMainMaterialTextureChannelCount = 9U;
 
 enum class MainMaterialTextureChannel : std::uint32_t {
@@ -87,6 +89,15 @@ public:
                     std::string* error = nullptr);
     bool ensure_material(const CookedPolygonAsset& asset, std::uint32_t materialIndex,
                          std::string* error = nullptr);
+    // Replace an authored normal channel with a live residency texture.
+    // The resident's *actual* GPU format controls the BC5 mapping flag.
+    // The caller must retain its view until it is rebound or this descriptor
+    // table is invalidated; the table does not own the external texture/view.
+    // Publishes a new descriptor only after GPU mapping bytes are updated.
+    bool bind_resident_normal(std::uint64_t assetContentHash,
+                              std::uint32_t materialIndex,
+                              const ResidentTexture& resident,
+                              std::string* error = nullptr);
     [[nodiscard]] const MainMaterialDescriptor* find(
         std::uint64_t assetContentHash, std::uint32_t materialIndex) const noexcept;
     [[nodiscard]] rhi::BindGroupLayoutHandle layout() const noexcept { return layout_; }

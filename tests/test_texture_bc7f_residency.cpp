@@ -2,6 +2,8 @@
 #include "dve/render/material_bake_residency.hpp"
 #include "dve/rhi/null_device.hpp"
 #include <algorithm>
+#include <atomic>
+#include <thread>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
@@ -152,6 +154,37 @@ void baked_material_map_adapter() {
     check(manager.stats().requestsQueued==queuedBefore,
         "binding validation partially queued maps");
 }
+void concurrent_worker_enqueue_and_gpu_pump() {
+    rhi::NullDevice device;
+    TextureResidencyManager manager(device,65536U,make_basis_bc7f_encoder());
+    std::atomic<bool> done{false};
+    std::atomic<bool> succeeded{true};
+    std::thread worker([&] {
+        for (std::uint32_t i=0;i<12U;++i) {
+            std::string error;
+            if (!manager.enqueue({500U+i,image("parallel",8U,8U,i+13U),
+                  TextureSemantic::BaseColor,TextureCompressionPreference::PreferBc7,true,
+                  TextureUploadMode::ReplaceIfChanged},&error)) {
+                succeeded.store(false);
+                break;
+            }
+        }
+        done.store(true);
+    });
+    while(!done.load() || manager.stats().pendingCount!=0U) {
+        std::string error;
+        (void)manager.pump(8192U,&error);
+        std::this_thread::yield();
+    }
+    worker.join();
+    check(succeeded.load(),"parallel worker enqueue failed");
+    check(manager.stats().uploadsCompleted==12U,"parallel enqueue/pump lost an upload");
+    for (std::uint32_t i=0;i<12U;++i) {
+        const auto* texture=manager.find(500U+i);
+        check(texture && texture->format==rhi::TextureFormat::BC7RGBASrgb,
+              "parallel BC7 upload missing or wrong format");
+    }
+}
 void unchanged_source_different_preference() {
     rhi::NullDevice device;
     TextureResidencyManager manager(device,4096U,make_basis_bc7f_encoder());
@@ -175,6 +208,7 @@ int main() {
         fallback_and_transaction();
         unchanged_source_different_preference();
         baked_material_map_adapter();
+        concurrent_worker_enqueue_and_gpu_pump();
         std::cout<<"T2 BC7 residency tests: PASS\n";
     } catch (const std::exception& e) {
         std::cerr<<"T2 failure: "<<e.what()<<"\n";

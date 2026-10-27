@@ -751,6 +751,7 @@ if(DVE_BUILD_RHI)
         src/render/sprite_renderer.cpp
         src/render/texture_residency.cpp
         src/render/material_bake_residency.cpp
+        src/render/normal_bc5_codec.cpp
         src/render/texture_preview.cpp
         src/render/text3d_renderer.cpp
         src/render/gabor_volume_renderer.cpp
@@ -3404,6 +3405,12 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     add_executable(dve_texture_residency_tests tests/test_texture_residency.cpp)
     target_link_libraries(dve_texture_residency_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_texture_residency_tests COMMAND dve_texture_residency_tests)
+    add_executable(dve_texture_bc5_tests tests/test_texture_bc5.cpp)
+    target_link_libraries(dve_texture_bc5_tests PRIVATE dve::render_bridge dve::rhi)
+    add_test(NAME dve_texture_bc5_tests COMMAND dve_texture_bc5_tests)
+    add_executable(dve_texture_bc5_quality_bench apps/dve_texture_bc5_quality_bench.cpp)
+    target_link_libraries(dve_texture_bc5_quality_bench PRIVATE dve::render_bridge)
+
 
     add_executable(dve_hybrid_reference_rendering_tests tests/test_hybrid_reference_rendering.cpp)
     target_link_libraries(dve_hybrid_reference_rendering_tests PRIVATE dve::render_bridge)

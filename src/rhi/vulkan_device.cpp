@@ -890,7 +890,9 @@ struct VulkanDevice::Impl {
             fn.getDeviceProcAddr(device,"vkGetPipelineCacheData"));
         if(fn.createPipelineCache && fn.destroyPipelineCache && fn.getPipelineCacheData) {
             std::vector<std::byte> seed;
-            const bool loaded=pso::load(pipelineCacheFile,cacheIdentity,seed);
+            bool loaded=false;
+            try { loaded=pso::load(pipelineCacheFile,cacheIdentity,seed); }
+            catch (...) { seed.clear(); } // optional cache must not break Vulkan startup
             const vk::PipelineCacheCreateInfo info{
                 vk::StructureTypePipelineCacheCreateInfo,nullptr,0U,
                 loaded ? seed.size() : 0U,loaded ? seed.data() : nullptr};
@@ -936,6 +938,7 @@ struct VulkanDevice::Impl {
     }
 
     [[nodiscard]] bool flush_pipeline_cache() noexcept {
+        try {
         if(!device || !pipelineCache || pipelineCacheFile.empty() ||
            !fn.getPipelineCacheData || status==DeviceStatus::Lost)return false;
         std::size_t size=0U;
@@ -949,6 +952,7 @@ struct VulkanDevice::Impl {
         cacheStats.diskSaveSucceeded=true;
         cacheStats.diskSavedBytes=bytes.size();
         return true;
+        } catch (...) { return false; } // I/O/allocation is best-effort only
     }
 
     void shutdown() noexcept {

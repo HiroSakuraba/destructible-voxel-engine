@@ -9,6 +9,7 @@
 //  - attachChildrenToParents policy and attached bodies riding their parents (Jolt: an
 //    attachment overlapping its parent does not push it)
 
+#include "dve_test_skip.hpp"
 #include "dve/content_source.hpp"
 #include "dve/dvox.hpp"
 #include "dve/game_scene_loader.hpp"
@@ -799,7 +800,7 @@ OverlapRun run_overlap(bool attach, int steps) {
 void test_jolt_attachment_does_not_push_parent() {
     const OverlapRun attached = run_overlap(true, 120);
     if (!attached.available) {
-        std::cout << "Jolt not compiled in; attachment/parent contact filter check skipped\n";
+        dve::testing::note_skip("Jolt attachment/parent contact filter check: Jolt not compiled in");
         return;
     }
     const OverlapRun loose = run_overlap(false, 120);
@@ -833,5 +834,5 @@ int main() {
         return 1;
     }
     std::cout << "game scene loader tests passed\n";
-    return 0;
+    return dve::testing::exit_code(false);
 }

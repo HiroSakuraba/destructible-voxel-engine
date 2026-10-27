@@ -1,3 +1,4 @@
+#include "dve_test_skip.hpp"
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -117,8 +118,7 @@ int main() {
             if (std::getenv("DVE_REQUIRE_VULKAN") != nullptr)
                 throw std::runtime_error(std::string("required Vulkan compute device unavailable: ") +
                                          std::string(device.device_loss_reason()));
-            std::cout << "Vulkan compute test skipped: " << device.device_loss_reason() << '\n';
-            return 0;
+            return dve::testing::skip(std::string("Vulkan compute test: ") + std::string(device.device_loss_reason()));
         }
         std::string error;
         const auto signedFormat = device.texture_format_capabilities(TextureFormat::R32Sint);

@@ -1,3 +1,4 @@
+#include "dve_test_skip.hpp"
 #include "dve/render/dashr_live_surface.hpp"
 #include "dve/render/dashr_shell.hpp"
 #include "dve/rhi/vulkan_device.hpp"
@@ -88,16 +89,14 @@ int main() {
         if (device.status() != DeviceStatus::Ready) {
             if (required_gpu_test())
                 throw std::runtime_error(std::string(device.device_loss_reason()));
-            std::cout << "DASHR Vulkan smoke test skipped: Vulkan device unavailable\n";
-            return 0;
+            return dve::testing::skip("DASHR Vulkan smoke test: Vulkan device unavailable");
         }
 
         const char* shaderDirectory = std::getenv("DVE_DASHR_SHADER_DIR");
         if (!shaderDirectory || !*shaderDirectory) {
             if (required_gpu_test())
                 throw std::runtime_error("DVE_DASHR_SHADER_DIR is required for this GPU test");
-            std::cout << "DASHR Vulkan smoke test skipped: shader directory not configured\n";
-            return 0;
+            return dve::testing::skip("DASHR Vulkan smoke test: DVE_DASHR_SHADER_DIR not configured");
         }
         const std::filesystem::path shaderRoot(shaderDirectory);
         std::string error;

@@ -1,3 +1,4 @@
+#include "dve_test_skip.hpp"
 #include <array>
 #include <cstddef>
 #include <cstdlib>
@@ -25,8 +26,7 @@ int main() {
             if (std::getenv("DVE_REQUIRE_VULKAN") != nullptr)
                 throw std::runtime_error(std::string("required Vulkan device unavailable: ") +
                                          std::string(device.device_loss_reason()));
-            std::cout << "Vulkan buffer test skipped: " << device.device_loss_reason() << '\n';
-            return 0;
+            return dve::testing::skip(std::string("Vulkan buffer test: ") + std::string(device.device_loss_reason()));
         }
         require(device.capabilities().backend == Backend::Vulkan, "wrong backend identity");
         require(!device.capabilities().presentation,

@@ -1,3 +1,4 @@
+#include "dve_test_skip.hpp"
 #include "dve/render/shadow_material_table.hpp"
 #include "dve/rhi/vulkan_device.hpp"
 
@@ -42,8 +43,7 @@ int main() {
         if (device.status() != DeviceStatus::Ready) {
             if (std::getenv("DVE_REQUIRE_VULKAN"))
                 throw std::runtime_error(std::string(device.device_loss_reason()));
-            std::cout << "Vulkan shadow material table test skipped\n";
-            return 0;
+            return dve::testing::skip("Vulkan shadow material table test: no Vulkan device");
         }
         std::string error;
         ShadowMaterialDescriptorTable table(device);

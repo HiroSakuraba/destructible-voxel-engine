@@ -212,10 +212,8 @@ bool validate_mecha_scene(std::span<const PrototypeObjectView> objects,std::stri
    }
   }
  }
- if(players!=1||rules!=1||torsos>1||extractions>1||targets<1||targets>64||requiredTargets>targets)
-  return fail("Mech scene requires one player, one rules marker, at most one torso and 64 targets");
- if(!legSlots.empty()&&legSlots.size()!=4)
-  return fail("Mech gait needs all four leg segments (left/right thigh and shin) or none");
+ if(players!=1||rules!=1||torsos>1||extractions>1||targets<1||targets>64||requiredTargets>targets)return fail("Mech scene requires one player, one rules marker, at most one torso and 64 targets");
+ if(!legSlots.empty()&&legSlots.size()!=4)return fail("Mech gait needs all four leg segments (left/right thigh and shin) or none");
  if(!footSlots.empty()&&(footSlots.size()!=2||legSlots.size()!=4))
   return fail("Mech terrain contact pads require both feet and a complete four-segment leg rig");
  return true;
@@ -303,6 +301,8 @@ struct MechaGame::Impl {
   const float alpha=snap?1.F:.18F;
   cam.position=plus(cam.position,scaled(minus(desired,cam.position),alpha));
   if(cameraMode==MechCameraMode::ThirdPerson){
+   // The eased eye can cut a corner that the desired eye does not: re-clip the eased
+   // position against geometry so the camera never lags through a wall.
    const auto ray=minus(cam.position,focus);const float length=mag(ray);
    if(std::isfinite(length)&&length>.1F)
     if(const auto hit=world.raycast(focus,scaled(ray,1.F/length),length))
@@ -564,8 +564,8 @@ struct MechaGame::Impl {
    if(hit->objectId!=t->id&&hit->distance<rayLength-t->radius){
     lockKey.clear();return;
    }
-  if(std::hypot(travel.x,travel.y)>.05F)
-   motor.torsoYaw=turn(motor.torsoYaw,angle_to(travel),dt*9.F);
+  // A target directly above/below the muzzle has no heading: keep the current yaw.
+  if(std::hypot(travel.x,travel.y)>.05F)motor.torsoYaw=turn(motor.torsoYaw,angle_to(travel),dt*9.F);
  }
  // Test targets have gameplay hit spheres because their meshes are visual-only.
  // Resolve nearest target against both voxel/polygon swept collisions and exact voxel rays.
@@ -768,6 +768,9 @@ struct MechaGame::Impl {
   auto displace=integrate_mech_motor(motor,config,input,dt);
   // Opt-in vertical locomotion. No jet use => legacy planar M1 fixtures unchanged.
   // Once airborne, gravity and collision determine the landing; no teleport/snap.
+  // Fuel is judged on the energy held BEFORE this frame's regeneration (judging it after
+  // gave free fuel every frame at zero energy). Sustained thrust needs one frame of fuel;
+  // re-igniting after a cut-out needs kJetIgnitionEnergy, which is the recharge cooldown.
   const float frameFuel=config.jetDrainPerSecond*dt;
   const bool wasThrusting=jetActive;
   jetActive=action_down("mech_jumpjet","jump")&&
@@ -776,7 +779,7 @@ struct MechaGame::Impl {
   if(jetActive){
    jetAirborne=true;
    motor.velocity.z=std::min(12.F,motor.velocity.z+(config.jetAcceleration-9.81F)*dt);
-   // Suppress regeneration during thrust; no free one-frame jets on empty fuel.
+   // Thrusting suppresses regeneration; a boost spent this frame still counts.
    motor.energy=std::max(0.F,std::min(motor.energy,energyBefore)-frameFuel);
   }else if(jetAirborne)motor.velocity.z=std::max(-28.F,motor.velocity.z-9.81F*dt);
   if(jetAirborne){
@@ -807,9 +810,11 @@ struct MechaGame::Impl {
   }
   const auto moved=minus(motor.position,before);
   const float horizontal=std::hypot(moved.x,moved.y);
-  if(jetAirborne){/* preserve last gait cycle while flying */}
+  if(jetAirborne){/* airborne pose is frozen; keep the phase so landing does not pop */}
   else if(horizontal>.0001F)gaitPhase=wrap(gaitPhase+horizontal*2.5F);
   else{
+   // Standing still: settle both feet onto the ground (phase 0 or pi) instead of
+   // freezing mid-stride with one foot raised.
    const float rest=std::round(gaitPhase/pi)*pi;
    gaitPhase=wrap(turn(gaitPhase,rest,dt*7.F));
   }
@@ -1159,7 +1164,7 @@ bool MechaGame::after_restore(std::string_view encoded,std::string* error){
  s.cameraMode=MechCameraMode(savedCamera);
  s.orbitYaw=savedOrbit;s.orbitPitch=savedPitch;s.jetAirborne=savedAirborne!=0;
  s.jetActive=false;s.gaitPhase=savedGait;s.lockKey=std::move(savedLock);
- if(savedAirborne==0)motor.velocity.z=0;
+ if(savedAirborne==0)motor.velocity.z=0; // a grounded mech carries no vertical velocity
  if(version>=3)s.feet=savedFeet;
  else s.feet={};
  s.motor=motor;s.primaryCooldown=primary;s.rocketCooldown=secondary;

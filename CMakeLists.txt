@@ -162,6 +162,7 @@ add_library(dve_core
     src/water_game.cpp
     src/flying_game.cpp
     src/mecha_game.cpp
+    src/mecha_leg_ik.cpp
     src/mecha_navigation.cpp
     src/flight_wind.cpp
     src/flight_aerodynamics.cpp
@@ -2902,6 +2903,9 @@ if(DVE_BUILD_TESTS)
             add_executable(dve_mecha_m3_m4_tests tests/test_mecha_m3_m4.cpp)
             target_link_libraries(dve_mecha_m3_m4_tests PRIVATE dve::editor dve::player_runtime)
             add_test(NAME dve_mecha_m3_m4_tests COMMAND dve_mecha_m3_m4_tests)
+            add_executable(dve_mecha_m7_tests tests/test_mecha_m7.cpp)
+            target_link_libraries(dve_mecha_m7_tests PRIVATE dve::editor dve::player_runtime)
+            add_test(NAME dve_mecha_m7_tests COMMAND dve_mecha_m7_tests)
             add_executable(dve_mecha_m6_tests tests/test_mecha_m6.cpp)
             target_link_libraries(dve_mecha_m6_tests PRIVATE dve::editor dve::player_runtime)
             add_test(NAME dve_mecha_m6_tests COMMAND dve_mecha_m6_tests)

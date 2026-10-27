@@ -196,11 +196,13 @@ void idle_gait_settles_both_feet_and_pauses_gate_lock(){
  Fixture f;
  f.world.set_axis("move_y",1.F);f.tick(23);f.world.set_axis("move_y",0.F);
  f.tick(120);
- const auto base=f.game->motor().position;
- const auto l=f.world.position(f.leftShin).value(),r=f.world.position(f.rightShin).value();
- require(std::abs((l.y-base.y))<.03F&&std::abs((r.y-base.y))<.03F,
-         "standing mech plants both feet instead of freezing mid-stride");
- require(std::abs(l.z-r.z)<.01F,"neither foot stays raised when idle");
+ // M7's solver maintains knee bend in stance: visual shin centers need not
+ // line up with the hips. Test the actual world-anchored ankles instead.
+ const auto feet=f.game->foot_contacts();
+ require(feet[0].planted&&feet[1].planted,"standing mech plants both feet");
+ require(feet[0].supported&&feet[1].supported,"idle feet have measured ground contact");
+ require(std::abs(feet[0].ankle.z-feet[1].ankle.z)<.02F,
+         "idle feet settle to same terrain height");
  f.press("pause");
  f.press("mech_lock");
  require(f.game->locked_target_key().empty(),"target lock is ignored while paused");
@@ -280,7 +282,7 @@ void save_restore_m6_and_legacy_v1(){
  f.tick(16);
  f.world.set_action_pressed("mech_jumpjet",false);
  auto original=f.game->save_state();
- require(original.starts_with("DVE_MECHA 2 "),"M6 schema version 2");
+ require(original.starts_with("DVE_MECHA 3 "),"M6 schema version 2");
  std::string error;
  require(f.game->after_restore(original,&error),"restore M6: "+error);
  require(f.game->save_state()==original,"camera, lock, jet and gait round trip");
@@ -290,7 +292,7 @@ void save_restore_m6_and_legacy_v1(){
  const auto pos=original.rfind("M6 ");
  require(pos!=std::string::npos,"extension marker");
  auto legacy=original.substr(0,pos);
- legacy.replace(10,1,"1"); // DVE_MECHA 2 -> DVE_MECHA 1
+ legacy.replace(10,1,"1"); // DVE_MECHA 3 -> DVE_MECHA 1
  require(f.game->after_restore(legacy,&error),"version-1 M5 checkpoint accepted: "+error);
  require(f.game->locked_target_key().empty(),"v1 save defaults to no target lock");
 }

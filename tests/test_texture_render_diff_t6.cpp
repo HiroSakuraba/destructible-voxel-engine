@@ -11,6 +11,7 @@
 #include "dve/render/normal_texture_binding.hpp"
 #include "dve/render/texture_residency.hpp"
 #include "dve/render/polygon_renderer.hpp"
+#include "dve/rgba8_png.hpp"
 #ifdef DVE_T6_WITH_BC7
 #include "dve/render/bc7f_texture_encoder.hpp"
 #include "basisu_transcoder_internal.h"
@@ -269,28 +270,24 @@ Metrics compare(const Frame& ref,const Frame& target) {
     m.interiorMae=interiorCount?interiorSum/interiorCount:0.0;
     return m;
 }
-void write_ppm(const std::filesystem::path& dest,const Frame& frame) {
-    std::ofstream out(dest,std::ios::binary);
-    check(bool(out),"T6 could not write reference/candidate PPM");
-    out<<"P6\n"<<frame.image.width<<" "<<frame.image.height<<"\n255\n";
-    for(std::size_t i=0;i<frame.rgba.size();i+=4U)
-        out.write(reinterpret_cast<const char*>(frame.rgba.data()+i),3);
-    check(bool(out),"T6 PPM write failure");
+void write_png(const std::filesystem::path& dest,const Frame& frame) {
+    std::string error;
+    check(write_rgba8_png(dest,frame.image.width,frame.image.height,frame.rgba,&error),
+          "T6 cannot write reference/candidate PNG: "+error);
 }
-void write_diff(const std::filesystem::path& path,const Frame& a,const Frame& b) {
-    std::ofstream out(path,std::ios::binary);
-    check(bool(out),"T6 cannot write diff");
-    out<<"P6\n"<<a.image.width<<" "<<a.image.height<<"\n255\n";
+void write_diff_png(const std::filesystem::path& path,const Frame& a,const Frame& b) {
+    std::vector<std::uint8_t> pixels(a.rgba.size(),0U);
     for(std::size_t i=0;i<a.image.objectId.size();++i) {
-        std::array<unsigned char,3> pixel{};
+        pixels[i*4U+3U]=255U;
         if(a.image.objectId[i]==1U)for(std::size_t c=0;c<3U;++c) {
             const int diff=std::abs(static_cast<int>(a.rgba[i*4U+c])-
                                     static_cast<int>(b.rgba[i*4U+c]));
-            pixel[c]=static_cast<unsigned char>(std::min(255,diff*6));
+            pixels[i*4U+c]=static_cast<std::uint8_t>(std::min(255,diff*6));
         }
-        out.write(reinterpret_cast<const char*>(pixel.data()),3);
     }
-    check(bool(out),"T6 diff write failure");
+    std::string error;
+    check(write_rgba8_png(path,a.image.width,a.image.height,pixels,&error),
+          "T6 cannot write difference PNG: "+error);
 }
 void log_metrics(std::ostream& out,const std::string& name,const Metrics& m) {
     out<<name<<","<<m.coverage<<","<<m.changed<<","
@@ -328,9 +325,9 @@ void compare_case(const std::string& id,const CookedPolygonAsset& baseline,
                      <<" MAE="<<metrics.mae<<" PSNR="<<metrics.psnr
                      <<" normal_mean_deg="<<metrics.normalMeanDeg<<"\n";
             if(!artifactDir.empty()) {
-                write_ppm(artifactDir/(tag+"_rgba8.ppm"),source);
-                write_ppm(artifactDir/(tag+"_encoded.ppm"),changed);
-                write_diff(artifactDir/(tag+"_difference_x6.ppm"),source,changed);
+                write_png(artifactDir/(tag+"_rgba8.png"),source);
+                write_png(artifactDir/(tag+"_encoded.png"),changed);
+                write_diff_png(artifactDir/(tag+"_difference_x6.png"),source,changed);
             }
         }
 }

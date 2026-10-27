@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <functional>
+#include <vector>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -53,6 +55,9 @@ struct ResidentTexture {
     std::size_t residentBytes{};
     std::uint64_t sourceHash{};
     TextureSemantic semantic{TextureSemantic::BaseColor};
+    TextureCompressionPreference compression{TextureCompressionPreference::Uncompressed};
+    rhi::TextureFormat format{rhi::TextureFormat::RGBA8Unorm};
+    bool generatedMips{true};
     std::uint64_t lastUseSerial{};
     // Monotonic per asset id. Hot reload increments this only after the replacement view is
     // usable, allowing material descriptors to detect stale bindings without observing a
@@ -72,6 +77,8 @@ struct TextureResidencyStats {
     std::uint64_t uploadsFailed{};
     std::uint64_t evictions{};
     std::uint64_t compressionFallbacks{};
+    std::uint64_t compressionEncoded{};
+    std::uint64_t compressionEncodeFailures{};
     std::uint64_t duplicateRequests{};
     std::uint64_t unchangedRequests{};
     std::uint64_t pendingRequestsReplaced{};
@@ -90,12 +97,18 @@ struct TextureResidencyStats {
     const PolygonImage& image,
     TextureSemantic semantic);
 
+// Optional worker-thread encoder. Output must contain one correctly sized 16-byte
+// BC7 block stream per mip. Returning false falls back to RGBA8.
+using TextureBc7Encoder = std::function<bool(
+    const PolygonTextureMipChain&, std::vector<std::vector<std::byte>>&, std::string*)>;
+
 // Control/upload-thread texture residency. enqueue() is thread-safe and performs no RHI work;
 // pump() owns all device interaction and can be bounded per frame by upload bytes.
 class TextureResidencyManager {
 public:
     explicit TextureResidencyManager(rhi::IDevice& device,
-                                     std::size_t budgetBytes = 256U * 1024U * 1024U);
+                                     std::size_t budgetBytes = 256U * 1024U * 1024U,
+                                     TextureBc7Encoder encoder = {});
     ~TextureResidencyManager();
     TextureResidencyManager(const TextureResidencyManager&) = delete;
     TextureResidencyManager& operator=(const TextureResidencyManager&) = delete;
@@ -115,6 +128,9 @@ private:
     struct Pending {
         TextureUploadRequest request;
         PolygonTextureMipChain mipChain;
+        std::vector<std::vector<std::byte>> bc7Blocks;
+        std::size_t encodedBytes{};
+        bool encodeFailed{};
         std::size_t bytes{};
         std::uint64_t sourceHash{};
     };
@@ -123,6 +139,7 @@ private:
     static std::uint64_t image_hash(const PolygonImage& image) noexcept;
 
     rhi::IDevice& device_;
+    const TextureBc7Encoder bc7Encoder_;
     mutable std::mutex mutex_;
     std::deque<Pending> pending_;
     std::unordered_map<std::uint64_t, ResidentTexture> resident_;

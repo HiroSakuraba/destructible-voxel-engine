@@ -1,5 +1,6 @@
 #include "dve/region_game_damage.hpp"
 #include <algorithm>
+#include <utility>
 namespace dve {
 RegionGameDamageSnapshot snapshot_region_game_damage(const GameWorld& world, const GameDamageEvent& event) {
     RegionGameDamageSnapshot snapshot;

@@ -28,3 +28,6 @@ Test: ctest --test-dir build-t2 -R '^(dve_texture_bc7f_residency_tests|dve_textu
 - BC5 normal compression remains deferred. Normal maps using PreferBc5ForNormals retain the RGBA8 fallback; explicit PreferBc7 uses linear data mode.
 - Default compiler and runtime paths remain unchanged. The Basis low-level API is internal and may change; preserve Apache-2.0 license notices on redistributed upstream binaries.
 - Next: a semantic quality corpus, BC5 normal maps, packaged KTX2/Basis assets, budgeted background transcode and load-time p95/p99 profiling.
+## Material bake handoff
+
+The new render/material_bake_residency adapter accepts a successful MaterialTextureBakeResult and an explicit map-to-asset-ID binding table. It validates duplicate IDs/maps and missing maps before any queue mutation. It maps bake semantics to TextureSemantic, supports ReplaceIfChanged idempotent retry, and reports accepted/rejected counts for a nontransactional multi-map enqueue. The texture baker itself remains unchanged, and the adapter does not create arbitrary IDs or alter PNG bundle contents.

@@ -334,7 +334,7 @@ int main() {
                  <<" pso_seed_accepted="<<cache.diskSeedAccepted
                  <<" create_calls="<<cache.graphicsAttempts
                  <<" total_ns="<<cache.graphicsTotalNanoseconds
-                 <<" max_ns="<<cache.graphicsMaxNanoseconds<<"\\n";
+                 <<" max_ns="<<cache.graphicsMaxNanoseconds<<"\n";
         if(const char* path=std::getenv("DVE_PSO_CACHE_FILE");path&&*path)
             require(device.flush_pipeline_cache(),"PSO-1 failed to persist validated cache");
         std::cout << "Vulkan offscreen indexed graphics tests passed\n";

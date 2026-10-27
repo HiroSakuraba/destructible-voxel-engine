@@ -3422,6 +3422,58 @@
           "register": "u0"
         }
       ]
+    },
+    {
+      "name": "bc5_normal_decode_reference",
+      "source": "bc5_normal_decode_reference.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "vulkan_bindings": [
+        {
+          "name": "gBc5Normals",
+          "kind": "combined_image_sampler",
+          "set": 0,
+          "binding": 0
+        },
+        {
+          "name": "gBc5Sampler",
+          "kind": "combined_image_sampler",
+          "set": 0,
+          "binding": 0
+        },
+        {
+          "name": "gBc5DecodeResults",
+          "kind": "storage_buffer",
+          "set": 0,
+          "binding": 1
+        }
+      ],
+      "threads": [
+        8,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "gBc5Normals",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "gBc5Sampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s0"
+        },
+        {
+          "name": "gBc5DecodeResults",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u0"
+        }
+      ]
     }
   ]
 }

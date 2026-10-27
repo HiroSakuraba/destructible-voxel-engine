@@ -141,8 +141,9 @@ DashrShellPixelOutput main(DashrShellPixelInput input) {
     float3 shadingNormal =
         normalize(mul((float3x3)gObjectToWorld, hit.normalObject));
     if (hasNormal) {
-        const float3 normalSample =
-            gDashrNormalTexture.Sample(gDashrNormalSampler, mappedUv).xyz;
+        const float3 normalSample = DecodeMaterialNormalSample(
+            gDashrNormalTexture.Sample(gDashrNormalSampler, mappedUv).xyz,
+            mapping.mappingFlags);
         shadingNormal = DashrApplyDerivativeNormalMap(
             shadingNormal, worldPosition, mappedUv,
             normalSample, mapping.normalScale);

@@ -1060,7 +1060,11 @@ bool MechaGame::after_restore(std::string_view encoded,std::string* error){
       !finite3(foot.ankle)||!finite3(foot.swingFrom)||
       !finite3(foot.swingTo)||!finite3(foot.normal)||
       mag(foot.normal)<.8F||mag(foot.normal)>1.2F||
-      (planted&&!supported)||(planted&&swing))
+      (planted&&!initialized)||(supported&&!initialized)||
+      (planted&&!supported)||(planted&&swing)||
+      mag(minus(foot.ankle,motor.position))>25.F||
+      mag(minus(foot.swingFrom,motor.position))>25.F||
+      mag(minus(foot.swingTo,motor.position))>25.F)
     return fail("invalid M7 foot state");
    foot.initialized=initialized!=0;foot.planted=planted!=0;
    foot.supported=supported!=0;foot.lastSwing=swing!=0;

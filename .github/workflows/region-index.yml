@@ -1,0 +1,87 @@
+name: R0/R1/R2/R3 region indexing, streaming and dirty work
+on:
+  pull_request:
+    paths:
+      - "CMakeLists.txt"
+      - "include/dve/region_catalog.hpp"
+      - "include/dve/region_dirty_index.hpp"
+      - "include/dve/region_game_damage_host.hpp"
+      - "include/dve/region_dirty_dispatch.hpp"
+      - "include/dve/region_game_damage.hpp"
+      - "include/dve/region_streaming*.hpp"
+      - "src/region_catalog.cpp"
+      - "src/region_dirty_index.cpp"
+      - "src/region_game_damage_host.cpp"
+      - "src/region_dirty_dispatch.cpp"
+      - "src/region_game_damage.cpp"
+      - "src/region_streaming*.cpp"
+      - "tests/test_region_catalog.cpp"
+      - "tests/test_region_dirty*.cpp"
+      - "tests/test_region_game_damage_host*.cpp"
+      - "tests/region_host_stub/**"
+      - "tests/test_region_game_damage_real.cpp"
+      - "tests/region_dirty_dispatch_stub/**"
+      - "tests/test_region_streaming*.cpp"
+      - "tests/region_streaming_contract_stub/**"
+      - "docs/REGION_STREAMING_R2.md"
+      - "docs/REGION_DIRTY_R3.md"
+      - "docs/REGION_GAME_DAMAGE_HOST_R32.md"
+      - "docs/REGION_DESTRUCTION_R31.md"
+      - "apps/dve_region_dirty_bench.cpp"
+      - "apps/dve_region_bench.cpp"
+      - ".github/workflows/region-index.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  region-catalog:
+    name: region catalog (${{ matrix.compiler }}, ${{ matrix.mode }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: g++
+            mode: release
+          - compiler: clang++
+            mode: sanitized
+    env:
+      CXX: ${{ matrix.compiler }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure isolated region index targets within DVE
+        shell: bash
+        run: |
+          sanitize_args=()
+          if [ "${{ matrix.mode }}" = sanitized ]; then
+            sanitize_args=("-DCMAKE_CXX_FLAGS=-fsanitize=address,undefined -fno-omit-frame-pointer" "-DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address,undefined")
+          fi
+          cmake -S . -B build-region -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.mode == 'release' && 'Release' || 'Debug' }} \
+            -DDVE_EXPERIMENTAL_REGION_INDEX=ON \
+            -DDVE_BUILD_TESTS=ON -DDVE_BUILD_BENCHMARK=OFF \
+            -DDVE_BUILD_ASSET_COOKER=OFF -DDVE_BUILD_ASSET_PIPELINE_TESTS=OFF \
+            -DDVE_BUILD_EDITOR=OFF -DDVE_BUILD_NATIVE_EDITOR=OFF \
+            -DDVE_BUILD_PLATFORM=OFF -DDVE_BUILD_RHI=OFF \
+            -DDVE_BUILD_DEVICE_TEST_RUNNER=OFF -DDVE_BUILD_AUDIO_SYNTH=OFF \
+            -DDVE_BUILD_LEGACY_X11_HOST=OFF -DDVE_ENABLE_SDL3_HOST=OFF \
+            -DDVE_ENABLE_VULKAN_BUFFER_BACKEND=OFF -DDVE_ENABLE_FLUODDITY=OFF \
+            -DDVE_ENABLE_SOFT_BODIES=OFF -DDVE_ENABLE_CPU_HAIR=OFF \
+            -DDVE_ENABLE_VFX_PARTICLES=OFF -DDVE_ENABLE_PBF_LIQUID=OFF \
+            -DDVE_ENABLE_SIMULATION_ENERGY_COMPILER=OFF -DDVE_ENABLE_BSPLINE_CLOTH=OFF \
+            -DDVE_ENABLE_GRID_FLUIDS=OFF -DDVE_ENABLE_FLIP_LIQUIDS=OFF \
+            "${sanitize_args[@]}"
+      - name: Build region contract tests
+        run: cmake --build build-region --target dve_region_catalog_tests dve_region_streaming_tests dve_region_streaming_runtime_contract_tests dve_region_dirty_tests dve_region_dirty_dispatch_tests dve_region_game_damage_host_contract_tests --parallel 2
+      - name: Run region contract tests
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: halt_on_error=1
+        run: ctest --test-dir build-region -R '^dve_region_(catalog_tests|streaming_tests|streaming_runtime_contract_tests|dirty_tests|dirty_dispatch_tests|game_damage_host_contract_tests)$' --output-on-failure
+      - name: Build and run R2 against real DVE scene staging and renderer
+        if: matrix.mode == 'release'
+        run: |
+          cmake --build build-region --target dve_region_streaming_real_tests dve_region_dirty_gpu_tests dve_region_dirty_dispatch_real_tests dve_region_dirty_dispatch_budget_tests dve_region_game_damage_real_tests dve_region_game_damage_host_real_tests --parallel 2
+          ctest --test-dir build-region -R '^dve_region_(streaming_real_tests|dirty_gpu_tests|dirty_dispatch_real_tests|dirty_dispatch_budget_tests|game_damage_real_tests|game_damage_host_real_tests)$' --output-on-failure

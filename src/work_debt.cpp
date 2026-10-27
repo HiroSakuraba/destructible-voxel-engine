@@ -3,11 +3,15 @@
 #include <algorithm>
 #include <cmath>
 #include <vector>
+#include <stdexcept>
 
 namespace dve {
 
-WorkDebtGovernor::WorkDebtGovernor(std::size_t percentileWindow)
-    : windowSize_(std::max<std::size_t>(32, percentileWindow)) {}
+WorkDebtGovernor::WorkDebtGovernor(std::size_t percentileWindow, double targetFrameMs)
+    : windowSize_(std::max<std::size_t>(32, percentileWindow)), targetFrameMs_(targetFrameMs) {
+    if (!std::isfinite(targetFrameMs_) || targetFrameMs_ <= 0.0)
+        throw std::invalid_argument("target frame duration must be finite and positive");
+}
 
 double WorkDebtGovernor::percentile99(const std::deque<double>& samples) {
     if (samples.empty()) return 0.0;
@@ -27,7 +31,7 @@ WorkBudget WorkDebtGovernor::update(const FrameTelemetry& telemetry) {
     if (cpuFrames_.size() > windowSize_) cpuFrames_.pop_front();
     if (gpuFrames_.size() > windowSize_) gpuFrames_.pop_front();
 
-    const double framePressure = std::max(telemetry.cpuFrameMs, telemetry.gpuFrameMs) / 8.333;
+    const double framePressure = std::max(telemetry.cpuFrameMs, telemetry.gpuFrameMs) / targetFrameMs_;
     const double dirtyPressure = static_cast<double>(telemetry.dirtyBricks) / 256.0;
     const double structurePressure = static_cast<double>(telemetry.structuralJobs) / 128.0;
     const double uploadPressure = static_cast<double>(telemetry.uploadBytes) / (8.0 * 1024.0 * 1024.0);
@@ -42,9 +46,9 @@ WorkBudget WorkDebtGovernor::update(const FrameTelemetry& telemetry) {
 
     const double p99 = std::max(cpu_p99_ms(), gpu_p99_ms());
     PressureLevel desired = PressureLevel::Normal;
-    if (p99 > 12.5 || debtScore_ > 2.0) desired = PressureLevel::Emergency;
-    else if (p99 > 8.333 || debtScore_ > 1.15) desired = PressureLevel::Recovery;
-    else if (p99 > 7.5 || debtScore_ > 0.80) desired = PressureLevel::Elevated;
+    if (p99 > 1.5 * targetFrameMs_ || debtScore_ > 2.0) desired = PressureLevel::Emergency;
+    else if (p99 > targetFrameMs_ || debtScore_ > 1.15) desired = PressureLevel::Recovery;
+    else if (p99 > 0.90 * targetFrameMs_ || debtScore_ > 0.80) desired = PressureLevel::Elevated;
 
     if (static_cast<int>(desired) > static_cast<int>(pressure_)) {
         pressure_ = desired;

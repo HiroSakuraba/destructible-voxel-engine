@@ -452,7 +452,10 @@ PlayerRenderView PlayerApp::render_view(std::vector<GameRenderObject>& objects, 
         impl_->session.world->elapsed_seconds();
     view.prototypeHud=prototype_hud();
     if(impl_->session.prototype){view.racingEffects=impl_->session.prototype->racing_visual_effects();
-        view.ocean=impl_->session.prototype->ocean_field();view.oceanTime=impl_->session.prototype->ocean_time();}
+        view.ocean=impl_->session.prototype->ocean_field();view.oceanTime=impl_->session.prototype->ocean_time();
+        view.waterVolume=impl_->session.prototype->water_volume_settings();
+        view.underwaterLamps=impl_->session.prototype->underwater_lamps();
+        view.waterSpray=impl_->session.prototype->water_spray_effects();}
     view.polygonFrustumCulling = impl_->settings.polygonFrustumCulling;
     view.polygonLodBias = impl_->settings.polygonLodBias;
     view.surfaceMarks = impl_->session.world->surface_marks();   // the world keeps and saves them
@@ -496,6 +499,14 @@ std::optional<PlayerSaveResult> PlayerApp::save_game(std::string_view slotOrPath
     data.metadata.worldStateHash = impl.session.world->state_hash();
     data.metadata.info["physics"] = impl.session.physicsBackend;
     data.world = impl.session.world->capture_save_state();
+    if(impl.session.prototype){
+        const auto state=impl.session.prototype->mecha_save_state();
+        if(!state.empty()){
+            auto& bytes=data.gameSections["game.mecha.v1"];
+            bytes.reserve(state.size());
+            for(const unsigned char value:state)bytes.push_back(static_cast<std::byte>(value));
+        }
+    }
     data.runtimes = capture_game_runtime_state(*impl.session.world);
 #if defined(DVE_HAVE_LUA)
     if (impl.session.script) {
@@ -560,7 +571,13 @@ std::optional<PlayerLoadResult> PlayerApp::load_game(std::string_view slotOrPath
     if (result.timersDropped != 0U)
         impl.log(std::to_string(result.timersDropped) + " saved timer(s) had no callback after boot and were dropped");
 
-    if(fresh.prototype&&!fresh.prototype->after_restore(&stepError))return fail(stepError);
+    std::string mechaState;
+    if(const auto it=data->gameSections.find("game.mecha.v1");it!=data->gameSections.end()){
+        if(it->second.size()>65536U)return fail("mecha save section exceeds 64 KiB");
+        mechaState.reserve(it->second.size());
+        for(const auto value:it->second)mechaState.push_back(static_cast<char>(value));
+    }
+    if(fresh.prototype&&!fresh.prototype->after_restore(&stepError,mechaState))return fail(stepError);
     fresh.world->set_frame_presentation(impl.session.world->frame_presentation());
     // Swap in the new world; the old session (script host first) is destroyed here.
     { PlayerSession old = std::move(impl.session); }

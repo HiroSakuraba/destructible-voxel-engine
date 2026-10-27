@@ -1,6 +1,7 @@
 #include "dve/prototype_game.hpp"
 #include "dve/racing_game.hpp"
 #include "dve/flying_game.hpp"
+#include "dve/mecha_game.hpp"
 #include "dve/water_game.hpp"
 #include "dve/gameplay_runtime.hpp"
 #include <algorithm>
@@ -21,7 +22,7 @@ template<class T> T value(const Component& c,std::string_view key,T fallback){au
  return fallback;}
 bool key_valid(std::string_view s){return !s.empty()&&s.size()<=64&&std::all_of(s.begin(),s.end(),[](unsigned char c){return (c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_'||c=='-'||c=='.';});}
 }
-std::vector<std::string> prototype_role_types(){return {type("player_start"),type("rules"),type("switch"),type("door"),type("pickup"),type("checkpoint"),type("damage_volume"),type("goal"),type("race_car"),type("race_rules"),type("race_gate"),type("race_surface"),type("flight_vehicle"),type("flight_rules"),type("flight_gate"),type("flight_wind"),type("water_rules"),type("water_ocean"),type("water_vessel")};}
+std::vector<std::string> prototype_role_types(){return {type("player_start"),type("rules"),type("switch"),type("door"),type("pickup"),type("checkpoint"),type("damage_volume"),type("goal"),type("race_car"),type("race_rules"),type("race_gate"),type("race_surface"),type("flight_vehicle"),type("flight_rules"),type("flight_gate"),type("flight_wind"),type("water_rules"),type("water_ocean"),type("water_vessel"),type("water_coast"),type("mech_player"),type("mech_torso"),type("mech_target"),type("mech_rules")};}
 std::vector<std::string> prototype_events(std::string_view r){
  if(r==type("player_start"))return {"died","respawned"};
  if(r==type("door"))return {"opened","closed"};
@@ -42,6 +43,7 @@ std::string prototype_object_key(std::span<const Component> cs){for(const auto& 
 void register_prototype_components(ComponentTypeRegistry& r){
  register_racing_components(r);
  register_flying_components(r);
+ register_mecha_components(r);
  register_water_components(r);
  auto add=[&](std::string role,std::string title,std::vector<ComponentPropertySchema> properties){properties.insert(properties.begin(),{"key",role,true,false,"Stable gameplay key"});
  std::string ignored;(void)r.register_type({type(role),std::move(title),false,std::move(properties)},&ignored);};
@@ -59,6 +61,7 @@ void register_prototype_components(ComponentTypeRegistry& r){
 bool validate_prototype_scene(std::span<const PrototypeObjectView> objects,std::string* error){
  auto fail=[&](std::string text){if(error)*error=std::move(text);
  return false;};
+ if(scene_has_mecha(objects))return validate_mecha_scene(objects,error);
  if(scene_has_racing(objects))return validate_racing_scene(objects,error);
  if(scene_has_flying(objects))return validate_flying_scene(objects,error);
  if(scene_has_water(objects))return validate_water_scene(objects,error);

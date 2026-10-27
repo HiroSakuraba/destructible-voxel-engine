@@ -95,6 +95,14 @@ public:
         u32(static_cast<std::uint32_t>(text.size()));
         for (const char c : text) u8(static_cast<std::uint8_t>(c));
     }
+    void property_string(std::string_view text) {
+        if (text.size() > limits_.maximumPropertyValueBytes && !failed_) {
+            failed_ = true;
+            failure_ = "property string of " + std::to_string(text.size()) + " bytes is over the save limit";
+        }
+        u32(static_cast<std::uint32_t>(text.size()));
+        for (const char c : text) u8(static_cast<std::uint8_t>(c));
+    }
     void count(std::size_t value, std::uint64_t limit, std::string_view what) {
         if (value > limit && !failed_) {
             failed_ = true;
@@ -143,6 +151,15 @@ public:
         std::uint32_t size{};
         if (!u32(size)) return false;
         if (size > limits_.maximumStringBytes) return bad("string of " + std::to_string(size) + " bytes is over the limit");
+        if (!need(size)) return false;
+        text.assign(reinterpret_cast<const char*>(bytes_.data() + offset_), size);
+        offset_ += size;
+        return true;
+    }
+    bool property_string(std::string& text) {
+        std::uint32_t size{};
+        if (!u32(size)) return false;
+        if (size > limits_.maximumPropertyValueBytes) return bad("property string of " + std::to_string(size) + " bytes is over the limit");
         if (!need(size)) return false;
         text.assign(reinterpret_cast<const char*>(bytes_.data() + offset_), size);
         offset_ += size;
@@ -335,7 +352,7 @@ void write_component(Writer& w, const Component& component, const GameSaveLimits
             if constexpr (std::is_same_v<T, bool>) w.boolean(item);
             else if constexpr (std::is_same_v<T, std::int64_t>) w.i64(item);
             else if constexpr (std::is_same_v<T, double>) w.f64(item);
-            else if constexpr (std::is_same_v<T, std::string>) w.string(item);
+            else if constexpr (std::is_same_v<T, std::string>) w.property_string(item);
             else if constexpr (std::is_same_v<T, Float3>) w.float3(item);
             else w.quat(item);
         }, value);
@@ -357,7 +374,7 @@ bool read_component(Reader& r, Component& component, const GameSaveLimits& limit
         case 0: { bool v{}; ok = r.boolean(v); value = v; break; }
         case 1: { std::int64_t v{}; ok = r.i64(v); value = v; break; }
         case 2: { double v{}; ok = r.f64(v); value = v; break; }
-        case 3: { std::string v; ok = r.string(v); value = std::move(v); break; }
+        case 3: { std::string v; ok = r.property_string(v); value = std::move(v); break; }
         case 4: { Float3 v{}; ok = r.float3(v); value = v; break; }
         case 5: { Quaternion v{}; ok = r.quat(v); value = v; break; }
         default: return r.bad("unknown component value type");

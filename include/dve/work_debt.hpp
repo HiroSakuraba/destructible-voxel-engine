@@ -28,7 +28,8 @@ struct WorkBudget {
 
 class WorkDebtGovernor {
 public:
-    explicit WorkDebtGovernor(std::size_t percentileWindow = 240);
+    explicit WorkDebtGovernor(std::size_t percentileWindow = 240, double targetFrameMs = 8.333);
+    [[nodiscard]] double target_frame_ms() const noexcept { return targetFrameMs_; }
 
     [[nodiscard]] WorkBudget update(const FrameTelemetry& telemetry);
     [[nodiscard]] double cpu_p99_ms() const;
@@ -37,6 +38,7 @@ public:
 
 private:
     std::size_t windowSize_{};
+    double targetFrameMs_{8.333};
     std::deque<double> cpuFrames_{};
     std::deque<double> gpuFrames_{};
     double debtScore_{};

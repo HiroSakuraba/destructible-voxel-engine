@@ -36,8 +36,12 @@ void draw_prototype_hud(std::span<std::uint8_t> rgba,unsigned w,unsigned h,const
  const unsigned scale=w>=640&&h>=360?2U:1U;auto rect=[&](unsigned x,unsigned y,unsigned width,unsigned height,std::array<std::uint8_t,3> color){for(unsigned yy=y;yy<(std::min)(h,y+height);++yy)for(unsigned xx=x;xx<(std::min)(w,x+width);++xx){auto n=(std::size_t(yy)*w+xx)*4;for(unsigned c=0;c<3;++c)rgba[n+c]=color[c];rgba[n+3]=255;}};
  auto text=[&](unsigned x,unsigned y,std::string_view str){unsigned xx=x;for(char raw:str){char c=raw>='a'&&raw<='z'?char(raw-'a'+'A'):raw;if(xx+5*scale>=w)break;auto rows=glyph(c);for(unsigned ry=0;ry<7;++ry)for(unsigned rx=0;rx<5;++rx)if(rows[ry]&(1U<<(4-rx)))rect(xx+rx*scale,y+ry*scale,scale,scale,{235,242,250});xx+=6*scale;}};
  const auto line=10*scale;rect(4,4,(std::min)(w-8,320*scale),4*line+8,{18,27,40});
+ if(hud.mecha){text(8,8,hud.stats);text(8,8+line,hud.vehicleTelemetry);
+ text(8,8+2*line,hud.message);text(8,8+3*line,hud.debug?"J/L ROTATE - 2 WEAPONS - SHIFT BOOST":"WASD MOVE - SHIFT BOOST - LMB/RMB FIRE");
+ rect(4,h-2*line-4,w-8,2*line,{18,27,40});text(8,h-2*line,hud.prompt);
+ return;}
  if(hud.water){text(8,8,hud.stats);text(8,8+line,hud.prompt);text(8,8+2*line,hud.message);
- text(8,8+3*line,hud.debug?hud.vehicleTelemetry:"W/S POWER A/D HELM Q/E TRIM TAB TOGGLE");return;}
+ text(8,8+3*line,hud.debug?hud.vehicleTelemetry:(hud.stats.find("MINI-SUB")!=std::string::npos?"W/S DRIVE SPACE/CTRL UP/DOWN Z/X BALLAST H HOLD":"W/S POWER/PADDLE A/D CARVE Q/E TRIM 1..6"));return;}
  if(hud.flying){
    if(hud.debug)rect(4,4,(std::min)(w-8,320*scale),5*line+8,{18,27,40});
    text(8,8,hud.stats);text(8,8+line,hud.prompt);text(8,8+2*line,hud.message);

@@ -13,6 +13,15 @@
 #include <string>
 #include <vector>
 #include <chrono>
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#ifdef DeviceCapabilities
+#undef DeviceCapabilities
+#endif
+#endif
 
 namespace dve::rhi::pso {
 inline constexpr std::size_t kMaximumDriverCacheBytes = 16U * 1024U * 1024U;
@@ -140,8 +149,16 @@ inline bool save(const std::filesystem::path& path, const Identity& gpu,
         output.flush();
         if(!output){output.close();std::filesystem::remove(temp,ec);return false;}
     }
+#if defined(_WIN32)
+    // std::filesystem::rename cannot replace an existing file on Windows.
+    // Win32 supports atomic same-directory replacement with MoveFileExW.
+    const bool moved=MoveFileExW(temp.c_str(),path.c_str(),
+        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)!=0;
+    if(!moved){std::filesystem::remove(temp,ec);return false;}
+#else
     std::filesystem::rename(temp,path,ec);
     if(ec){std::filesystem::remove(temp,ec);return false;}
+#endif
     return true;
 }
 } // namespace dve::rhi::pso

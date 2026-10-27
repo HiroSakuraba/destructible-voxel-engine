@@ -1,0 +1,46 @@
+name: T4 BC5 shader decode and live material bindings
+on:
+  pull_request:
+    paths:
+      - "include/dve/gpu_material_mapping.hpp"
+      - "include/dve/render/normal_texture_binding.hpp"
+      - "include/dve/render/main_material_table.hpp"
+      - "src/render/main_material_table.cpp"
+      - "shaders/common/material_mapping.hlsli"
+      - "shaders/common/live_material_sampling.hlsli"
+      - "shaders/dashr_shell_pbr_ps.hlsl"
+      - "tests/test_bc5_main_material_binding.cpp"
+      - "tests/test_bc5_shader_mapping.cpp"
+      - "tests/test_bc5_shader_contract.py"
+      - "CMakeLists.txt"
+      - "docs/TEXTURE_NORMAL_BC5_T4.md"
+      - ".github/workflows/texture-t4.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bc5-shader:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure DVE core and renderer
+        run: |
+          cmake -S . -B build-t4 -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DDVE_BUILD_TESTS=ON -DDVE_BUILD_RHI=ON -DDVE_BUILD_PLATFORM=ON -DDVE_BUILD_PLAYER=ON \
+            -DDVE_BUILD_ASSET_COOKER=OFF -DDVE_BUILD_ASSET_PIPELINE_TESTS=OFF \
+            -DDVE_BUILD_BENCHMARK=OFF -DDVE_BUILD_EDITOR=OFF -DDVE_BUILD_NATIVE_EDITOR=OFF \
+            -DDVE_ENABLE_SDL3_HOST=OFF -DDVE_BUILD_DEVICE_TEST_RUNNER=OFF \
+            -DDVE_ENABLE_FLUODDITY=OFF -DDVE_ENABLE_SOFT_BODIES=OFF \
+            -DDVE_ENABLE_CPU_HAIR=OFF -DDVE_ENABLE_SIMULATION_ENERGY_COMPILER=OFF \
+            -DDVE_ENABLE_KTX2_EXPORT=OFF
+      - name: Compile T4 and regression targets
+        run: |
+          cmake --build build-t4 --target \
+            dve_bc5_shader_mapping_tests dve_bc5_main_material_binding_tests \
+            dve_material_mapping_tests dve_main_material_table_tests dve_texture_bc5_tests \
+            --parallel 2
+      - name: Run shader source and live binding contracts
+        run: ctest --test-dir build-t4 -R '^(dve_bc5_shader_mapping_tests|dve_bc5_main_material_binding_tests|dve_bc5_shader_source_contracts|dve_material_mapping_tests|dve_main_material_table_tests|dve_texture_bc5_tests)$' --output-on-failure

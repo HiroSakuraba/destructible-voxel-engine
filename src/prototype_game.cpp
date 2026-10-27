@@ -258,9 +258,12 @@ void PrototypeGame::step(float dt){
  s.drain();
  s.persist();
 }
-bool PrototypeGame::after_restore(std::string* error){
+std::string PrototypeGame::mecha_save_state() const {
+ return impl_->mecha?impl_->mecha->save_state():std::string{};
+}
+bool PrototypeGame::after_restore(std::string* error,std::string_view mechaState){
  auto& s=*impl_;
- if(s.mecha)return s.mecha->after_restore(error);
+ if(s.mecha)return s.mecha->after_restore(mechaState,error);
  if(s.water)return s.water->after_restore(error);
  if(s.flying)return s.flying->after_restore(error);
  if(s.racing)return s.racing->after_restore(error);

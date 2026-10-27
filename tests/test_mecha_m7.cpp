@@ -1,0 +1,209 @@
+#include "dve/mecha_leg_ik.hpp"
+#include "dve/mecha_game.hpp"
+#include "dve/game_world.hpp"
+#include "dve/editor_polygon.hpp"
+#include "dve/editor_component_inspector.hpp"
+#include "dve/editor_prototype.hpp"
+#include "dve/physics3d_backend.hpp"
+#include <cmath>
+#include <iostream>
+#include <memory>
+#include <stdexcept>
+#include <string>
+using namespace dve;
+using namespace dve::editor;
+namespace {
+void check(bool ok,const char* message){if(!ok)throw std::runtime_error(message);}
+float length3(Float3 a,Float3 b){
+ return std::hypot(std::hypot(a.x-b.x,a.y-b.y),a.z-b.z);
+}
+bool finite(Float3 p){return std::isfinite(p.x)&&std::isfinite(p.y)&&std::isfinite(p.z);}
+Component role(const char* type,std::string key){
+ auto c=make_component_from_schema(std::string("dve.prototype.")+type,1);
+ check(bool(c),"missing M7 component schema");
+ c->properties["key"]=std::move(key);
+ return *c;
+}
+void analytic_ik_contract(){
+ constexpr float epsilon=2.e-4F;
+ MechLegIkConfig lengths;
+ const Float3 hip{0,0,2},foot{.25F,.4F,.2F};
+ const auto pose=solve_mech_leg_ik(hip,foot,{0,1,0},lengths);
+ check(bool(pose),"ordinary IK solve");
+ check(length3(pose->hip,pose->knee)-lengths.thighLength<epsilon,
+   "thigh joint length maintained");
+ check(std::abs(length3(pose->hip,pose->knee)-lengths.thighLength)<epsilon,
+   "thigh link is rigid");
+ check(std::abs(length3(pose->knee,pose->ankle)-lengths.shinLength)<epsilon,
+   "shin link is rigid");
+ check(pose->knee.y>pose->hip.y,"forward pole biases knee");
+ const auto far=solve_mech_leg_ik(hip,{0,0,-100},{0,1,0},lengths);
+ check(bool(far)&&far->reachClamped,"unreachable ground clamps reach");
+ check(length3(far->hip,far->ankle)<2.26F,"unreachable does not stretch");
+ const auto folded=solve_mech_leg_ik(hip,hip,{0,0,1},lengths);
+ check(bool(folded)&&finite(folded->knee),"singular folded pose is finite");
+ check(!solve_mech_leg_ik(hip,foot,{0,1,0},MechLegIkConfig{0,1}),
+   "invalid limb geometry rejected");
+}
+struct Scene {
+ GameWorld world{create_physics3d_world(Physics3DBackend::Reference)};
+ std::unique_ptr<MechaGame> game;
+ GameObjectId ground{},player{},footLeft{},footRight{};
+ explicit Scene(bool slope=false,bool makeGround=true){
+  std::string error;
+  if(makeGround){
+   auto mesh=make_editor_polygon_cube(100);
+   for(auto& v:mesh.vertices){
+    const float x=(v.position.x-.5F)*90.F;
+    v.position={x,(v.position.y-.5F)*90.F,
+               (v.position.z-.5F)*.8F-.45F+(slope?.16F*x:0.F)};
+   }
+   refresh_editor_polygon(mesh,true);
+   ground=world.spawn_cooked_polygon_asset(std::move(mesh),"Ground",{},false);
+   check(ground!=0,"create ground");
+  }
+  player=world.spawn_visual_polygon_asset(make_editor_polygon_cube(1),"Mecha",
+      make_rigid_transform({0,0,.05F},{}));
+  check(player!=0,"create mech");
+  auto chassis=role("mech_player","player");
+  check(bool(world.add_component(player,std::move(chassis),&error)),"mech role");
+  auto target=world.spawn_visual_polygon_asset(make_editor_polygon_cube(2),"Dummy",
+      make_rigid_transform({10,10,2},{}));
+  check(target!=0,"create target");
+  auto t=role("mech_target","dummy");t.properties["health"]=100.0;
+  check(bool(world.add_component(target,std::move(t),&error)),"target role");
+  GameObjectDesc rules;rules.name="Rules";
+  auto c=role("mech_rules","rules");c.properties["target_count"]=std::int64_t{1};
+  rules.components.push_back(std::move(c));
+  check(world.create_object(std::move(rules),&error)!=0,"rules marker");
+  for(int side:{-1,1}){
+   for(int segment:{0,1}){
+    const std::string key=std::string(side<0?"left":"right")+
+                           (segment==0?"_upper":"_lower");
+    auto id=world.spawn_visual_polygon_asset(make_editor_polygon_cube(
+        5+(side+1)*2+segment),key,make_rigid_transform(
+        {float(side),0,segment==0?1.55F:.55F},{}));
+    auto leg=role("mech_leg",key);
+    leg.properties["side"]=std::int64_t{side};
+    leg.properties["segment"]=std::int64_t{segment};
+    check(bool(world.add_component(id,std::move(leg),&error)),"leg role");
+   }
+   const std::string key=side<0?"left_foot":"right_foot";
+   const auto id=world.spawn_visual_polygon_asset(make_editor_polygon_cube(15+side),
+     key,make_rigid_transform({float(side),0,.2F},{}));
+   auto foot=role("mech_foot",key);
+   foot.properties["side"]=std::int64_t{side};
+   check(bool(world.add_component(id,std::move(foot),&error)),"foot role");
+   if(side<0)footLeft=id;else footRight=id;
+  }
+  game=std::make_unique<MechaGame>(world);
+  check(game->start(&error),"mecha start");
+ }
+ void tick(unsigned n=1){for(unsigned i=0;i<n;++i)game->step(1.F/120);}
+};
+void planted_world_stability_and_swing(){
+ Scene s;
+ auto feet=s.game->foot_contacts();
+ check(feet[0].planted&&feet[1].planted,"feet start supported on floor");
+ check(feet[0].ankle.x<0&&feet[1].ankle.x>0,"left/right order correct");
+ s.tick(20);
+ const auto stationary=s.game->foot_contacts();
+ check(length3(stationary[0].ankle,feet[0].ankle)<1.e-5F,
+       "stationary planted foot does not slide");
+ s.world.set_axis("move_y",1.F);
+ s.tick(12);
+ const auto moving=s.game->foot_contacts();
+ check(moving[0].supported||moving[1].supported,
+       "at least one foot has a tested landing");
+ check(length3(s.world.position(s.footLeft).value(),moving[0].ankle)<.02F,
+       "visual foot pad follows IK ankle");
+ const auto upper=s.world.position(s.footRight);
+ check(bool(upper)&&finite(*upper),"opposite visual foot remains finite");
+ s.world.set_axis("move_y",0.F);
+ s.tick(50);
+ const auto idle=s.game->foot_contacts();
+ check(idle[0].supported&&idle[1].supported,
+       "foot placement reattaches after walking");
+}
+void slope_normal_and_height(){
+ Scene s(true);
+ const auto feet=s.game->foot_contacts();
+ check(feet[0].supported&&feet[1].supported,"slope supports both feet");
+ check(feet[1].ankle.z>feet[0].ankle.z+.16F,
+       "feet independently follow ground incline");
+ check(std::abs(feet[0].normal.x)>.05F&&feet[0].normal.z>.9F,
+       "ground normal follows actual polygon slope");
+ check(length3(s.world.position(s.footLeft).value(),feet[0].ankle)<.02F,
+       "left visual foot pad has real contact position");
+}
+void unsupported_contact_releases_plant(){
+ Scene s;
+ check(s.game->foot_contacts()[0].planted,"plant initially supported");
+ check(s.world.destroy_object(s.ground),"destroy support beneath the rig");
+ s.tick(2);
+ const auto feet=s.game->foot_contacts();
+ check(!feet[0].supported&&!feet[1].supported,"lost floor releases both feet");
+ check(!feet[0].planted&&!feet[1].planted,"unsupported feet cannot remain planted");
+ check(finite(feet[0].ankle)&&finite(feet[1].ankle),"unsupported IK stays finite");
+}
+void controller_compatibility(){
+ Scene s;
+ auto current=s.game->save_state();
+ check(current.starts_with("DVE_MECHA 3 "),"M7 save schema v3");
+ std::string error;
+ check(s.game->after_restore(current,&error),"M7 restore");
+ check(s.game->save_state()==current,"foot contacts round trip bit-for-bit");
+ const auto preserved=s.game->save_state();
+ auto corrupted=current;
+ const auto pos=corrupted.find("M7 2");
+ check(pos!=std::string::npos,"M7 section is present");
+ corrupted.replace(pos,4,"M7 9");
+ check(!s.game->after_restore(corrupted,&error),"invalid M7 count rejected");
+ check(s.game->save_state()==preserved,"rejected controller restore is atomic");
+ // M6 saves lack the appended foot section; initialize plants from the restored world.
+ const auto v3pos=current.find("M7 2");
+ auto v2=current.substr(0,v3pos);
+ v2.replace(10,1,"2");
+ check(s.game->after_restore(v2,&error),"M6 controller still accepted");
+ check(s.game->foot_contacts()[0].supported,"M6 migration rebuilds ground contacts");
+ // Original M5 payload has no M6 or M7 extension.
+ const auto m6=v2.find("M6 ");
+ auto v1=v2.substr(0,m6);
+ v1.replace(10,1,"1");
+ check(s.game->after_restore(v1,&error),"M5 controller still accepted");
+ check(s.game->foot_contacts()[1].supported,"M5 migration rebuilds terrain contacts");
+}
+void prefab_validation(){
+ auto starter=make_mecha_starter();std::string error;
+ check(validate_editor_prototype(starter,&error),"M7 starter validates");
+ unsigned feet=0,legs=0;
+ for(const auto& [id,obj]:starter.objects()){
+  (void)id;
+  if(find_component_by_type(obj.components,"dve.prototype.mech_foot"))++feet;
+  if(find_component_by_type(obj.components,"dve.prototype.mech_leg"))++legs;
+ }
+ check(feet==2&&legs==4,"Iron Yard has two foot pads and four IK segments");
+ auto invalid=make_mecha_starter();
+ for(const auto& [id,obj]:invalid.objects()){
+  (void)obj;auto* o=invalid.find_object(id);
+  if(auto* foot=find_component_by_type(o->components,"dve.prototype.mech_foot")){
+   foot->properties["side"]=std::int64_t{0};break;
+  }
+ }
+ check(!validate_editor_prototype(invalid,&error),"invalid foot side rejected");
+}
+}
+int main(){
+ try{
+  analytic_ik_contract();
+  planted_world_stability_and_swing();
+  slope_normal_and_height();
+  unsupported_contact_releases_plant();
+  controller_compatibility();
+  prefab_validation();
+  std::cout<<"M7: leg IK, planted contacts, slopes, lost supports and saves passed\n";
+  return 0;
+ }catch(const std::exception& e){
+  std::cerr<<"mecha M7: "<<e.what()<<"\n";return 1;
+ }
+}

@@ -761,6 +761,14 @@ const PrototypeHud& MechaGame::hud()const noexcept{return impl_->hud;}
 PrototypeCamera MechaGame::camera()const noexcept{return impl_->cam;}
 const MechMotorState& MechaGame::motor()const noexcept{return impl_->motor;}
 MechCameraMode MechaGame::camera_mode()const noexcept{return impl_->cameraMode;}
+std::array<MechFootContact,2> MechaGame::foot_contacts()const noexcept{
+ std::array<MechFootContact,2> result{};
+ for(std::size_t i=0;i<2;++i){
+  const auto& f=impl_->feet[i];
+  result[i]={f.ankle,f.normal,f.planted,f.supported};
+ }
+ return result;
+}
 std::string_view MechaGame::locked_target_key()const noexcept{return impl_->lockKey;}
 const MechCombatTelemetry& MechaGame::telemetry()const noexcept{return impl_->telemetry;}
 std::span<const RacingVisualEffect> MechaGame::impact_visuals()const noexcept{return impl_->impacts;}
@@ -1078,8 +1086,9 @@ bool MechaGame::after_restore(std::string_view encoded,std::string* error){
  s.orbitYaw=savedOrbit;s.orbitPitch=savedPitch;s.jetAirborne=savedAirborne!=0;
  s.jetActive=false;s.gaitPhase=savedGait;s.lockKey=std::move(savedLock);
  if(version>=3)s.feet=savedFeet;
- else {s.feet={};s.update_feet(0.F,true);}
+ else s.feet={};
  s.motor=motor;s.primaryCooldown=primary;s.rocketCooldown=secondary;
+ if(version<3)s.update_feet(0.F,true);
  s.rounds=rounds;s.missiles=missiles;s.nextProjectile=next;s.boostUses=boosts;
  s.telemetry=telemetry;s.rockets=std::move(rockets);
  s.extractionReady=ready!=0;s.hud.phase=PrototypePhase(phase);

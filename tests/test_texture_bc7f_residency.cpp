@@ -1,4 +1,5 @@
 #include "dve/render/bc7f_texture_encoder.hpp"
+#include "dve/render/material_bake_residency.hpp"
 #include "dve/rhi/null_device.hpp"
 #include <algorithm>
 #include <cstddef>
@@ -117,6 +118,40 @@ void fallback_and_transaction() {
           "accepted malformed BC7 output");
     check(malformedManager.stats().compressionEncodeFailures==1U,"malformed encoder not counted");
 }
+void baked_material_map_adapter() {
+    rhi::NullDevice device;
+    TextureResidencyManager manager(device,8192U,make_basis_bc7f_encoder());
+    MaterialTextureBakeResult bake;
+    bake.success=true;
+    bake.images[MaterialBakeMap::BaseColor]=image("baked_coat",7,5,3U);
+    bake.images[MaterialBakeMap::Normal]=image("baked_normal",7,5,7U);
+    const std::vector<MaterialBakeTextureBinding> bindings{
+        {MaterialBakeMap::BaseColor,71U,TextureCompressionPreference::PreferBc7},
+        {MaterialBakeMap::Normal,72U,TextureCompressionPreference::PreferBc5ForNormals},
+    };
+    MaterialBakeResidencyReport report;
+    std::string error;
+    check(enqueue_material_bake_textures(manager,bake,bindings,report,
+          TextureUploadMode::ReplaceIfChanged,&error),"baked material map adapter rejected valid input");
+    check(report.accepted==2U && report.rejected==0U,"baked map adapter report");
+    check(manager.pump(8192U,&error)>0U,"baked material pump");
+    check(manager.find(71U)->format==rhi::TextureFormat::BC7RGBASrgb,
+          "baked color did not use BC7 sRGB");
+    check(manager.find(72U)->format==rhi::TextureFormat::RGBA8Unorm,
+          "BC5 normal preference should conservatively use RGBA8");
+    check(manager.stats().compressionFallbacks==1U,"normal fallback telemetry absent");
+
+    // Invalid or missing mappings fail before enqueueing a partial set.
+    const auto queuedBefore=manager.stats().requestsQueued;
+    const std::vector<MaterialBakeTextureBinding> invalid{
+        {MaterialBakeMap::BaseColor,73U,TextureCompressionPreference::PreferBc7},
+        {MaterialBakeMap::Emission,74U,TextureCompressionPreference::PreferBc7}
+    };
+    check(!enqueue_material_bake_textures(manager,bake,invalid,report,
+        TextureUploadMode::ReplaceIfChanged,&error),"missing baked map accepted");
+    check(manager.stats().requestsQueued==queuedBefore,
+        "binding validation partially queued maps");
+}
 void unchanged_source_different_preference() {
     rhi::NullDevice device;
     TextureResidencyManager manager(device,4096U,make_basis_bc7f_encoder());
@@ -139,6 +174,7 @@ int main() {
         native_upload_and_hot_reload();
         fallback_and_transaction();
         unchanged_source_different_preference();
+        baked_material_map_adapter();
         std::cout<<"T2 BC7 residency tests: PASS\n";
     } catch (const std::exception& e) {
         std::cerr<<"T2 failure: "<<e.what()<<"\n";

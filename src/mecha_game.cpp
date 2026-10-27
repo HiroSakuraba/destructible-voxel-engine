@@ -12,6 +12,7 @@
 #include <optional>
 #include <sstream>
 #include <iomanip>
+#include <iterator>
 #include <locale>
 #include <map>
 #include <set>
@@ -226,6 +227,7 @@ struct MechaGame::Impl {
  float primaryCooldown{},rocketCooldown{},cameraFollow{};
  bool lastBoost{},lastPause{},lastRestart{},lastDebug{},started{};
  MechCameraMode cameraMode{MechCameraMode::Tactical};
+ MechCameraMode authoredCameraMode{MechCameraMode::Tactical};
  float orbitYaw{},orbitPitch{.23F},gaitPhase{};
  bool jetAirborne{},jetActive{},lastCamera{},lastLock{};
  std::string lockKey;
@@ -308,6 +310,7 @@ struct MechaGame::Impl {
   hud.phase=PrototypePhase::Playing;hud.health=hud.maximumHealth=100;
   primaryCooldown=rocketCooldown=0;rockets.clear();impacts.clear();nextProjectile=1;
   rounds=200;missiles=12;telemetry={};boostUses=0;extractionReady=false;
+  cameraMode=authoredCameraMode;
   jetAirborne=jetActive=false;gaitPhase=0;lockKey.clear();
   orbitYaw=0;orbitPitch=.23F;
   lastCamera=lastLock=false;
@@ -551,14 +554,21 @@ struct MechaGame::Impl {
  }
  void move(float dt){
   const bool boost=boost_down();
-  const auto input=MechMotorInput{{axis(world.get_axis("move_x")),axis(world.get_axis("move_y")),0},
-     boost&&!lastBoost};
+  const float x=axis(world.get_axis("move_x")),y=axis(world.get_axis("move_y"));
+  Float3 requested{x,y,0};
+  if(cameraMode==MechCameraMode::ThirdPerson){
+   // M6 chase-mode movement follows the camera rather than world XY axes.
+   const auto forward=facing(orbitYaw);
+   const Float3 right{forward.y,-forward.x,0};
+   requested=plus(scaled(right,x),scaled(forward,y));
+  }
+  const auto input=MechMotorInput{requested,boost&&!lastBoost};
   if(boost&&!lastBoost)++boostUses;
    lastBoost=boost;
   auto displace=integrate_mech_motor(motor,config,input,dt);
   // Opt-in vertical locomotion. No jet use => legacy planar M1 fixtures unchanged.
   // Once airborne, gravity and collision determine the landing; no teleport/snap.
-  jetActive=world.is_action_pressed("mech_jumpjet")&&motor.energy>0.F&&
+  jetActive=action_down("mech_jumpjet","jump")&&motor.energy>0.F&&
      motor.position.z<start.z+config.maximumJetHeight;
   if(jetActive){
    jetAirborne=true;
@@ -568,7 +578,13 @@ struct MechaGame::Impl {
    motor.energy=std::max(0.F,motor.energy-
                 (config.jetDrainPerSecond+config.energyRegeneration)*dt);
   }else if(jetAirborne)motor.velocity.z=std::max(-28.F,motor.velocity.z-9.81F*dt);
-  if(jetAirborne)displace.z=motor.velocity.z*dt;
+  if(jetAirborne){
+   displace.z=motor.velocity.z*dt;
+   // Hard cap the apex as well as thrust activation: accumulated upward inertia
+   // must not coast above the authored maximum altitude.
+   const float remainingHeight=std::max(0.F,start.z+config.maximumJetHeight-motor.position.z);
+   if(displace.z>remainingHeight){displace.z=remainingHeight;motor.velocity.z=0;}
+  }
   const Float3 before=motor.position;
   // Swept capsule handles polygon and voxel blocking; two slide iterations.
   for(int i=0;i<2&&mag(displace)>1.e-5F;++i){
@@ -636,7 +652,7 @@ bool MechaGame::start(std::string* error){
    s.config.jetAcceleration=float(property(c,"jet_acceleration",22.0));
    s.config.jetDrainPerSecond=float(property(c,"jet_drain",32.0));
    s.config.maximumJetHeight=float(property(c,"jet_height",18.0));
-   s.cameraMode=MechCameraMode(property(c,"camera_mode",std::int64_t{0}));
+   s.cameraMode=s.authoredCameraMode=MechCameraMode(property(c,"camera_mode",std::int64_t{0}));
   }else if(c.type==torsoType)s.torso=o.id;
   else if(c.type==legType){
    s.legs.push_back({o.id,int(property(c,"side",std::int64_t{1})),

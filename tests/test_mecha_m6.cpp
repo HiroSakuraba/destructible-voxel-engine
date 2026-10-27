@@ -191,7 +191,7 @@ void save_restore_m6_and_legacy_v1(){
  f.tick(16);
  f.world.set_action_pressed("mech_jumpjet",false);
  auto original=f.game->save_state();
- require(original.starts_with("DVE_MECHA 2 "),"M6 schema version 2");
+ require(original.starts_with("DVE_MECHA 3 "),"M6 schema version 2");
  std::string error;
  require(f.game->after_restore(original,&error),"restore M6: "+error);
  require(f.game->save_state()==original,"camera, lock, jet and gait round trip");

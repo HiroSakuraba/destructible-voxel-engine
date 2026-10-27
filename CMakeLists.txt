@@ -3635,3 +3635,32 @@ if(DVE_EXPERIMENTAL_REGION_INDEX)
         add_test(NAME dve_region_streaming_real_tests COMMAND dve_region_streaming_real_tests)
     endif()
 endif()
+
+
+# R3: generation-keyed, ordered destruction work queue. Keeps R2 residency,
+# existing voxel authority, the GPU mirrors and save formats unchanged.
+if(DVE_EXPERIMENTAL_REGION_INDEX)
+    add_library(dve_region_dirty_index STATIC src/region_dirty_index.cpp)
+    target_include_directories(dve_region_dirty_index PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
+    target_link_libraries(dve_region_dirty_index PUBLIC dve_region_catalog)
+    target_compile_features(dve_region_dirty_index PUBLIC cxx_std_23)
+    if(MSVC)
+        target_compile_options(dve_region_dirty_index PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(dve_region_dirty_index PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    endif()
+    if(DVE_BUILD_TESTS)
+        add_executable(dve_region_dirty_tests tests/test_region_dirty_index.cpp)
+        target_link_libraries(dve_region_dirty_tests PRIVATE dve_region_dirty_index)
+        add_test(NAME dve_region_dirty_tests COMMAND dve_region_dirty_tests)
+
+        # End-to-end reference publication against real VoxelObject and both GPU mirrors.
+        add_executable(dve_region_dirty_gpu_tests tests/test_region_dirty_gpu_integration.cpp)
+        target_link_libraries(dve_region_dirty_gpu_tests PRIVATE dve_region_dirty_index dve::core)
+        add_test(NAME dve_region_dirty_gpu_tests COMMAND dve_region_dirty_gpu_tests)
+    endif()
+    if(DVE_BUILD_BENCHMARK)
+        add_executable(dve_region_dirty_bench apps/dve_region_dirty_bench.cpp)
+        target_link_libraries(dve_region_dirty_bench PRIVATE dve_region_dirty_index)
+    endif()
+endif()

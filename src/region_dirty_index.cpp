@@ -69,8 +69,8 @@ RegionDirtySubmitResult RegionDirtyIndex::submit_full(
 
 std::optional<std::vector<RegionDirtyTicket>> RegionDirtyIndex::lease_box(
     std::uint32_t worldId, std::uint8_t lod, BrickKey low, BrickKey high,
-    std::size_t maximumTickets) {
-    if (low.x > high.x || low.y > high.y || low.z > high.z) return std::nullopt;
+    std::size_t maximumTickets, RegionDirtyChannels channels) {
+    if (low.x > high.x || low.y > high.y || low.z > high.z || !valid_channel_mask(channels)) return std::nullopt;
     const RegionDirtyTaskKey from{{worldId, lod, low.x,
         std::numeric_limits<std::int32_t>::min(), std::numeric_limits<std::int32_t>::min()},
         0, {}, RegionDirtyConsumer::Gpu};
@@ -81,7 +81,8 @@ std::optional<std::vector<RegionDirtyTicket>> RegionDirtyIndex::lease_box(
         const auto& key = it->first;
         if (key.region.worldId != worldId || key.region.lod != lod || key.region.x > high.x) break;
         if (++examined > config_.maximumExamined) return std::nullopt;
-        if (!in_bounds(key.region, low, high) || it->second.activeLease != 0) continue;
+        if (!in_bounds(key.region, low, high) || it->second.activeLease != 0 ||
+            (channels & region_dirty_channel(key.consumer)) == 0U) continue;
         if (selected.size() < maximumTickets) selected.push_back(it);
     }
     // Only now mutate leases; a rejected region query never strands tickets.

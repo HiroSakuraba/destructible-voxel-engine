@@ -39,6 +39,7 @@ jobs:
           DVE_T6_CAPTURE_DIR: ${{ runner.temp }}/t6-bc5
         run: ctest --test-dir build-t6 -R '^dve_texture_render_diff_t6_tests$' -V --output-on-failure
       - name: Generate browser gallery
+        if: always()
         env:
           DVE_T6_CAPTURE_DIR: ${{ runner.temp }}/t6-bc5
         run: python3 tests/scripts/t6_make_gallery.py
@@ -73,9 +74,11 @@ jobs:
       - name: Run BC5/BC7 rendered-image comparisons
         env:
           DVE_REQUIRE_COMPLETE_TESTS: "1"
+          DVE_T6_REQUIRE_BC7: "1"
           DVE_T6_CAPTURE_DIR: ${{ runner.temp }}/t6-bc7
         run: ctest --test-dir build-t6-bc7 -R '^dve_texture_render_diff_t6_tests$' -V --output-on-failure
       - name: Generate browser gallery
+        if: always()
         env:
           DVE_T6_CAPTURE_DIR: ${{ runner.temp }}/t6-bc7
         run: python3 tests/scripts/t6_make_gallery.py

@@ -10,6 +10,8 @@ import os
 from pathlib import Path
 
 folder = Path(os.environ.get("DVE_T6_CAPTURE_DIR", "build-t6/t6-artifacts"))
+if not (folder / "metrics.csv").is_file():
+    raise SystemExit(f"T6 gallery: no metrics.csv in {folder} (test did not start)")
 with (folder / "metrics.csv").open(newline="", encoding="utf-8") as source:
     cases = list(csv.DictReader(source))
 if not cases:

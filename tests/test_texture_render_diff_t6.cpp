@@ -10,6 +10,7 @@
 #include "dve/render/normal_bc5_codec.hpp"
 #include "dve/render/normal_texture_binding.hpp"
 #include "dve/render/texture_residency.hpp"
+#include "dve/rhi/device.hpp"
 #include "dve/render/polygon_renderer.hpp"
 #include "dve/rgba8_png.hpp"
 #ifdef DVE_T6_WITH_BC7
@@ -57,7 +58,7 @@ CookedPolygonAsset authored_scene(unsigned pattern) {
             0.24*std::sin(fx*.19):0.32*std::sin(fx*.46+fy*.13);
         const double ny=pattern==0U?0.0:pattern==1U?
             0.23*std::cos(fy*.18):0.28*std::cos(fx*.12+fy*.41);
-        const double nz=std::sqrt(std::max(0.0,1.0-nx*nx-ny*ny));
+        const double nz=std::sqrt((std::max)(0.0,1.0-nx*nx-ny*ny));
         const auto i=(y*64U+x)*4U;
         norm.rgba8[i]=byte_normal(nx);
         norm.rgba8[i+1U]=byte_normal(ny);
@@ -141,6 +142,12 @@ PolygonImage compressed_color(const PolygonImage& source) {
     PolygonImage result=source;
     const auto tilesX=(source.width+3U)/4U;
     std::array<basist::color_rgba,16> rgba{};
+    // BC7 mode 6 shares its p-bit between RGB and alpha, so an opaque 255 alpha can decode as
+    // 254. The CPU reference renderer routes base.w < 0.999 through its transparent path, which
+    // does not write object IDs, so one-LSB alpha noise would silently delete coverage and make
+    // the opaque-material comparison meaningless. This test measures RGB error only: tolerate at
+    // most one LSB of alpha drift and keep the authored (opaque) alpha for rendering.
+    unsigned maxAlphaDelta=0U;
     for(unsigned by=0U;by<(source.height+3U)/4U;++by)
         for(unsigned bx=0U;bx<tilesX;++bx) {
             const auto offset=(static_cast<std::size_t>(by)*tilesX+bx)*16U;
@@ -152,9 +159,12 @@ PolygonImage compressed_color(const PolygonImage& source) {
                 const auto i=(static_cast<std::size_t>(y)*source.width+x)*4U;
                 const auto& p=rgba[py*4U+px];
                 result.rgba8[i]=p.r;result.rgba8[i+1U]=p.g;
-                result.rgba8[i+2U]=p.b;result.rgba8[i+3U]=p.a;
+                result.rgba8[i+2U]=p.b;
+                const unsigned a=source.rgba8[i+3U];
+                maxAlphaDelta=(std::max)(maxAlphaDelta,a>p.a?a-p.a:p.a-a);
             }
         }
+    check(maxAlphaDelta<=1U,"T6 BC7 alpha drifted by more than one LSB");
     return result;
 }
 #endif
@@ -199,7 +209,7 @@ Frame render(const CookedPolygonAsset& scene,bool grazing,
     return frame;
 }
 struct Metrics {
-    unsigned coverage{},changed{};
+    unsigned coverage{},changed{},coverageMismatch{};
     double mse{},psnr{},mae{},p95{},maxAbs{};
     double normalMeanDeg{},normalP95Deg{};
     double borderMae{},interiorMae{};
@@ -217,17 +227,30 @@ Metrics compare(const Frame& ref,const Frame& target) {
           "T6 mismatched frame dimensions");
     check(ref.rgba.size()==target.rgba.size(),"T6 mismatched frame pixels");
     const auto w=ref.image.width,h=ref.image.height;
-    unsigned loX=w,loY=h,hiX=0U,hiY=0U;
-    for(unsigned y=0U;y<h;++y)for(unsigned x=0U;x<w;++x) {
-        const auto at=static_cast<std::size_t>(y)*w+x;
-        check((ref.image.objectId[at]==1U)==(target.image.objectId[at]==1U),
-              "T6 compression modified geometry/coverage");
-        if(ref.image.objectId[at]==1U) {
-            loX=std::min(loX,x);hiX=std::max(hiX,x);
-            loY=std::min(loY,y);hiY=std::max(hiY,y);
-        }
-    }
+    check(ref.image.passes.normal.size()==static_cast<std::size_t>(w)*h&&
+          target.image.passes.normal.size()==static_cast<std::size_t>(w)*h,
+          "T6 missing normal AOV");
+    check(ref.image.objectId.size()==static_cast<std::size_t>(w)*h&&
+          target.image.objectId.size()==ref.image.objectId.size(),
+          "T6 missing object ID AOV");
     Metrics m{};
+    // The coverage mismatch is counted, not thrown, so the caller can still write the metrics
+    // row and the reference/candidate/difference PNGs before failing the case.
+    for(std::size_t at=0U;at<ref.image.objectId.size();++at)
+        if((ref.image.objectId[at]==1U)!=(target.image.objectId[at]==1U))++m.coverageMismatch;
+    // A pixel is "border" when any pixel within kBorderRadius (Chebyshev) is outside the
+    // reference coverage mask or off the image: a silhouette distance, not a bounding box.
+    constexpr int kBorderRadius=7;
+    auto covered=[&](int x,int y){
+        return x>=0&&y>=0&&x<static_cast<int>(w)&&y<static_cast<int>(h)&&
+               ref.image.objectId[static_cast<std::size_t>(y)*w+static_cast<std::size_t>(x)]==1U;
+    };
+    auto near_silhouette=[&](unsigned px,unsigned py){
+        for(int dy=-kBorderRadius;dy<=kBorderRadius;++dy)
+            for(int dx=-kBorderRadius;dx<=kBorderRadius;++dx)
+                if(!covered(static_cast<int>(px)+dx,static_cast<int>(py)+dy))return true;
+        return false;
+    };
     std::vector<double> perPixel,angles;
     double sumSquared=0.0,sumAbsolute=0.0;
     double borderSum=0.0,interiorSum=0.0;
@@ -240,27 +263,25 @@ Metrics compare(const Frame& ref,const Frame& target) {
         for(unsigned c=0;c<3U;++c) {
             const double d=std::abs(static_cast<double>(ref.rgba[i*4U+c])-
                                     static_cast<double>(target.rgba[i*4U+c]))/255.0;
-            pixelErr=std::max(pixelErr,d);
+            pixelErr=(std::max)(pixelErr,d);
             sumAbsolute+=d;
             sumSquared+=d*d;
         }
         if(pixelErr>0.0)++m.changed;
         perPixel.push_back(pixelErr);
-        m.maxAbs=std::max(m.maxAbs,pixelErr);
+        m.maxAbs=(std::max)(m.maxAbs,pixelErr);
         angles.push_back(angle_deg(ref.image.passes.normal[i],target.image.passes.normal[i]));
-        const bool border=x<=loX+7U||x+7U>=hiX||y<=loY+7U||y+7U>=hiY;
+        const bool border=near_silhouette(x,y);
         if(border) {borderSum+=pixelErr;++borderCount;}
         else {interiorSum+=pixelErr;++interiorCount;}
     }
     check(m.coverage>100U,"T6 comparison has no visible scene");
-    check(ref.image.passes.normal.size()==w*h&&target.image.passes.normal.size()==w*h,
-          "T6 missing normal AOV");
     m.mae=sumAbsolute/(static_cast<double>(m.coverage)*3.0);
     m.mse=sumSquared/(static_cast<double>(m.coverage)*3.0);
     m.psnr=m.mse>0.0?-10.0*std::log10(m.mse):99.0;
     std::sort(perPixel.begin(),perPixel.end());
     std::sort(angles.begin(),angles.end());
-    auto at95=[](const auto& vec){return vec[std::min(vec.size()-1U,static_cast<std::size_t>(
+    auto at95=[](const auto& vec){return vec[(std::min)(vec.size()-1U,static_cast<std::size_t>(
         std::ceil(vec.size()*0.95)-1.0))];};
     m.p95=at95(perPixel);
     m.normalMeanDeg=std::accumulate(angles.begin(),angles.end(),0.0)/
@@ -282,7 +303,7 @@ void write_diff_png(const std::filesystem::path& path,const Frame& a,const Frame
         if(a.image.objectId[i]==1U)for(std::size_t c=0;c<3U;++c) {
             const int diff=std::abs(static_cast<int>(a.rgba[i*4U+c])-
                                     static_cast<int>(b.rgba[i*4U+c]));
-            pixels[i*4U+c]=static_cast<std::uint8_t>(std::min(255,diff*6));
+            pixels[i*4U+c]=static_cast<std::uint8_t>((std::min)(255,diff*6));
         }
     }
     std::string error;
@@ -295,7 +316,7 @@ void log_metrics(std::ostream& out,const std::string& name,const Metrics& m) {
        <<std::setprecision(3)<<m.psnr<<","<<std::setprecision(7)<<m.p95<<","
        <<m.maxAbs<<","<<std::setprecision(4)<<m.normalMeanDeg<<","
        <<m.normalP95Deg<<","<<std::setprecision(7)<<m.borderMae<<","
-       <<m.interiorMae<<"\n";
+       <<m.interiorMae<<","<<m.coverageMismatch<<"\n";
 }
 void compare_case(const std::string& id,const CookedPolygonAsset& baseline,
                   const CookedPolygonAsset& candidate,
@@ -309,6 +330,21 @@ void compare_case(const std::string& id,const CookedPolygonAsset& baseline,
             const auto source=render(baseline,grazing,mode);
             const auto changed=render(candidate,grazing,mode);
             const auto metrics=compare(source,changed);
+            // Record metrics and images BEFORE enforcing any gate, so a failing case leaves its
+            // evidence in the (always-uploaded) CI artifact instead of only earlier passing cases.
+            log_metrics(report,tag,metrics);
+            report.flush();
+            std::cout<<"T6 "<<tag<<" coverage="<<metrics.coverage
+                     <<" MAE="<<metrics.mae<<" PSNR="<<metrics.psnr
+                     <<" normal_mean_deg="<<metrics.normalMeanDeg
+                     <<" coverage_mismatch="<<metrics.coverageMismatch<<"\n";
+            if(!artifactDir.empty()) {
+                write_png(artifactDir/(tag+"_rgba8.png"),source);
+                write_png(artifactDir/(tag+"_encoded.png"),changed);
+                write_diff_png(artifactDir/(tag+"_difference_x6.png"),source,changed);
+            }
+            check(metrics.coverageMismatch==0U,
+                  "T6 compression modified geometry/coverage: "+tag);
             // Assert test is sensitive to the normal-map path in an intentionally
             // corrupted control. Normal BC5 quantization itself is allowed to be
             // indistinguishable at some screen pixels.
@@ -320,15 +356,6 @@ void compare_case(const std::string& id,const CookedPolygonAsset& baseline,
                 check(metrics.normalMeanDeg<9.0 && metrics.normalP95Deg<30.0,
                       "T6 encoded texture causes excessive normal regression: "+tag);
             }
-            log_metrics(report,tag,metrics);
-            std::cout<<"T6 "<<tag<<" coverage="<<metrics.coverage
-                     <<" MAE="<<metrics.mae<<" PSNR="<<metrics.psnr
-                     <<" normal_mean_deg="<<metrics.normalMeanDeg<<"\n";
-            if(!artifactDir.empty()) {
-                write_png(artifactDir/(tag+"_rgba8.png"),source);
-                write_png(artifactDir/(tag+"_encoded.png"),changed);
-                write_diff_png(artifactDir/(tag+"_difference_x6.png"),source,changed);
-            }
         }
 }
 } // namespace
@@ -338,13 +365,20 @@ int main() {try {
         folder=path;
         std::filesystem::create_directories(folder);
     }
+#ifndef DVE_T6_WITH_BC7
+    // The BC7 CI job sets this so a configuration that silently drops the Basis target (BC5-only
+    // build) cannot pass while running none of the BC7 comparisons.
+    if(const char* need=std::getenv("DVE_T6_REQUIRE_BC7");need&&*need&&std::string(need)!="0")
+        throw std::runtime_error("T6 BC7 comparisons required but built without DVE_T6_WITH_BC7");
+#endif
     std::ofstream csv;
     if(!folder.empty()){
         csv.open(folder/"metrics.csv",std::ios::binary);
         check(bool(csv),"T6 cannot create metrics.csv");
     }
     auto header="case,covered,changed,mae_rgb,rmse_rgb,psnr_db,p95_max_channel,"
-                "max_channel,normal_mean_deg,normal_p95_deg,border_mae,interior_mae\n";
+                "max_channel,normal_mean_deg,normal_p95_deg,border_mae,interior_mae,"
+                "coverage_mismatch\n";
     if(csv.is_open())csv<<header;
     std::cout<<header;
     for(unsigned pattern=0U;pattern<3U;++pattern) {

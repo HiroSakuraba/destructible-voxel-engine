@@ -18,6 +18,8 @@ jobs:
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
+      - name: Install image/development dependencies
+        run: sudo apt-get update && sudo apt-get install -y ninja-build libpng-dev libjpeg-dev
       - name: Configure editor, renderer and real texture baker
         run: |
           cmake -S . -B build-t6 -G Ninja -DCMAKE_BUILD_TYPE=Release \
@@ -49,6 +51,8 @@ jobs:
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
+      - name: Install image/development dependencies
+        run: sudo apt-get update && sudo apt-get install -y ninja-build libpng-dev libjpeg-dev
       - name: Configure editor and optional pinned Basis transcoder
         run: |
           cmake -S . -B build-t6-bc7 -G Ninja -DCMAKE_BUILD_TYPE=Release \

@@ -1,0 +1,83 @@
+name: PSO-1 Vulkan pipeline cache validation
+on:
+  pull_request:
+    paths:
+      - "include/dve/rhi/pipeline_cache_file.hpp"
+      - "include/dve/rhi/vulkan_device.hpp"
+      - "src/rhi/vulkan_device.cpp"
+      - "src/rhi/vulkan_loader_api.hpp"
+      - "tests/test_pipeline_cache_file.cpp"
+      - "tests/test_vulkan_graphics_device.cpp"
+      - "tests/test_vulkan_compute_device.cpp"
+      - "CMakeLists.txt"
+      - "docs/PSO1_VULKAN_PIPELINE_CACHE.md"
+      - ".github/workflows/pso1-vulkan.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  portable:
+    name: Portable pipeline cache integrity checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: |
+          cmake -S . -B build-pso1 -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DDVE_BUILD_TESTS=ON -DDVE_BUILD_RHI=ON -DDVE_BUILD_PLATFORM=ON \
+            -DDVE_BUILD_PLAYER=OFF -DDVE_BUILD_EDITOR=OFF -DDVE_BUILD_NATIVE_EDITOR=OFF \
+            -DDVE_BUILD_ASSET_COOKER=OFF -DDVE_BUILD_ASSET_PIPELINE_TESTS=OFF \
+            -DDVE_BUILD_BENCHMARK=OFF -DDVE_ENABLE_SDL3_HOST=OFF \
+            -DDVE_ENABLE_FLUODDITY=OFF -DDVE_ENABLE_SOFT_BODIES=OFF \
+            -DDVE_ENABLE_CPU_HAIR=OFF -DDVE_ENABLE_SIMULATION_ENERGY_COMPILER=OFF
+      - name: Build isolated helper test
+        run: cmake --build build-pso1 --target dve_pso_cache_file_tests --parallel 2
+      - name: Validate vendor/driver/version/UUID and hostile input handling
+        run: ctest --test-dir build-pso1 -R '^dve_pso_cache_file_tests$' -V --output-on-failure
+
+  lavapipe:
+    name: Vulkan cold/seeded graphics and compute PSO timings
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install software Vulkan implementation
+        run: sudo apt-get update && sudo apt-get install -y ninja-build mesa-vulkan-drivers libvulkan1
+      - name: Configure Vulkan targets
+        run: |
+          cmake -S . -B build-pso1-gpu -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DDVE_BUILD_TESTS=ON -DDVE_BUILD_RHI=ON -DDVE_BUILD_PLATFORM=ON \
+            -DDVE_BUILD_PLAYER=OFF -DDVE_BUILD_EDITOR=OFF -DDVE_BUILD_NATIVE_EDITOR=OFF \
+            -DDVE_BUILD_ASSET_COOKER=OFF -DDVE_BUILD_ASSET_PIPELINE_TESTS=OFF \
+            -DDVE_BUILD_BENCHMARK=OFF -DDVE_ENABLE_SDL3_HOST=OFF \
+            -DDVE_ENABLE_FLUODDITY=OFF -DDVE_ENABLE_SOFT_BODIES=OFF \
+            -DDVE_ENABLE_CPU_HAIR=OFF -DDVE_ENABLE_SIMULATION_ENERGY_COMPILER=OFF
+      - name: Compile real graphics and compute Vulkan programs
+        run: cmake --build build-pso1-gpu --target dve_vulkan_graphics_tests dve_vulkan_compute_tests --parallel 2
+      - name: Fresh cache, two clean processes, validate seed on second launch
+        run: |
+          set -euo pipefail
+          icd="$(find /usr/share/vulkan/icd.d -iname '*lvp*.json' -print -quit)"
+          test -n "$icd"
+          export VK_ICD_FILENAMES="$icd"
+          export DVE_REQUIRE_VULKAN=1
+          export DVE_PSO_CACHE_FILE="$RUNNER_TEMP/dve-pso/cache.bin"
+          mkdir -p "$(dirname "$DVE_PSO_CACHE_FILE")"
+          echo "### COLD process: no persisted cache seed"
+          ./build-pso1-gpu/dve_vulkan_graphics_tests | tee cold-graphics.log
+          ./build-pso1-gpu/dve_vulkan_compute_tests | tee cold-compute.log
+          test -s "$DVE_PSO_CACHE_FILE"
+          echo "### SEEDED process: cache seed must be accepted by actual driver"
+          ./build-pso1-gpu/dve_vulkan_graphics_tests | tee warm-graphics.log
+          ./build-pso1-gpu/dve_vulkan_compute_tests | tee warm-compute.log
+          grep -q 'pso_seed_accepted=1' warm-graphics.log
+          grep -q 'pso_seed_accepted=1' warm-compute.log
+          echo "PSO-1 cold/warm smoke passed: examine total_ns; no speedup asserted"
+      - name: Preserve raw driver timings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pso1-lavapipe-cold-warm
+          path: "*-graphics.log\n*-compute.log"
+          if-no-files-found: warn

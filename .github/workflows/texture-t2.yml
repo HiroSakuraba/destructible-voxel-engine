@@ -5,6 +5,8 @@ on:
       - "CMakeLists.txt"
       - "include/dve/render/texture_residency.hpp"
       - "src/render/texture_residency.cpp"
+      - "include/dve/render/material_bake_residency.hpp"
+      - "src/render/material_bake_residency.cpp"
       - "include/dve/render/bc7f_texture_encoder.hpp"
       - "src/render/bc7f_texture_encoder.cpp"
       - "tests/test_texture_bc7f_residency.cpp"

@@ -106,6 +106,31 @@ void camera_modes_and_occlusion(){
  require(f.game->camera_mode()==MechCameraMode::ThirdPerson,"switching back restores chase mode");
  require(f.game->camera().position.z<tactical.z-8.F,"chase and tactical positions distinct");
 }
+void chase_movement_is_camera_relative(){
+ Fixture f;
+ f.game->look(-1.5707963F,0);
+ f.world.set_axis("move_y",1.F);
+ f.tick(80);
+ f.world.set_axis("move_y",0);
+ const auto p=f.game->motor().position;
+ require(p.x<-2.F&&std::abs(p.y)<1.F,
+         "third-person forward travel follows orbit yaw, not fixed world Y");
+}
+void jump_jet_cannot_cross_ceiling(){
+ Fixture f;
+ auto roof=make_editor_polygon_cube(110);
+ for(auto& v:roof.vertices)
+  v.position={(v.position.x-.5F)*30.F,(v.position.y-.5F)*30.F,
+              (v.position.z-.5F)*1.F+5.F};
+ refresh_editor_polygon(roof,true);
+ require(f.world.spawn_cooked_polygon_asset(std::move(roof),
+               "Ceiling",{},false)!=0,"create low roof");
+ f.world.set_action_pressed("mech_jumpjet",true);
+ f.tick(120);
+ f.world.set_action_pressed("mech_jumpjet",false);
+ require(f.game->motor().position.z<1.8F,
+         "swept vertical capsule stops under solid roof");
+}
 void jump_jet_and_collision(){
  Fixture f;
  const auto start=f.game->motor().position;
@@ -129,6 +154,7 @@ void lockon_and_enemy_death(){
  f.press("mech_lock");
  require(f.game->locked_target_key()=="targetA","lock chooses first visible enemy");
  require(f.game->telemetry().lockedOn,"lock status on HUD telemetry");
+ require(f.game->hud().mechLockMarker,"lock appears as projected screen-space bracket");
  f.press("mech_lock");
  require(f.game->locked_target_key()=="targetB","lock cycles to next target");
  f.press("mech_lock");
@@ -203,7 +229,9 @@ void validates_complete_leg_rig(){
 int main(){
  try{
   camera_modes_and_occlusion();
+  chase_movement_is_camera_relative();
   jump_jet_and_collision();
+  jump_jet_cannot_cross_ceiling();
   lockon_and_enemy_death();
   articulated_leg_presentation();
   save_restore_m6_and_legacy_v1();

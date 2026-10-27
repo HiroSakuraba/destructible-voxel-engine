@@ -76,6 +76,7 @@ public:
     // teardown, restore or generation reset before the ID can be reused.
     void forget_object(std::uint64_t objectId);
     [[nodiscard]] std::size_t buffered_edit_count() const noexcept { return bufferedEdits_; }
+    [[nodiscard]] std::size_t buffer_capacity() const noexcept { return config_.maximumBufferedEdits; }
 
 private:
     struct Buffered {

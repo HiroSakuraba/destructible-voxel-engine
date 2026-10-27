@@ -50,7 +50,7 @@ jobs:
           git clone --depth 1 --recurse-submodules --shallow-submodules --branch v4.4.2 \
             https://github.com/KhronosGroup/KTX-Software.git \
             "$RUNNER_TEMP/KTX-Software"
-          git -C \"$RUNNER_TEMP/KTX-Software" describe --tags --exact-match
+          git -C "$RUNNER_TEMP/KTX-Software" describe --tags --exact-match
       - name: Compile and install upstream libktx (not DVE mocks)
         run: |
           cmake -S "$RUNNER_TEMP/KTX-Software" -B "$RUNNER_TEMP/ktx-build" -G Ninja \

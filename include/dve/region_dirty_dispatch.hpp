@@ -92,6 +92,7 @@ private:
     std::deque<Buffered> ingress_{};
     std::size_t bufferedEdits_{};
     std::size_t totalOffered_{};
+    bool favorNavNext_{};
 };
 
 } // namespace dve

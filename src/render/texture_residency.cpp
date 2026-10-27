@@ -282,6 +282,11 @@ std::size_t TextureResidencyManager::pump(std::size_t maximumUploadBytes, std::s
                     ? rhi::TextureFormat::BC7RGBASrgb
                     : rhi::TextureFormat::BC7RGBAUnorm).sampled;
         const std::size_t uploadBytes = useBc7 ? pending.encodedBytes : pending.bytes;
+        // enqueue() can inspect resident_ on an asset worker. Protect the
+        // publication transaction from that concurrent read; callbacks perform
+        // the expensive encoding before taking this mutex. Follow-up: split
+        // RHI publication into reserve/commit to reduce lock hold time.
+        std::scoped_lock publicationLock(mutex_);
         const bool replacing = resident_.contains(pending.request.assetId);
         if (!evict_until_fits(uploadBytes, pending.request.assetId, error)) {
             ++stats_.uploadsFailed;
@@ -381,6 +386,7 @@ const ResidentTexture* TextureResidencyManager::find(std::uint64_t assetId) cons
 
 std::optional<TextureResidencyReference> TextureResidencyManager::reference(
     std::uint64_t assetId) const noexcept {
+    std::scoped_lock lock(mutex_);
     const auto it = resident_.find(assetId);
     if (it == resident_.end()) return std::nullopt;
     return TextureResidencyReference{assetId, it->second.generation, it->second.sourceHash};
@@ -388,6 +394,7 @@ std::optional<TextureResidencyReference> TextureResidencyManager::reference(
 
 bool TextureResidencyManager::reference_valid(
     const TextureResidencyReference& referenceValue) const noexcept {
+    std::scoped_lock lock(mutex_);
     const auto it = resident_.find(referenceValue.assetId);
     return it != resident_.end() &&
            it->second.generation == referenceValue.generation &&
@@ -395,6 +402,7 @@ bool TextureResidencyManager::reference_valid(
 }
 
 bool TextureResidencyManager::touch(std::uint64_t assetId) noexcept {
+    std::scoped_lock lock(mutex_);
     const auto it = resident_.find(assetId);
     if (it == resident_.end()) return false;
     it->second.lastUseSerial = serial_++;
@@ -402,6 +410,7 @@ bool TextureResidencyManager::touch(std::uint64_t assetId) noexcept {
 }
 
 bool TextureResidencyManager::remove(std::uint64_t assetId, std::string* error) {
+    std::scoped_lock lock(mutex_);
     const auto it = resident_.find(assetId); if (it == resident_.end()) return false;
     if (!device_.destroy_texture_view(it->second.view, error) ||
         !device_.destroy_texture(it->second.texture, error)) return false;
@@ -411,26 +420,27 @@ bool TextureResidencyManager::remove(std::uint64_t assetId, std::string* error) 
 }
 
 void TextureResidencyManager::clear() noexcept {
+    std::scoped_lock lock(mutex_);
     for (auto& [id, texture] : resident_) {
         (void)id;
         (void)device_.destroy_texture_view(texture.view, nullptr);
         (void)device_.destroy_texture(texture.texture, nullptr);
     }
     resident_.clear();
-    std::scoped_lock lock(mutex_);
     pending_.clear();
     stats_.residentBytes = 0U; stats_.pendingBytes = 0U;
     stats_.residentCount = 0U; stats_.pendingCount = 0U;
 }
 
 void TextureResidencyManager::set_budget(std::size_t bytes) noexcept {
+    std::scoped_lock lock(mutex_);
     stats_.budgetBytes = std::max<std::size_t>(bytes, 4U);
 }
 
 TextureResidencyStats TextureResidencyManager::stats() const noexcept {
+    std::scoped_lock lock(mutex_);
     TextureResidencyStats copy = stats_;
     copy.residentCount = resident_.size();
-    std::scoped_lock lock(mutex_);
     copy.pendingCount = pending_.size();
     return copy;
 }

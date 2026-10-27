@@ -750,6 +750,7 @@ if(DVE_BUILD_RHI)
         src/render/cpu_fog_cache.cpp
         src/render/sprite_renderer.cpp
         src/render/texture_residency.cpp
+        src/render/material_bake_residency.cpp
         src/render/texture_preview.cpp
         src/render/text3d_renderer.cpp
         src/render/gabor_volume_renderer.cpp
@@ -3753,10 +3754,13 @@ if(DVE_EXPERIMENTAL_REGION_INDEX)
     endif()
 endif()
 
-# T1: external bc7f analytical encoder experiment (NOT part of shipped DVE).
-# Pinned upstream commit and separate target; no dependency or networking when OFF.
+# T1/T2: pinned upstream Basis. Both modes are OFF by default.
 option(DVE_ENABLE_BC7F_POC "Build standalone experimental Basis bc7f encoder benchmark" OFF)
-if(DVE_ENABLE_BC7F_POC)
+option(DVE_ENABLE_BC7F_ENCODER "Enable optional BC7 material texture residency encoder" OFF)
+if(DVE_ENABLE_BC7F_ENCODER AND NOT TARGET dve_render_bridge)
+    message(FATAL_ERROR "DVE_ENABLE_BC7F_ENCODER requires DVE_BUILD_RHI and render bridge")
+endif()
+if(DVE_ENABLE_BC7F_POC OR DVE_ENABLE_BC7F_ENCODER)
     include(FetchContent)
     # Basis' own CMakeLists changes global compiler options, so it must never be add_subdirectory'd.
     # SOURCE_SUBDIR points MakeAvailable at a directory with no CMakeLists (same pattern as
@@ -3784,7 +3788,20 @@ if(DVE_ENABLE_BC7F_POC)
     if(NOT MSVC)
         target_compile_options(dve_bc7f_transcoder PRIVATE -fno-strict-aliasing)
     endif()
-    add_executable(dve_bc7f_poc apps/dve_bc7f_poc.cpp)
-    target_link_libraries(dve_bc7f_poc PRIVATE dve_bc7f_transcoder)
-    target_compile_features(dve_bc7f_poc PRIVATE cxx_std_23)
+    if(DVE_ENABLE_BC7F_POC)
+        add_executable(dve_bc7f_poc apps/dve_bc7f_poc.cpp)
+        target_link_libraries(dve_bc7f_poc PRIVATE dve_bc7f_transcoder)
+        target_compile_features(dve_bc7f_poc PRIVATE cxx_std_23)
+    endif()
+    if(DVE_ENABLE_BC7F_ENCODER)
+        add_library(dve_texture_bc7f STATIC src/render/bc7f_texture_encoder.cpp)
+        target_include_directories(dve_texture_bc7f PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
+        target_link_libraries(dve_texture_bc7f PUBLIC dve::render_bridge PRIVATE dve_bc7f_transcoder)
+        target_compile_features(dve_texture_bc7f PUBLIC cxx_std_23)
+        if(DVE_BUILD_TESTS)
+            add_executable(dve_texture_bc7f_residency_tests tests/test_texture_bc7f_residency.cpp)
+            target_link_libraries(dve_texture_bc7f_residency_tests PRIVATE dve_texture_bc7f dve::rhi)
+            add_test(NAME dve_texture_bc7f_residency_tests COMMAND dve_texture_bc7f_residency_tests)
+        endif()
+    endif()
 endif()

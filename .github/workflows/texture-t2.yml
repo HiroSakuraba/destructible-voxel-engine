@@ -1,0 +1,40 @@
+name: T2 optional BC7 residency and hot reload
+on:
+  pull_request:
+    paths:
+      - "CMakeLists.txt"
+      - "include/dve/render/texture_residency.hpp"
+      - "src/render/texture_residency.cpp"
+      - "include/dve/render/material_bake_residency.hpp"
+      - "src/render/material_bake_residency.cpp"
+      - "include/dve/render/bc7f_texture_encoder.hpp"
+      - "src/render/bc7f_texture_encoder.cpp"
+      - "tests/test_texture_bc7f_residency.cpp"
+      - "docs/TEXTURE_BC7F_T2.md"
+      - ".github/workflows/texture-t2.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bc7-residency:
+    name: BC7 residency + RGBA8 fallback (GCC Release)
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure default RHI plus optional encoder
+        run: |
+          cmake -S . -B build-t2 -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DDVE_BUILD_TESTS=ON -DDVE_BUILD_RHI=ON -DDVE_BUILD_PLATFORM=ON -DDVE_BUILD_PLAYER=ON \
+            -DDVE_BUILD_ASSET_COOKER=OFF -DDVE_BUILD_ASSET_PIPELINE_TESTS=OFF \
+            -DDVE_BUILD_BENCHMARK=OFF -DDVE_BUILD_EDITOR=OFF -DDVE_BUILD_NATIVE_EDITOR=OFF \
+            -DDVE_ENABLE_SDL3_HOST=OFF -DDVE_BUILD_DEVICE_TEST_RUNNER=OFF \
+            -DDVE_ENABLE_FLUODDITY=OFF -DDVE_ENABLE_SOFT_BODIES=OFF \
+            -DDVE_ENABLE_CPU_HAIR=OFF -DDVE_ENABLE_SIMULATION_ENERGY_COMPILER=OFF \
+            -DDVE_ENABLE_BC7F_ENCODER=ON
+      - name: Build new and existing residency tests
+        run: cmake --build build-t2 --target dve_texture_bc7f_residency_tests dve_texture_residency_tests --parallel 2
+      - name: Run
+        run: ctest --test-dir build-t2 -R '^(dve_texture_bc7f_residency_tests|dve_texture_residency_tests)$' --output-on-failure

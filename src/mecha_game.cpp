@@ -1,11 +1,13 @@
 #include "dve/mecha_game.hpp"
 #include "dve/mecha_navigation.hpp"
+#include "dve/mecha_leg_ik.hpp"
 #include "dve/game_world.hpp"
 #include "dve/physics3d_backend.hpp"
 #include "dve/component.hpp"
 #include "dve/query.hpp"
 #include "dve/transform.hpp"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -25,6 +27,7 @@ namespace {
 constexpr std::string_view playerType="dve.prototype.mech_player";
 constexpr std::string_view torsoType="dve.prototype.mech_torso";
 constexpr std::string_view legType="dve.prototype.mech_leg";
+constexpr std::string_view footType="dve.prototype.mech_foot";
 constexpr std::string_view targetType="dve.prototype.mech_target";
 constexpr std::string_view rulesType="dve.prototype.mech_rules";
 constexpr std::string_view extractionType="dve.prototype.mech_extraction";
@@ -48,7 +51,7 @@ template<class T>T property(const Component& c,std::string_view key,T fallback){
  if(it!=c.properties.end())if(const auto v=std::get_if<T>(&it->second))return *v;
  return fallback;
 }
-bool actor_type(std::string_view t){return t==playerType||t==torsoType||t==targetType||t==rulesType||t==extractionType||t==legType;}
+bool actor_type(std::string_view t){return t==playerType||t==torsoType||t==targetType||t==rulesType||t==extractionType||t==legType||t==footType;}
 bool key_ok(std::string_view s){
  return !s.empty()&&s.size()<=64&&s.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")==std::string_view::npos;
 }
@@ -115,11 +118,17 @@ void register_mecha_components(ComponentTypeRegistry& r){
   {"camera_mode",std::int64_t{0},false,false,"0 tactical, 1 third person"},
   {"jet_acceleration",22.0,false,false,"Jump-jet vertical acceleration"},
   {"jet_drain",32.0,false,false,"Jump-jet energy consumed per second"},
-  {"jet_height",18.0,false,false,"Maximum jump height above spawn"}});
+  {"jet_height",18.0,false,false,"Maximum jump height above spawn"},
+  {"thigh_length",1.15,false,false,"IK upper-link length, in metres"},
+  {"shin_length",1.10,false,false,"IK lower-link length, in metres"},
+  {"foot_lift",0.34,false,false,"Foot swing lift clearance"},
+  {"step_reach",0.85,false,false,"Forward target distance per footfall"}});
  add(std::string(torsoType),"Mech rotating torso (visual-only)",{});
  add(std::string(legType),"Mech gait segment (visual-only)",{
   {"side",std::int64_t{1},false,false,"-1 left, 1 right"},
   {"segment",std::int64_t{0},false,false,"0 thigh, 1 shin"}});
+ add(std::string(footType),"Mech terrain foot (visual-only)",{
+  {"side",std::int64_t{1},false,false,"-1 left, 1 right"}});
  add(std::string(targetType),"Mech target (visual-only)",{
   {"health",100.0,false,false,"Hit points"},
   {"hit_radius",1.2,false,false,"Gameplay hit sphere radius"},
@@ -139,6 +148,7 @@ bool validate_mecha_scene(std::span<const PrototypeObjectView> objects,std::stri
  std::set<std::string> keys;
  int players=0,rules=0,torsos=0,targets=0,extractions=0;std::int64_t requiredTargets=0;
  std::set<std::pair<std::int64_t,std::int64_t>> legSlots;
+ std::set<std::int64_t> footSlots;
  for(const auto& o:objects){
   unsigned roles=0;
   for(const auto& c:o.components)if(c.enabled&&c.type.starts_with(kPrototypePrefix)){
@@ -165,6 +175,15 @@ bool validate_mecha_scene(std::span<const PrototypeObjectView> objects,std::stri
     const auto camera=property(c,"camera_mode",std::int64_t{0});
     if(camera<0||camera>1)return fail("Invalid mech camera mode");
     if(!valid_mech_motor_config(cfg))return fail("Invalid mech motor configuration");
+    const auto thigh=property(c,"thigh_length",1.15);
+    const auto shin=property(c,"shin_length",1.10);
+    const auto lift=property(c,"foot_lift",.34);
+    const auto reach=property(c,"step_reach",.85);
+    if(!std::isfinite(thigh)||thigh<.4||thigh>4||
+       !std::isfinite(shin)||shin<.4||shin>4||
+       !std::isfinite(lift)||lift<.05||lift>1.5||
+       !std::isfinite(reach)||reach<.2||reach>1.8)
+     return fail("Invalid mech foot-IK configuration");
    }
    if(c.type==torsoType){++torsos;if(o.marker)return fail("Mech torso needs visible geometry");}
    if(c.type==legType){
@@ -173,6 +192,12 @@ bool validate_mecha_scene(std::span<const PrototypeObjectView> objects,std::stri
     const auto segment=property(c,"segment",std::int64_t{0});
     if((side!=-1&&side!=1)||(segment!=0&&segment!=1)||
        !legSlots.emplace(side,segment).second)return fail("Invalid or duplicate leg segment slot");
+   }
+   if(c.type==footType){
+    if(o.marker)return fail("Mech foot must have visible geometry");
+    const auto side=property(c,"side",std::int64_t{1});
+    if((side!=-1&&side!=1)||!footSlots.insert(side).second)
+     return fail("Invalid or duplicate mech foot side");
    }
    if(c.type==targetType){++targets;if(o.marker)return fail("Mech target needs visible geometry");
     auto h=property(c,"health",100.0),r=property(c,"hit_radius",1.2);
@@ -188,7 +213,8 @@ bool validate_mecha_scene(std::span<const PrototypeObjectView> objects,std::stri
   }
  }
  if(players!=1||rules!=1||torsos>1||extractions>1||targets<1||targets>64||requiredTargets>targets||
-    (!legSlots.empty()&&legSlots.size()!=4))return fail("Mech scene requires one player, one rules marker, at most one torso and 64 targets");
+    (!legSlots.empty()&&legSlots.size()!=4)||
+    (!footSlots.empty()&&(footSlots.size()!=2||legSlots.size()!=4)))return fail("Mech scene requires one player, one rules marker, at most one torso and 64 targets");
  return true;
 }
 struct MechaGame::Impl {

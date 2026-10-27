@@ -162,6 +162,7 @@ add_library(dve_core
     src/water_game.cpp
     src/flying_game.cpp
     src/mecha_game.cpp
+    src/mecha_leg_ik.cpp
     src/mecha_navigation.cpp
     src/flight_wind.cpp
     src/flight_aerodynamics.cpp

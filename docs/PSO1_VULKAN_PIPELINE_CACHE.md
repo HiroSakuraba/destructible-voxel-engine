@@ -36,10 +36,11 @@ a seed despite a valid header, initialization retries using an empty cache.
 If VkPipelineCache entry points are missing or creation fails, DVE continues
 with null VkPipelineCache, as before. The cache never changes material output.
 
-Disk snapshots use a unique sibling temporary file and rename, so the prior
-cache is not intentionally deleted before replacement. On platforms where
-rename cannot replace an existing destination, the previous valid cache is
-kept and a warning must be inferred from `diskSaveSucceeded == false`.
+Disk snapshots use a unique sibling temporary file and same-directory rename.
+Windows uses `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)`
+to replace existing files; Linux/macOS use atomic `std::filesystem::rename`.
+The prior valid file is never removed before replacement. On failures,
+`diskSaveSucceeded == false` indicates that no new snapshot was published.
 **Do not use a network share or an untrusted writable cache directory.**
 The cache is not a durable cross-device asset and must never be shipped as
 a universal precompiled PSO package.
@@ -68,8 +69,9 @@ echo SEEDED
 
 Each driver test prints a line with `cache_available`,
 `pso_seed_accepted`, `create_calls`, `total_ns` and `max_ns`.
-The first test process can create/flush the initial seed. The second
-process must observe `pso_seed_accepted=1` if the driver supports export
+The CI suite uses separate cache filenames for graphics and compute:
+each category starts with a **genuinely absent DVE seed**, then replays it
+in a second clean process. The seeded process must observe `pso_seed_accepted=1` if the driver supports export
 and import. The CI workflow `.github/workflows/pso1-vulkan.yml`
 performs these jobs with pinned software Vulkan and saves raw logs.
 

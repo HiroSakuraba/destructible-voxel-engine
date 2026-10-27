@@ -8,6 +8,7 @@
 #include <iostream>
 #include <memory>
 #include <span>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 using namespace dve;
@@ -149,6 +150,94 @@ void jump_jet_and_collision(){
          "swept capsule catches ground on landing");
  require(std::abs(f.game->motor().velocity.z)<1.F,"landing cancels downward velocity");
 }
+void jump_jet_fuel_is_finite_and_has_recharge_cooldown(){
+ Fixture f;
+ const float dt=1.F/120.F,drain=32.F,regen=16.F;
+ f.world.set_action_pressed("mech_jumpjet",true);
+ float thrustSeconds=0.F,previous=f.game->motor().energy;bool thrustRaisedEnergy=false;
+ int cutouts=0;bool wasThrusting=false;
+ for(int i=0;i<1440;++i){ // twelve seconds of held Space
+  f.tick();
+  const bool thrusting=f.game->telemetry().jetActive;
+  if(thrusting)thrustSeconds+=dt;
+  if(thrusting&&f.game->motor().energy>previous+1.e-4F)thrustRaisedEnergy=true;
+  if(wasThrusting&&!thrusting)++cutouts;
+  wasThrusting=thrusting;previous=f.game->motor().energy;
+  require(f.game->motor().energy>=0.F&&f.game->motor().energy<=100.F,"energy stays in range");
+ }
+ f.world.set_action_pressed("mech_jumpjet",false);
+ // Every second of thrust costs 32 energy and only idle time regenerates (16/s): a
+ // 100-unit tank cannot fund more thrust than this, however long Space is held.
+ const float budget=(100.F+regen*(12.F-thrustSeconds))/drain;
+ require(thrustSeconds<=budget+.05F,"jump-jet thrust is limited by fuel, not free at zero energy");
+ require(!thrustRaisedEnergy,"thrust frames never regenerate energy");
+ require(cutouts>=1,"jets cut out when the tank runs dry");
+ require(thrustSeconds<9.F,"held Space cannot hover for the whole twelve seconds");
+}
+void eased_chase_eye_never_cuts_through_a_pillar(){
+ Fixture f;
+ auto pillar=make_editor_polygon_cube(120);
+ for(auto& v:pillar.vertices)
+  v.position={(v.position.x-.5F)*.8F+2.F,(v.position.y-.5F)*1.F-10.4F,
+              (v.position.z-.5F)*12.F+5.F};
+ refresh_editor_polygon(pillar,true);
+ require(f.world.spawn_cooked_polygon_asset(std::move(pillar),"Pillar",{},false)!=0,
+         "pillar creation");
+ f.tick(60); // eye settles beside the pillar
+ for(int i=0;i<90;++i){
+  f.game->look(i<6?-.03F:0.F,0.F); // swing the desired eye across the pillar; the eased chord clips it
+  f.tick();
+  const auto e=f.game->camera().position;
+  require(!(e.x>1.6F&&e.x<2.4F&&e.y>-10.9F&&e.y<-9.9F&&e.z<11.F),
+          "eased camera must not lag through solid cover");
+ }
+}
+void idle_gait_settles_both_feet_and_pauses_gate_lock(){
+ Fixture f;
+ f.world.set_axis("move_y",1.F);f.tick(23);f.world.set_axis("move_y",0.F);
+ f.tick(120);
+ const auto base=f.game->motor().position;
+ const auto l=f.world.position(f.leftShin).value(),r=f.world.position(f.rightShin).value();
+ require(std::abs((l.y-base.y))<.03F&&std::abs((r.y-base.y))<.03F,
+         "standing mech plants both feet instead of freezing mid-stride");
+ require(std::abs(l.z-r.z)<.01F,"neither foot stays raised when idle");
+ f.press("pause");
+ f.press("mech_lock");
+ require(f.game->locked_target_key().empty(),"target lock is ignored while paused");
+ f.press("pause");
+ f.press("mech_lock");
+ require(f.game->locked_target_key()=="targetA","lock works again after resume");
+}
+void restart_clears_jet_gait_lock_and_camera(){
+ Fixture f;
+ f.press("mech_lock");
+ f.world.set_axis("move_y",1.F);
+ f.world.set_action_pressed("mech_jumpjet",true);
+ f.tick(60);
+ f.world.set_action_pressed("mech_jumpjet",false);f.world.set_axis("move_y",0.F);
+ require(f.game->telemetry().altitude>.2F,"airborne before restart");
+ f.press("restart");
+ require(f.game->locked_target_key().empty(),"restart drops target lock");
+ require(f.game->telemetry().altitude<.01F&&std::abs(f.game->motor().velocity.z)<1.e-4F,
+         "restart lands the jets and clears vertical velocity");
+ require(f.game->camera_mode()==MechCameraMode::ThirdPerson,"restart restores authored camera");
+ require(distance(f.game->motor().position,{0,0,.05F})<.01F,"restart returns to spawn");
+}
+void grounded_checkpoint_cannot_smuggle_vertical_velocity(){
+ Fixture f;
+ auto save=f.game->save_state();
+ // Token 11 is velocity.z in the controller header; the checkpoint says "not airborne".
+ std::istringstream in(save);std::string tok,rebuilt;
+ for(int i=0;in>>tok&&i<11;++i)rebuilt+=tok+" ";
+ const auto restOfLine=save.substr(rebuilt.size());
+ const auto after=restOfLine.find(' ');
+ require(after!=std::string::npos,"parse save header");
+ std::string error;
+ require(f.game->after_restore(rebuilt+"7 "+restOfLine.substr(after+1),&error),
+         "restore: "+error);
+ require(std::abs(f.game->motor().velocity.z)<1.e-6F,
+         "grounded checkpoint velocity.z is sanitized to zero");
+}
 void lockon_and_enemy_death(){
  Fixture f(true,true,false);
  require(f.game->locked_target_key().empty(),"initially no lock");
@@ -227,16 +316,24 @@ void validates_complete_leg_rig(){
  require(!validate_editor_prototype(invalid,&error),"invalid limb-side rejected");
 }
 }
-int main(){
+int main(int argc,char** argv){
  try{
-  camera_modes_and_occlusion();
-  chase_movement_is_camera_relative();
-  jump_jet_and_collision();
-  jump_jet_cannot_cross_ceiling();
-  lockon_and_enemy_death();
-  articulated_leg_presentation();
-  save_restore_m6_and_legacy_v1();
-  validates_complete_leg_rig();
+  // Optional argv[1] runs only the named case (debugging: dve_mecha_m6_tests jump_jet_and_collision).
+  const std::string only=argc>1?argv[1]:"";
+  const auto run=[&](const char* name,void(*test)()){if(only.empty()||only==name)test();};
+  run("camera_modes_and_occlusion",camera_modes_and_occlusion);
+  run("chase_movement_is_camera_relative",chase_movement_is_camera_relative);
+  run("jump_jet_and_collision",jump_jet_and_collision);
+  run("jump_jet_cannot_cross_ceiling",jump_jet_cannot_cross_ceiling);
+  run("jump_jet_fuel_is_finite_and_has_recharge_cooldown",jump_jet_fuel_is_finite_and_has_recharge_cooldown);
+  run("eased_chase_eye_never_cuts_through_a_pillar",eased_chase_eye_never_cuts_through_a_pillar);
+  run("lockon_and_enemy_death",lockon_and_enemy_death);
+  run("idle_gait_settles_both_feet_and_pauses_gate_lock",idle_gait_settles_both_feet_and_pauses_gate_lock);
+  run("restart_clears_jet_gait_lock_and_camera",restart_clears_jet_gait_lock_and_camera);
+  run("grounded_checkpoint_cannot_smuggle_vertical_velocity",grounded_checkpoint_cannot_smuggle_vertical_velocity);
+  run("articulated_leg_presentation",articulated_leg_presentation);
+  run("save_restore_m6_and_legacy_v1",save_restore_m6_and_legacy_v1);
+  run("validates_complete_leg_rig",validates_complete_leg_rig);
   std::cout<<"M6 mech third-person, jet, lock and gait tests passed\n";
   return 0;
  }catch(const std::exception& e){

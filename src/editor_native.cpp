@@ -367,6 +367,8 @@ void NativeEditorController::route_play_key(std::string_view normalized, bool pr
     else if (normalized == "d" || normalized == "right") alias("move_right");
     else if (normalized == "space") alias("jump");
     else if (normalized == "e") alias("interact");
+    else if (normalized == "c") alias("mech_camera");  // M6 mecha: tactical/chase camera
+    else if (normalized == "tab") alias("mech_lock");  // M6 mecha: cycle target lock
     else if (normalized == "p") alias("pause");
     else if (normalized == "r") alias("restart");
     else if (normalized == "f3") alias("prototype_debug");

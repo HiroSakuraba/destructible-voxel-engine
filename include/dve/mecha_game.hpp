@@ -1,5 +1,5 @@
 #pragma once
-// M1-M4: portable Z-up top-down mech movement, combat, destruction and enemies.
+// M1-M6: portable Z-up mech gameplay; optional third-person controls and jump jets.
 #include "dve/prototype_game.hpp"
 #include <cstdint>
 #include <memory>
@@ -10,6 +10,8 @@ struct MechMotorConfig {
     float maximumSpeed{11.0F}, acceleration{24.0F}, braking{28.0F};
     float boostSpeed{24.0F}, boostEnergyCost{32.0F}, energyRegeneration{16.0F};
     float radius{0.95F}, height{3.5F};
+    float jetAcceleration{22.0F}, jetDrainPerSecond{32.0F};
+    float maximumJetHeight{18.0F};
 };
 struct MechMotorState {
     Float3 position{}, velocity{};
@@ -23,6 +25,7 @@ struct MechMotorInput {
 // Integrates velocity and energy. Caller must sweep the returned displacement before publishing position.
 [[nodiscard]] Float3 integrate_mech_motor(MechMotorState&, const MechMotorConfig&,
                                            MechMotorInput, float dt) noexcept;
+enum class MechCameraMode : std::uint8_t { Tactical, ThirdPerson };
 enum class MechWeaponKind : std::uint8_t { Autocannon, Rocket };
 struct MechProjectile {
     Float3 position{}, velocity{};
@@ -35,6 +38,8 @@ struct MechCombatTelemetry {
     std::uint64_t voxelCarvesQueued{}, enemyShots{}, navigationReplans{};
     std::uint32_t activeRockets{};
     float energy{}, primaryCooldown{}, rocketCooldown{};
+    float altitude{}, verticalSpeed{};
+    bool jetActive{}, lockedOn{};
 };
 [[nodiscard]] bool scene_has_mecha(std::span<const PrototypeObjectView>);
 [[nodiscard]] bool validate_mecha_scene(std::span<const PrototypeObjectView>,std::string* error=nullptr);
@@ -53,6 +58,8 @@ public:
     [[nodiscard]] const PrototypeHud& hud() const noexcept;
     [[nodiscard]] PrototypeCamera camera() const noexcept;
     [[nodiscard]] const MechMotorState& motor() const noexcept;
+    [[nodiscard]] MechCameraMode camera_mode() const noexcept;
+    [[nodiscard]] std::string_view locked_target_key() const noexcept;
     [[nodiscard]] const MechCombatTelemetry& telemetry() const noexcept;
     [[nodiscard]] std::span<const RacingVisualEffect> impact_visuals() const noexcept;
 private:

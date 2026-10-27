@@ -94,7 +94,7 @@ void save_restore_validates_and_preserves_controller(){
  f.world.set_axis("move_y",1.F);f.tick(25);f.world.set_axis("move_y",0.F);
  f.fire("mech_secondary");f.tick(5);
  const auto controller=f.game->save_state();
- require(controller.starts_with("DVE_MECHA 2 "),"versioned serialized combat state");
+ require(controller.starts_with("DVE_MECHA 3 "),"versioned serialized combat state");
  const auto worldSnapshot=capture_restorable(f.world);
  const auto previous=f.game->telemetry().autocannonShots;
  f.tick(80); // let the projectile move; restoring must return it to the earlier position

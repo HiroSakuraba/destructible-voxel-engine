@@ -1,11 +1,13 @@
 #include "dve/mecha_game.hpp"
 #include "dve/mecha_navigation.hpp"
+#include "dve/mecha_leg_ik.hpp"
 #include "dve/game_world.hpp"
 #include "dve/physics3d_backend.hpp"
 #include "dve/component.hpp"
 #include "dve/query.hpp"
 #include "dve/transform.hpp"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -25,6 +27,7 @@ namespace {
 constexpr std::string_view playerType="dve.prototype.mech_player";
 constexpr std::string_view torsoType="dve.prototype.mech_torso";
 constexpr std::string_view legType="dve.prototype.mech_leg";
+constexpr std::string_view footType="dve.prototype.mech_foot";
 constexpr std::string_view targetType="dve.prototype.mech_target";
 constexpr std::string_view rulesType="dve.prototype.mech_rules";
 constexpr std::string_view extractionType="dve.prototype.mech_extraction";
@@ -48,7 +51,7 @@ template<class T>T property(const Component& c,std::string_view key,T fallback){
  if(it!=c.properties.end())if(const auto v=std::get_if<T>(&it->second))return *v;
  return fallback;
 }
-bool actor_type(std::string_view t){return t==playerType||t==torsoType||t==targetType||t==rulesType||t==extractionType||t==legType;}
+bool actor_type(std::string_view t){return t==playerType||t==torsoType||t==targetType||t==rulesType||t==extractionType||t==legType||t==footType;}
 bool key_ok(std::string_view s){
  return !s.empty()&&s.size()<=64&&s.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")==std::string_view::npos;
 }
@@ -115,11 +118,17 @@ void register_mecha_components(ComponentTypeRegistry& r){
   {"camera_mode",std::int64_t{0},false,false,"0 tactical, 1 third person"},
   {"jet_acceleration",22.0,false,false,"Jump-jet vertical acceleration"},
   {"jet_drain",32.0,false,false,"Jump-jet energy consumed per second"},
-  {"jet_height",18.0,false,false,"Maximum jump height above spawn"}});
+  {"jet_height",18.0,false,false,"Maximum jump height above spawn"},
+  {"thigh_length",1.15,false,false,"IK upper-link length, in metres"},
+  {"shin_length",1.10,false,false,"IK lower-link length, in metres"},
+  {"foot_lift",0.34,false,false,"Foot swing lift clearance"},
+  {"step_reach",0.85,false,false,"Forward target distance per footfall"}});
  add(std::string(torsoType),"Mech rotating torso (visual-only)",{});
  add(std::string(legType),"Mech gait segment (visual-only)",{
   {"side",std::int64_t{1},false,false,"-1 left, 1 right"},
   {"segment",std::int64_t{0},false,false,"0 thigh, 1 shin"}});
+ add(std::string(footType),"Mech terrain foot (visual-only)",{
+  {"side",std::int64_t{1},false,false,"-1 left, 1 right"}});
  add(std::string(targetType),"Mech target (visual-only)",{
   {"health",100.0,false,false,"Hit points"},
   {"hit_radius",1.2,false,false,"Gameplay hit sphere radius"},
@@ -139,6 +148,7 @@ bool validate_mecha_scene(std::span<const PrototypeObjectView> objects,std::stri
  std::set<std::string> keys;
  int players=0,rules=0,torsos=0,targets=0,extractions=0;std::int64_t requiredTargets=0;
  std::set<std::pair<std::int64_t,std::int64_t>> legSlots;
+ std::set<std::int64_t> footSlots;
  for(const auto& o:objects){
   unsigned roles=0;
   for(const auto& c:o.components)if(c.enabled&&c.type.starts_with(kPrototypePrefix)){
@@ -165,6 +175,15 @@ bool validate_mecha_scene(std::span<const PrototypeObjectView> objects,std::stri
     const auto camera=property(c,"camera_mode",std::int64_t{0});
     if(camera<0||camera>1)return fail("Invalid mech camera mode");
     if(!valid_mech_motor_config(cfg))return fail("Invalid mech motor configuration");
+    const auto thigh=property(c,"thigh_length",1.15);
+    const auto shin=property(c,"shin_length",1.10);
+    const auto lift=property(c,"foot_lift",.34);
+    const auto reach=property(c,"step_reach",.85);
+    if(!std::isfinite(thigh)||thigh<.4||thigh>4||
+       !std::isfinite(shin)||shin<.4||shin>4||
+       !std::isfinite(lift)||lift<.05||lift>1.5||
+       !std::isfinite(reach)||reach<.2||reach>1.8)
+     return fail("Invalid mech foot-IK configuration");
    }
    if(c.type==torsoType){++torsos;if(o.marker)return fail("Mech torso needs visible geometry");}
    if(c.type==legType){
@@ -173,6 +192,12 @@ bool validate_mecha_scene(std::span<const PrototypeObjectView> objects,std::stri
     const auto segment=property(c,"segment",std::int64_t{0});
     if((side!=-1&&side!=1)||(segment!=0&&segment!=1)||
        !legSlots.emplace(side,segment).second)return fail("Invalid or duplicate leg segment slot");
+   }
+   if(c.type==footType){
+    if(o.marker)return fail("Mech foot must have visible geometry");
+    const auto side=property(c,"side",std::int64_t{1});
+    if((side!=-1&&side!=1)||!footSlots.insert(side).second)
+     return fail("Invalid or duplicate mech foot side");
    }
    if(c.type==targetType){++targets;if(o.marker)return fail("Mech target needs visible geometry");
     auto h=property(c,"health",100.0),r=property(c,"hit_radius",1.2);
@@ -189,10 +214,18 @@ bool validate_mecha_scene(std::span<const PrototypeObjectView> objects,std::stri
  }
  if(players!=1||rules!=1||torsos>1||extractions>1||targets<1||targets>64||requiredTargets>targets)return fail("Mech scene requires one player, one rules marker, at most one torso and 64 targets");
  if(!legSlots.empty()&&legSlots.size()!=4)return fail("Mech gait needs all four leg segments (left/right thigh and shin) or none");
+ if(!footSlots.empty()&&(footSlots.size()!=2||legSlots.size()!=4))
+  return fail("Mech terrain contact pads require both feet and a complete four-segment leg rig");
  return true;
 }
 struct MechaGame::Impl {
  struct Leg {GameObjectId id{};int side{},segment{};};
+ struct FootPad {GameObjectId id{};int side{};};
+ struct FootState {
+  Float3 ankle{},swingFrom{},swingTo{},normal{0,0,1};
+  bool initialized{},planted{},supported{},lastSwing{};
+ };
+ struct GroundContact {Float3 point{},normal{};};
  struct Target {
   GameObjectId id{};std::string key;float hp{},initial{},radius{};
   MechEnemyKind kind{MechEnemyKind::Dummy};
@@ -233,7 +266,11 @@ struct MechaGame::Impl {
  float orbitYaw{},orbitPitch{.23F},gaitPhase{};
  bool jetAirborne{},jetActive{},lastCamera{},lastLock{};
  std::string lockKey;
+ MechLegIkConfig ikConfig{};
+ float footLift{.34F},stepReach{.85F};
+ std::array<FootState,2> feet{};
  std::vector<Leg> legs;
+ std::vector<FootPad> footPads;
  std::vector<Target> targets;
  std::vector<MechProjectile> rockets;
  std::vector<RacingVisualEffect> impacts;
@@ -274,21 +311,155 @@ struct MechaGame::Impl {
   cam.target=plus(cam.target,scaled(minus(focus,cam.target),alpha));
   cam.up={0,0,1};
  }
+ // Must match the distance-driven gait phase advance in tick().
+ static constexpr float gaitRadiansPerMeter=2.5F;
+ // Fastest stride progress (eased 0..1 per second): bounds how far a foot can move in one frame.
+ static constexpr float kSwingMaxRate=20.F;
+ // Speed (m/s) at which a foot finishes a stride after the mech stops.
+ static constexpr float kFinishSpeed=8.F;
+ // How far ahead of the hip a landing foot can sit: stepReach, limited to what the legs can span
+ // (with margin) from the current hip height above the foot.
+ float stance_half_reach(Float3 hip,Float3 foot)const{
+  const float dz=hip.z-foot.z,span=ikConfig.thighLength+ikConfig.shinLength-.12F;
+  return std::min(stepReach,std::sqrt(std::max(0.F,span*span-dz*dz))*.92F);
+ }
+ static int foot_index(int side){return side<0?0:1;}
+ Float3 hip_at(int side)const{
+  return plus(motor.position,rotate(rotation(motor.legsYaw),
+               {float(side)*1.0F,0,2.05F}));
+ }
+ Float3 neutral_ankle(int side)const{
+  return plus(motor.position,rotate(rotation(motor.legsYaw),
+               {float(side)*1.0F,0,.16F}));
+ }
+ // `hipRef` is where the hip will be when the foot is down (the current hip for a stance probe).
+ std::optional<GroundContact> ground(Float3 xy,Float3 hipRef)const{
+  // Use the same world query for polygons and destructible voxels. Probe again
+  // while planted: demolished supports invalidate foot planting immediately.
+  const Float3 origin{xy.x,xy.y,motor.position.z+2.35F};
+  const auto hit=world.raycast(origin,{0,0,-1},5.0F);
+  if(!hit||!finite3(hit->worldPosition)||!finite3(hit->worldNormal)||
+      hit->worldNormal.z<.46F)return std::nullopt;
+  // A high overhang or deep chasm may be ray-visible but is NOT reachable
+  // by the authored two-link leg. Never classify it as a planted contact.
+  const auto ankle=plus(hit->worldPosition,scaled(unit(hit->worldNormal),.115F));
+  if(hit->worldPosition.z>motor.position.z+1.0F||
+     mag(minus(ankle,hipRef))>
+        ikConfig.thighLength+ikConfig.shinLength-.035F)return std::nullopt;
+  return GroundContact{ankle,unit(hit->worldNormal)};
+ }
+ void update_feet(float horizontalMeters,float dt,bool snap=false){
+  if(legs.empty())return;
+  for(const int side:{-1,1}){
+   auto& f=feet[foot_index(side)];
+   const auto home=neutral_ankle(side);
+   const auto hip=hip_at(side);
+   if(!f.initialized||snap){
+    const auto hit=ground(home,hip);
+    f.ankle=hit?hit->point:home;
+    f.swingFrom=f.swingTo=f.ankle;
+    f.normal=hit?hit->normal:Float3{0,0,1};
+    f.initialized=true;f.planted=bool(hit);f.supported=bool(hit);
+    f.lastSwing=false;
+   }
+   if(jetAirborne){
+    f.ankle=plus(home,{0,0,.26F});
+    f.planted=f.supported=f.lastSwing=false;
+    f.normal={0,0,1};
+    continue;
+   }
+   const float cycle=std::fmod(std::fmod(gaitPhase+(side>0?pi:0.F),2.F*pi)+2.F*pi,2.F*pi);
+   const bool wantsSwing=horizontalMeters>.0002F&&cycle<pi;
+   bool stance=true;
+   if(!wantsSwing&&f.lastSwing){
+    // The mech stopped (or the cycle left the swing half) mid-stride: finish the step. The planned
+    // landing assumed the hip would keep travelling, so pull it back within reach of the hip, then
+    // move the foot there at a bounded speed; it never pops to the landing spot.
+    auto to=f.swingTo;
+    const float dz=hip.z-to.z,span=ikConfig.thighLength+ikConfig.shinLength-.12F;
+    const float allowed=std::sqrt(std::max(0.F,span*span-dz*dz))*.92F;
+    const float ox=to.x-hip.x,oy=to.y-hip.y,offset=std::hypot(ox,oy);
+    if(offset>allowed&&offset>1.e-6F){to.x=hip.x+ox*(allowed/offset);to.y=hip.y+oy*(allowed/offset);}
+    if(const auto hit=ground(to,hip)){to=hit->point;f.normal=hit->normal;f.supported=true;}
+    else f.supported=false;
+    f.swingTo=to;
+    const auto remaining=minus(to,f.ankle);
+    const float distance=mag(remaining),step=kFinishSpeed*std::max(dt,0.F);
+    f.planted=false;
+    if(distance<=step||distance<1.e-3F){f.ankle=to;f.lastSwing=false;}
+    else{f.ankle=plus(f.ankle,scaled(remaining,step/distance));stance=false;}
+   }else if(wantsSwing){
+    float current=0.F; // eased progress along the stride, recovered from the foot itself
+    if(!f.lastSwing){
+     const auto horizontal=Float3{motor.velocity.x,motor.velocity.y,0};
+     const auto direction=mag(horizontal)>.1F?unit(horizontal):facing(motor.legsYaw);
+     // The hip keeps travelling for the rest of the swing, so aim at where the hip WILL be, with the
+     // foot a little ahead of it (stepReach, limited to what the legs can actually span).
+     const float remaining=std::max(0.F,pi-cycle)/gaitRadiansPerMeter;
+     const auto landingHip=plus(hip,scaled(direction,remaining));
+     const auto desired=plus(home,scaled(direction,remaining+stance_half_reach(hip,f.ankle)));
+     const auto hit=ground(desired,landingHip);
+     f.swingFrom=f.ankle;
+     f.swingTo=hit?hit->point:plus(home,scaled(direction,remaining));
+     f.normal=hit?hit->normal:Float3{0,0,1};
+     f.supported=bool(hit);
+    }else{
+     const float sx=f.swingTo.x-f.swingFrom.x,sy=f.swingTo.y-f.swingFrom.y,len2=sx*sx+sy*sy;
+     current=len2>1.e-4F?std::clamp(((f.ankle.x-f.swingFrom.x)*sx+(f.ankle.y-f.swingFrom.y)*sy)/len2,0.F,1.F):1.F;
+    }
+    // Follow the gait cycle, never moving backwards and never faster than a bounded rate, so a
+    // frame hitch or a restore cannot teleport the foot.
+    const float t=cycle/pi,target=t*t*(3.F-2.F*t);
+    const float eased=std::clamp(target,current,std::min(1.F,current+std::max(dt,0.F)*kSwingMaxRate));
+    const float phase=.5F-std::sin(std::asin(std::clamp(1.F-2.F*eased,-1.F,1.F))/3.F); // inverse smoothstep
+    f.ankle=plus(plus(scaled(f.swingFrom,1.F-eased),scaled(f.swingTo,eased)),
+                 {0,0,footLift*std::sin(pi*phase)});
+    f.planted=false;f.lastSwing=true;stance=false;
+   }
+   if(stance){
+    // Foot XY stays in world space during stance. We adjust only its height to
+    // track terrain changes and keep planted feet from sliding with the hips.
+    // A stance foot that the hip has outrun is dragged along at full extension (continuous), never
+    // teleported to a new place.
+    const float dz=hip.z-f.ankle.z,span=ikConfig.thighLength+ikConfig.shinLength-.08F;
+    const float maxHorizontal=std::sqrt(std::max(0.F,span*span-dz*dz));
+    const float dx=f.ankle.x-hip.x,dy=f.ankle.y-hip.y,dist=std::hypot(dx,dy);
+    if(dist>maxHorizontal&&dist>1.e-6F){
+     f.ankle.x=hip.x+dx*(maxHorizontal/dist);f.ankle.y=hip.y+dy*(maxHorizontal/dist);
+    }
+    auto support=ground(f.ankle,hip);
+    if(support){
+     f.ankle={f.ankle.x,f.ankle.y,support->point.z};
+     f.normal=support->normal;f.planted=f.supported=true;
+    }else{
+     // Missing voxel/floor support: do not leave a weight-bearing foot hovering.
+     f.ankle=plus(home,{0,0,.28F});
+     f.normal={0,0,1};f.planted=f.supported=false;
+    }
+   }
+  }
+ }
  void publish(){
   (void)world.set_position(player,motor.position);
   (void)world.set_rotation(player,rotation(motor.legsYaw));
   if(torso){(void)world.set_position(torso,plus(motor.position,{0,0,2.F}));
    (void)world.set_rotation(torso,rotation(motor.torsoYaw));}
   for(const auto& leg:legs){
-   const float phase=gaitPhase+(leg.side>0?pi:0.F);
-   const float stride=jetAirborne?0.F:std::sin(phase);
-   const float lift=jetAirborne?.10F:std::max(0.F,stride)*.24F;
-   const float swing=leg.segment==0?.36F*stride:-.54F*std::max(0.F,-stride);
-   const Float3 local{float(leg.side),.23F*stride,
-      (leg.segment==0?1.55F:.55F)+lift};
-   (void)world.set_position(leg.id,plus(motor.position,rotate(rotation(motor.legsYaw),local)));
-   (void)world.set_rotation(leg.id,multiply(rotation(motor.legsYaw),
-       quaternion_from_axis_angle({1,0,0},swing)));
+   const auto& foot=feet[foot_index(leg.side)];
+   const auto hip=hip_at(leg.side);
+   const auto pole=rotate(rotation(motor.legsYaw),
+              {float(leg.side)*.16F,1.F,.03F});
+   const auto pose=solve_mech_leg_ik(hip,foot.ankle,pole,ikConfig,
+      rotate(rotation(motor.legsYaw),{0,1,0}));
+   if(!pose)continue;
+   (void)world.set_position(leg.id,leg.segment==0?pose->thighCenter:pose->shinCenter);
+   (void)world.set_rotation(leg.id,leg.segment==0?pose->thighRotation:pose->shinRotation);
+  }
+  for(const auto& pad:footPads){
+   const auto& foot=feet[foot_index(pad.side)];
+   (void)world.set_position(pad.id,foot.ankle);
+   (void)world.set_rotation(pad.id,multiply(
+       mech_align_z_axis(foot.normal),rotation(motor.legsYaw)));
   }
  }
  void refresh_hud(){
@@ -347,6 +518,7 @@ struct MechaGame::Impl {
    (void)world.set_enabled(t.id,true);(void)world.set_position(t.id,t.spawn);
    (void)world.set_rotation(t.id,rotation(0));
   }
+  feet={};update_feet(0.F,0.F,true);
   publish();camera(true);refresh_hud();
  }
  Target* locked(){
@@ -646,6 +818,7 @@ struct MechaGame::Impl {
    const float rest=std::round(gaitPhase/pi)*pi;
    gaitPhase=wrap(turn(gaitPhase,rest,dt*7.F));
   }
+  update_feet(horizontal,dt);
   const float aimX=axis(world.get_axis("look_x"));
   const float aimY=axis(world.get_axis("look_y"));
   if(cameraMode==MechCameraMode::ThirdPerson){
@@ -663,6 +836,14 @@ const PrototypeHud& MechaGame::hud()const noexcept{return impl_->hud;}
 PrototypeCamera MechaGame::camera()const noexcept{return impl_->cam;}
 const MechMotorState& MechaGame::motor()const noexcept{return impl_->motor;}
 MechCameraMode MechaGame::camera_mode()const noexcept{return impl_->cameraMode;}
+std::array<MechFootContact,2> MechaGame::foot_contacts()const noexcept{
+ std::array<MechFootContact,2> result{};
+ for(std::size_t i=0;i<2;++i){
+  const auto& f=impl_->feet[i];
+  result[i]={f.ankle,f.normal,f.planted,f.supported};
+ }
+ return result;
+}
 std::string_view MechaGame::locked_target_key()const noexcept{return impl_->lockKey;}
 const MechCombatTelemetry& MechaGame::telemetry()const noexcept{return impl_->telemetry;}
 std::span<const RacingVisualEffect> MechaGame::impact_visuals()const noexcept{return impl_->impacts;}
@@ -691,8 +872,15 @@ bool MechaGame::start(std::string* error){
    s.config.jetAcceleration=float(property(c,"jet_acceleration",22.0));
    s.config.jetDrainPerSecond=float(property(c,"jet_drain",32.0));
    s.config.maximumJetHeight=float(property(c,"jet_height",18.0));
+   s.ikConfig.thighLength=float(property(c,"thigh_length",1.15));
+   s.ikConfig.shinLength=float(property(c,"shin_length",1.10));
+   s.footLift=float(property(c,"foot_lift",.34));
+   s.stepReach=float(property(c,"step_reach",.85));
    s.cameraMode=s.authoredCameraMode=MechCameraMode(property(c,"camera_mode",std::int64_t{0}));
   }else if(c.type==torsoType)s.torso=o.id;
+  else if(c.type==footType){
+   s.footPads.push_back({o.id,int(property(c,"side",std::int64_t{1}))});
+  }
   else if(c.type==legType){
    s.legs.push_back({o.id,int(property(c,"side",std::int64_t{1})),
                           int(property(c,"segment",std::int64_t{0}))});
@@ -715,6 +903,9 @@ bool MechaGame::start(std::string* error){
    t.spawn=s.world.position(o.id).value_or(Float3{});
    s.targets.push_back(std::move(t));
   }
+ }
+ for(const auto& pad:s.footPads)if(s.world.has_collision(pad.id).value_or(true)){
+  if(error)*error="Mech visual feet cannot have physics collision";return false;
  }
  for(const auto& leg:s.legs)if(s.world.has_collision(leg.id).value_or(true)){
   if(error)*error="Mech visual legs cannot have physics collision";return false;
@@ -795,7 +986,7 @@ std::string MechaGame::save_state() const {
  // not produce a save that cannot be loaded, so such paths are dropped instead.
  const auto encode=[&](bool paths){
  std::ostringstream out;out.imbue(std::locale::classic());
- out<<std::setprecision(9)<<"DVE_MECHA 2 "<<unsigned(s.hud.phase)<<' '
+ out<<std::setprecision(9)<<"DVE_MECHA 3 "<<unsigned(s.hud.phase)<<' '
     <<s.hud.health<<' '<<int(s.hud.debug)<<' '<<int(s.extractionReady)<<' '
     <<s.motor.position.x<<' '<<s.motor.position.y<<' '<<s.motor.position.z<<' '
     <<s.motor.velocity.x<<' '<<s.motor.velocity.y<<' '<<s.motor.velocity.z<<' '
@@ -822,6 +1013,15 @@ std::string MechaGame::save_state() const {
      <<p.remainingSeconds<<' '<<p.sequence<<'\n';
  out<<"M6 "<<unsigned(s.cameraMode)<<' '<<s.orbitYaw<<' '<<s.orbitPitch<<' '
     <<int(s.jetAirborne)<<' '<<s.gaitPhase<<' '<<std::quoted(s.lockKey)<<'\n';
+ out<<"M7 2\n";
+ for(const auto& f:s.feet){
+  out<<int(f.initialized)<<' '<<int(f.planted)<<' '<<int(f.supported)<<' '
+     <<int(f.lastSwing)<<' '
+     <<f.ankle.x<<' '<<f.ankle.y<<' '<<f.ankle.z<<' '
+     <<f.swingFrom.x<<' '<<f.swingFrom.y<<' '<<f.swingFrom.z<<' '
+     <<f.swingTo.x<<' '<<f.swingTo.y<<' '<<f.swingTo.z<<' '
+     <<f.normal.x<<' '<<f.normal.y<<' '<<f.normal.z<<'\n';
+ }
  return out.str();
  };
  auto encoded=encode(true);
@@ -850,7 +1050,7 @@ bool MechaGame::after_restore(std::string_view encoded,std::string* error){
    >>telemetry.targetsDestroyed>>telemetry.impacts
    >>telemetry.voxelCarvesQueued>>telemetry.enemyShots
    >>telemetry.navigationReplans>>nTargets;
- if(!in||magic!="DVE_MECHA"||(version!=1&&version!=2)||phase>3||debug>1||ready>1
+ if(!in||magic!="DVE_MECHA"||(version!=1&&version!=2&&version!=3)||phase>3||debug>1||ready>1
     ||!finite3(motor.position)||!finite3(motor.velocity)
     ||!std::isfinite(motor.legsYaw)||!std::isfinite(motor.torsoYaw)
     ||!std::isfinite(motor.energy)||motor.energy<0||motor.energy>100
@@ -914,6 +1114,32 @@ bool MechaGame::after_restore(std::string_view encoded,std::string* error){
      (!savedLock.empty()&&!key_ok(savedLock)))
    return fail("invalid M6 camera, jet or lock state");
  }
+ std::array<Impl::FootState,2> savedFeet{};
+ if(version>=3){
+  std::string marker;unsigned count{};
+  in>>marker>>count;
+  if(!in||marker!="M7"||count!=2)return fail("invalid foot-state envelope");
+  for(auto& foot:savedFeet){
+   unsigned initialized{},planted{},supported{},swing{};
+   in>>initialized>>planted>>supported>>swing
+     >>foot.ankle.x>>foot.ankle.y>>foot.ankle.z
+     >>foot.swingFrom.x>>foot.swingFrom.y>>foot.swingFrom.z
+     >>foot.swingTo.x>>foot.swingTo.y>>foot.swingTo.z
+     >>foot.normal.x>>foot.normal.y>>foot.normal.z;
+   if(!in||initialized>1||planted>1||supported>1||swing>1||
+      !finite3(foot.ankle)||!finite3(foot.swingFrom)||
+      !finite3(foot.swingTo)||!finite3(foot.normal)||
+      mag(foot.normal)<.8F||mag(foot.normal)>1.2F||
+      (planted&&!initialized)||(supported&&!initialized)||
+      (planted&&!supported)||(planted&&swing)||
+      mag(minus(foot.ankle,motor.position))>25.F||
+      mag(minus(foot.swingFrom,motor.position))>25.F||
+      mag(minus(foot.swingTo,motor.position))>25.F)
+    return fail("invalid M7 foot state");
+   foot.initialized=initialized!=0;foot.planted=planted!=0;
+   foot.supported=supported!=0;foot.lastSwing=swing!=0;
+  }
+ }
  in>>std::ws;
  if(!in.eof())return fail("trailing data");
  if(defeated!=telemetry.targetsDestroyed||ready!=(defeated>=s.requiredTargets))
@@ -939,7 +1165,10 @@ bool MechaGame::after_restore(std::string_view encoded,std::string* error){
  s.orbitYaw=savedOrbit;s.orbitPitch=savedPitch;s.jetAirborne=savedAirborne!=0;
  s.jetActive=false;s.gaitPhase=savedGait;s.lockKey=std::move(savedLock);
  if(savedAirborne==0)motor.velocity.z=0; // a grounded mech carries no vertical velocity
+ if(version>=3)s.feet=savedFeet;
+ else s.feet={};
  s.motor=motor;s.primaryCooldown=primary;s.rocketCooldown=secondary;
+ if(version<3)s.update_feet(0.F,0.F,true);
  s.rounds=rounds;s.missiles=missiles;s.nextProjectile=next;s.boostUses=boosts;
  s.telemetry=telemetry;s.rockets=std::move(rockets);
  s.extractionReady=ready!=0;s.hud.phase=PrototypePhase(phase);

@@ -251,7 +251,7 @@ int main() {
                  <<" pso_seed_accepted="<<cache.diskSeedAccepted
                  <<" create_calls="<<cache.computeAttempts
                  <<" total_ns="<<cache.computeTotalNanoseconds
-                 <<" max_ns="<<cache.computeMaxNanoseconds<<"\\n";
+                 <<" max_ns="<<cache.computeMaxNanoseconds<<"\n";
         if(const char* path=std::getenv("DVE_PSO_CACHE_FILE");path&&*path)
             require(device.flush_pipeline_cache(),"PSO-1 failed to persist validated cache");
         std::cout << "dve_vulkan_compute_tests: PASS\n";

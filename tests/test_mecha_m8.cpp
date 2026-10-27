@@ -164,7 +164,7 @@ void checkpoint_rebinds_moving_support_without_resetting_footfall(){
  const auto snapshot=s.game->save_state();
  check(snapshot.starts_with("DVE_MECHA 3 "),"M8 keeps existing M7 controller envelope");
  std::string error;
- check(s.game->after_restore(snapshot,&error),"legacy current save reload: "+error);
+ if(!s.game->after_restore(snapshot,&error))throw std::runtime_error("M8 save reload: "+error);
  check(s.game->footstep_events().empty(),"loading does not play a false footstep");
  const auto feet=s.game->foot_contacts();
  check(feet[0].supportObject==s.ground&&feet[1].supportObject==s.ground,

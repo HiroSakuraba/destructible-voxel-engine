@@ -502,7 +502,7 @@ std::optional<PlayerSaveResult> PlayerApp::save_game(std::string_view slotOrPath
     if(impl.session.prototype){
         const auto state=impl.session.prototype->mecha_save_state();
         if(!state.empty()){
-            auto& bytes=data.gameSections["dve.prototype.mecha"];
+            auto& bytes=data.gameSections["game.mecha.v1"];
             bytes.reserve(state.size());
             for(const unsigned char value:state)bytes.push_back(static_cast<std::byte>(value));
         }
@@ -572,7 +572,7 @@ std::optional<PlayerLoadResult> PlayerApp::load_game(std::string_view slotOrPath
         impl.log(std::to_string(result.timersDropped) + " saved timer(s) had no callback after boot and were dropped");
 
     std::string mechaState;
-    if(const auto it=data->gameSections.find("dve.prototype.mecha");it!=data->gameSections.end()){
+    if(const auto it=data->gameSections.find("game.mecha.v1");it!=data->gameSections.end()){
         if(it->second.size()>65536U)return fail("mecha save section exceeds 64 KiB");
         mechaState.reserve(it->second.size());
         for(const auto value:it->second)mechaState.push_back(static_cast<char>(value));

@@ -1,6 +1,7 @@
 #include "dve/texture_native_cook.hpp"
 #include "dve/render/normal_bc5_codec.hpp"
 #include "dve/rhi/null_device.hpp"
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>

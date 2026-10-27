@@ -493,7 +493,7 @@ struct MechaGame::Impl {
    const auto& foot=feet[foot_index(pad.side)];
    (void)world.set_position(pad.id,foot.ankle);
    (void)world.set_rotation(pad.id,multiply(
-       mech_align_z_axis(foot.normal),rotation(motor.legsYaw)));
+       mech_align_z_axis(mech_limit_ankle_normal(foot.normal)),rotation(motor.legsYaw)));
   }
  }
  void refresh_hud(){

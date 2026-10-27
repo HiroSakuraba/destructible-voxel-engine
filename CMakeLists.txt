@@ -750,6 +750,7 @@ if(DVE_BUILD_RHI)
         src/render/cpu_fog_cache.cpp
         src/render/sprite_renderer.cpp
         src/render/texture_residency.cpp
+        src/render/material_bake_residency.cpp
         src/render/texture_preview.cpp
         src/render/text3d_renderer.cpp
         src/render/gabor_volume_renderer.cpp

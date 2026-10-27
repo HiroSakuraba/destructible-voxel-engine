@@ -114,8 +114,9 @@ PolygonTextureMipChain generate_semantic_texture_mips(const PolygonImage& image,
     return chain;
 }
 
-TextureResidencyManager::TextureResidencyManager(rhi::IDevice& device, std::size_t budgetBytes)
-    : device_(device) {
+TextureResidencyManager::TextureResidencyManager(rhi::IDevice& device, std::size_t budgetBytes,
+                                                 TextureBc7Encoder encoder)
+    : device_(device), bc7Encoder_(std::move(encoder)) {
     stats_.budgetBytes = std::max<std::size_t>(budgetBytes, 4U);
 }
 
@@ -151,7 +152,37 @@ bool TextureResidencyManager::enqueue(TextureUploadRequest request, std::string*
     if (pending.mipChain.levels.empty() || pending.bytes == 0U) {
         set_error(error, "texture residency mip generation failed"); return false;
     }
+    // Encode on the ingestion thread, never inside pump() on the render thread.
+    // The encoder is an optional host-supplied worker-safe callback, with no RHI access.
+    if (pending.request.compression == TextureCompressionPreference::PreferBc7 && bc7Encoder_) {
+        bool ok = false;
+        try {
+            std::string encodeError;
+            ok = bc7Encoder_(pending.mipChain, pending.bc7Blocks, &encodeError);
+        } catch (...) {
+            ok = false; // fail back to decoded RGBA8, preserving authoritative source
+        }
+        if (ok && pending.bc7Blocks.size() == pending.mipChain.levels.size()) {
+            for (std::size_t level=0U; level<pending.bc7Blocks.size(); ++level) {
+                const auto& mip = pending.mipChain.levels[level];
+                const auto bytes = rhi::texture_row_bytes(rhi::TextureFormat::BC7RGBAUnorm, mip.width) *
+                                   rhi::texture_rows(rhi::TextureFormat::BC7RGBAUnorm, mip.height);
+                if (pending.bc7Blocks[level].size() != bytes ||
+                    bytes > std::numeric_limits<std::size_t>::max() - pending.encodedBytes) {
+                    ok = false; break;
+                }
+                pending.encodedBytes += bytes;
+            }
+        } else ok = false;
+        if (!ok || pending.encodedBytes == 0U) {
+            pending.bc7Blocks.clear();
+            pending.encodedBytes = 0U;
+            pending.encodeFailed = true;
+        }
+    }
     std::scoped_lock lock(mutex_);
+    if (pending.encodedBytes != 0U) ++stats_.compressionEncoded;
+    if (pending.encodeFailed) ++stats_.compressionEncodeFailures;
     const auto queued = std::find_if(pending_.begin(), pending_.end(), [&](const Pending& item) {
         return item.request.assetId == pending.request.assetId;
     });
@@ -162,7 +193,9 @@ bool TextureResidencyManager::enqueue(TextureUploadRequest request, std::string*
             return false;
         }
         if (queued->sourceHash == pending.sourceHash &&
-            queued->request.semantic == pending.request.semantic) {
+            queued->request.semantic == pending.request.semantic &&
+            queued->request.compression == pending.request.compression &&
+            queued->request.generateMips == pending.request.generateMips) {
             ++stats_.unchangedRequests;
             return true;
         }
@@ -180,7 +213,9 @@ bool TextureResidencyManager::enqueue(TextureUploadRequest request, std::string*
             return false;
         }
         if (resident->second.sourceHash == pending.sourceHash &&
-            resident->second.semantic == pending.request.semantic) {
+            resident->second.semantic == pending.request.semantic &&
+            resident->second.compression == pending.request.compression &&
+            resident->second.generatedMips == pending.request.generateMips) {
             ++stats_.unchangedRequests;
             resident->second.lastUseSerial = serial_++;
             return true;
@@ -239,16 +274,28 @@ std::size_t TextureResidencyManager::pump(std::size_t maximumUploadBytes, std::s
             stats_.pendingCount = pending_.size();
             break;
         }
+        const bool useBc7 = pending.encodedBytes != 0U &&
+            pending.request.compression == TextureCompressionPreference::PreferBc7 &&
+            device_.texture_format_capabilities(
+                pending.request.semantic == TextureSemantic::BaseColor ||
+                pending.request.semantic == TextureSemantic::Emissive
+                    ? rhi::TextureFormat::BC7RGBASrgb
+                    : rhi::TextureFormat::BC7RGBAUnorm).sampled;
+        const std::size_t uploadBytes = useBc7 ? pending.encodedBytes : pending.bytes;
         const bool replacing = resident_.contains(pending.request.assetId);
-        if (!evict_until_fits(pending.bytes, pending.request.assetId, error)) {
+        if (!evict_until_fits(uploadBytes, pending.request.assetId, error)) {
             ++stats_.uploadsFailed;
             if (replacing) ++stats_.failedReplacementsPreserved;
             continue;
         }
-        if (pending.request.compression != TextureCompressionPreference::Uncompressed)
-            ++stats_.compressionFallbacks; // RHI currently exposes only uncompressed RGBA8.
+        if (!useBc7 && pending.request.compression != TextureCompressionPreference::Uncompressed)
+            ++stats_.compressionFallbacks;
         rhi::TextureDesc desc;
-        desc.format = rhi::TextureFormat::RGBA8Unorm;
+        desc.format = useBc7
+            ? ((pending.request.semantic == TextureSemantic::BaseColor ||
+                pending.request.semantic == TextureSemantic::Emissive)
+                ? rhi::TextureFormat::BC7RGBASrgb : rhi::TextureFormat::BC7RGBAUnorm)
+            : rhi::TextureFormat::RGBA8Unorm;
         desc.width = pending.mipChain.levels.front().width;
         desc.height = pending.mipChain.levels.front().height;
         desc.mipLevels = static_cast<std::uint32_t>(pending.mipChain.levels.size());
@@ -262,9 +309,15 @@ std::size_t TextureResidencyManager::pump(std::size_t maximumUploadBytes, std::s
         if (ok) {
             for (std::uint32_t mip = 0U; mip < desc.mipLevels; ++mip) {
                 const auto& level = pending.mipChain.levels[mip];
-                ok = device_.write_texture(texture, mip, 0U,
-                    std::as_bytes(std::span<const std::uint8_t>(level.rgba8)),
-                    static_cast<std::size_t>(level.width) * 4U, &localError);
+                const auto rowBytes = rhi::texture_row_bytes(desc.format, level.width);
+                if (useBc7) {
+                    ok = device_.write_texture(texture, mip, 0U,
+                        pending.bc7Blocks[mip], rowBytes, &localError);
+                } else {
+                    ok = device_.write_texture(texture, mip, 0U,
+                        std::as_bytes(std::span<const std::uint8_t>(level.rgba8)),
+                        rowBytes, &localError);
+                }
                 if (!ok) break;
             }
         }
@@ -293,13 +346,17 @@ std::size_t TextureResidencyManager::pump(std::size_t maximumUploadBytes, std::s
         ResidentTexture record;
         record.texture = texture; record.view = view; record.width = desc.width;
         record.height = desc.height; record.mipLevels = desc.mipLevels;
-        record.residentBytes = pending.bytes; record.sourceHash = pending.sourceHash;
-        record.semantic = pending.request.semantic; record.lastUseSerial = serial_++;
+        record.residentBytes = uploadBytes; record.sourceHash = pending.sourceHash;
+        record.semantic = pending.request.semantic;
+        record.compression = pending.request.compression;
+        record.format = desc.format;
+        record.generatedMips = pending.request.generateMips;
+        record.lastUseSerial = serial_++;
         if (auto existing = resident_.find(pending.request.assetId); existing != resident_.end()) {
             const ResidentTexture old = existing->second;
             record.generation = old.generation + 1U;
             existing->second = record;
-            stats_.residentBytes = stats_.residentBytes - old.residentBytes + pending.bytes;
+            stats_.residentBytes = stats_.residentBytes - old.residentBytes + uploadBytes;
             ++stats_.residentTexturesReplaced;
             std::string cleanupError;
             const bool viewDestroyed = device_.destroy_texture_view(old.view, &cleanupError);
@@ -307,11 +364,11 @@ std::size_t TextureResidencyManager::pump(std::size_t maximumUploadBytes, std::s
             if ((!viewDestroyed || !textureDestroyed) && error) *error = cleanupError;
         } else {
             resident_.emplace(pending.request.assetId, record);
-            stats_.residentBytes += pending.bytes;
+            stats_.residentBytes += uploadBytes;
         }
         stats_.residentCount = resident_.size();
         ++stats_.uploadsCompleted;
-        uploaded += pending.bytes;
+        uploaded += uploadBytes;
         if (uploaded >= maximumUploadBytes) break;
     }
     return uploaded;

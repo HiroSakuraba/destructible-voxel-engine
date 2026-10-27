@@ -310,15 +310,20 @@ struct MechaGame::Impl {
   return plus(motor.position,rotate(rotation(motor.legsYaw),
                {float(side)*1.0F,0,.16F}));
  }
- std::optional<GroundContact> ground(Float3 xy)const{
+ std::optional<GroundContact> ground(Float3 xy,int side)const{
   // Use the same world query for polygons and destructible voxels. Probe again
   // while planted: demolished supports invalidate foot planting immediately.
-  const Float3 origin{xy.x,xy.y,motor.position.z+config.height+.6F};
-  const auto hit=world.raycast(origin,{0,0,-1},config.height+5.5F);
+  const Float3 origin{xy.x,xy.y,motor.position.z+2.35F};
+  const auto hit=world.raycast(origin,{0,0,-1},5.0F);
   if(!hit||!finite3(hit->worldPosition)||!finite3(hit->worldNormal)||
       hit->worldNormal.z<.46F)return std::nullopt;
-  return GroundContact{plus(hit->worldPosition,scaled(unit(hit->worldNormal),.115F)),
-                       unit(hit->worldNormal)};
+  // A high overhang or deep chasm may be ray-visible but is NOT reachable
+  // by the authored two-link leg. Never classify it as a planted contact.
+  const auto ankle=plus(hit->worldPosition,scaled(unit(hit->worldNormal),.115F));
+  if(hit->worldPosition.z>motor.position.z+1.0F||
+     mag(minus(ankle,hip_at(side)))>
+        ikConfig.thighLength+ikConfig.shinLength-.035F)return std::nullopt;
+  return GroundContact{ankle,unit(hit->worldNormal)};
  }
  void update_feet(float horizontalMeters,bool snap=false){
   if(legs.empty())return;
@@ -327,7 +332,7 @@ struct MechaGame::Impl {
    const auto home=neutral_ankle(side);
    const auto hip=hip_at(side);
    if(!f.initialized||snap){
-    const auto hit=ground(home);
+    const auto hit=ground(home,side);
     f.ankle=hit?hit->point:home;
     f.swingFrom=f.swingTo=f.ankle;
     f.normal=hit?hit->normal:Float3{0,0,1};
@@ -348,7 +353,7 @@ struct MechaGame::Impl {
      const auto horizontal=Float3{motor.velocity.x,motor.velocity.y,0};
      const auto direction=mag(horizontal)>.1F?unit(horizontal):facing(motor.legsYaw);
      const auto desired=plus(home,scaled(direction,stepReach));
-     const auto hit=ground(desired);
+     const auto hit=ground(desired,side);
      f.swingTo=hit?hit->point:home;
      f.normal=hit?hit->normal:Float3{0,0,1};
      f.supported=bool(hit);
@@ -363,10 +368,10 @@ struct MechaGame::Impl {
     f.lastSwing=false;
     // Foot XY stays in world space during stance. We adjust only its height to
     // track terrain changes and keep planted feet from sliding with the hips.
-    auto support=ground(f.ankle);
+    auto support=ground(f.ankle,side);
     const auto distance=mag(minus(f.ankle,hip));
     if(distance>ikConfig.thighLength+ikConfig.shinLength-.08F)
-     support=ground(home),f.ankle=home;
+     support=ground(home,side),f.ankle=home;
     if(support){
      f.ankle={f.ankle.x,f.ankle.y,support->point.z};
      f.normal=support->normal;f.planted=f.supported=true;

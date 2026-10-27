@@ -5,6 +5,7 @@
 //     per-pixel AO match the CPU mirror of the same four passes, and the GPU's AO averaged over
 //     frames matches the exact open-sky share at the bottom of a slot.
 // Set DVE_REQUIRE_AO_GPU=1 to fail, rather than skip, when no Vulkan device is available.
+#include "dve_test_skip.hpp"
 #include "dve/network_crypto.hpp"
 #include "dve/render/ambient_occlusion.hpp"
 #include "dve/render/ambient_occlusion_gpu.hpp"
@@ -170,13 +171,13 @@ int main() {
     } else if (std::getenv("DVE_REQUIRE_AO_GPU") != nullptr) {
         check(false, std::string("Vulkan unavailable: ") + std::string(device.device_loss_reason()));
     } else {
-        std::printf("Vulkan AO check skipped: no Vulkan device\n");
+        dve::testing::note_skip("Vulkan AO check: no Vulkan device");
     }
 #else
     if (std::getenv("DVE_REQUIRE_AO_GPU") != nullptr) check(false, "built without the Vulkan backend");
-    else std::printf("Vulkan AO check skipped: built without the Vulkan backend\n");
+    else dve::testing::note_skip("Vulkan AO check: built without the Vulkan backend");
 #endif
 
     if (g_failures == 0) std::printf("dve_ambient_occlusion_gpu_tests: PASS\n");
-    return g_failures == 0 ? 0 : 1;
+    return dve::testing::exit_code(g_failures != 0);
 }

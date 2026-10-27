@@ -3616,6 +3616,10 @@ endif()
 
 # Packaging plan, Phase 3: install() rules, the exported dve CMake package, runtime-dependency
 # bundling, CPack (TGZ/DEB; ZIP/NSIS stubs for Windows) and the install/consumer/cpack tests.
+# Which optional test groups this configuration builds (dve_test_coverage), required groups
+# (DVE_REQUIRE_TEST_GROUPS) and SKIP_RETURN_CODE 77 on every test. The work runs deferred, at the end
+# of this file, so it sees every target and test whatever the include order.
+include(DveTestCoverage)
 include(DveInstall)
 include(DveCPack)
 

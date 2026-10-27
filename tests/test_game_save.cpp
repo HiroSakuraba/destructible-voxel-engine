@@ -1,5 +1,6 @@
 // Save games (dve/game_save.hpp): GameWorld capture/restore round trips, destruction deltas,
 // the DVESAVE1 container's corruption handling, schema migrations and (with Lua) script state.
+#include "dve_test_skip.hpp"
 #include "dve/voxel_normal_map.hpp"
 #include "dve/voxel_textures.hpp"
 #include "dve/camera_runtime.hpp"
@@ -1567,7 +1568,7 @@ int main() {
             test_round_trip(Physics3DBackend::Jolt, "jolt");
             test_destruction(Physics3DBackend::Jolt, "jolt");
         } else {
-            std::cout << "Jolt not compiled in; skipping the Jolt round trips\n";
+            dve::testing::note_skip("Jolt round trips: Jolt not compiled in");
         }
     }
     test_corruption();
@@ -1580,11 +1581,13 @@ int main() {
     test_script_state();
     test_script_state_v2();
     test_script_state_v3_fog_height();
+#else
+    dve::testing::note_skip("script-state save tests: built without Lua (DVE_ENABLE_LUA=OFF)");
 #endif
     if (failures != 0) {
         std::cerr << failures << " failure(s)\n";
         return 1;
     }
     std::cout << "dve_game_save_tests passed\n";
-    return 0;
+    return dve::testing::exit_code(false);
 }

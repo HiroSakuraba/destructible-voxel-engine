@@ -1,3 +1,4 @@
+#include "dve_test_skip.hpp"
 #include "dve/render/radiance_cascade_gpu_probes.hpp"
 #include "dve/rhi/null_device.hpp"
 #ifdef DVE_RC_HAS_VULKAN
@@ -115,15 +116,15 @@ int main() {
                 std::string("Vulkan unavailable: ") + std::string(device.device_loss_reason()) :
                 "DVE_RC_PROBE_SPV is required for GPU validation");
         } else {
-            std::cout << "Vulkan probe readback skipped: set DVE_RC_PROBE_SPV and provide an ICD\n";
+            dve::testing::note_skip("Vulkan probe readback: set DVE_RC_PROBE_SPV and provide an ICD");
         }
 #else
         if (std::getenv("DVE_REQUIRE_RC_GPU") != nullptr)
             throw std::runtime_error("Vulkan backend was not built");
-        std::cout << "Vulkan probe readback skipped: Vulkan backend was not built\n";
+        dve::testing::note_skip("Vulkan probe readback: Vulkan backend was not built");
 #endif
         std::cout << "dve_rc_gpu_probe_tests: PASS\n";
-        return 0;
+        return dve::testing::exit_code(false);
     } catch (const std::exception& exception) {
         std::cerr << "dve_rc_gpu_probe_tests: FAIL: " << exception.what() << '\n';
         return 1;

@@ -4,6 +4,7 @@
 //   - on a real Vulkan device (any ICD; Mesa's lavapipe is enough): the transmittance, multiple-
 //     scattering and sky-view tables match the CPU's for a clear noon, a low sun and a hazy day.
 // Set DVE_REQUIRE_ATMOSPHERE_GPU=1 to fail, rather than skip, when no Vulkan device is available.
+#include "dve_test_skip.hpp"
 #include "dve/network_crypto.hpp"
 #include "dve/render/atmosphere.hpp"
 #include "dve/render/atmosphere_gpu.hpp"
@@ -132,13 +133,13 @@ int main() {
     } else if (std::getenv("DVE_REQUIRE_ATMOSPHERE_GPU") != nullptr) {
         check(false, std::string("Vulkan unavailable: ") + std::string(device.device_loss_reason()));
     } else {
-        std::printf("Vulkan atmosphere check skipped: no Vulkan device\n");
+        dve::testing::note_skip("Vulkan atmosphere check: no Vulkan device");
     }
 #else
     if (std::getenv("DVE_REQUIRE_ATMOSPHERE_GPU") != nullptr) check(false, "built without the Vulkan backend");
-    else std::printf("Vulkan atmosphere check skipped: built without the Vulkan backend\n");
+    else dve::testing::note_skip("Vulkan atmosphere check: built without the Vulkan backend");
 #endif
 
     if (g_failures == 0) std::printf("dve_atmosphere_gpu_tests: PASS\n");
-    return g_failures == 0 ? 0 : 1;
+    return dve::testing::exit_code(g_failures != 0);
 }

@@ -1,3 +1,4 @@
+#include "dve_test_skip.hpp"
 #include "dve/render/main_material_table.hpp"
 #include "dve/rhi/vulkan_device.hpp"
 
@@ -31,8 +32,7 @@ int main() {
         dve::rhi::VulkanDevice device;
         if (device.status() != dve::rhi::DeviceStatus::Ready) {
             if (std::getenv("DVE_REQUIRE_VULKAN")) throw std::runtime_error(std::string(device.device_loss_reason()));
-            std::cout << "Vulkan main material table test skipped\n";
-            return 0;
+            return dve::testing::skip("Vulkan main material table test: no Vulkan device");
         }
         std::string error;
         dve::rhi::TextureDesc shadowDesc;

@@ -23,6 +23,7 @@ namespace dve {
 namespace {
 constexpr std::string_view playerType="dve.prototype.mech_player";
 constexpr std::string_view torsoType="dve.prototype.mech_torso";
+constexpr std::string_view legType="dve.prototype.mech_leg";
 constexpr std::string_view targetType="dve.prototype.mech_target";
 constexpr std::string_view rulesType="dve.prototype.mech_rules";
 constexpr std::string_view extractionType="dve.prototype.mech_extraction";
@@ -45,7 +46,7 @@ template<class T>T property(const Component& c,std::string_view key,T fallback){
  if(it!=c.properties.end())if(const auto v=std::get_if<T>(&it->second))return *v;
  return fallback;
 }
-bool actor_type(std::string_view t){return t==playerType||t==torsoType||t==targetType||t==rulesType||t==extractionType;}
+bool actor_type(std::string_view t){return t==playerType||t==torsoType||t==targetType||t==rulesType||t==extractionType||t==legType;}
 bool key_ok(std::string_view s){
  return !s.empty()&&s.size()<=64&&s.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")==std::string_view::npos;
 }
@@ -69,7 +70,10 @@ bool valid_mech_motor_config(const MechMotorConfig& c) noexcept {
  std::isfinite(c.boostEnergyCost)&&c.boostEnergyCost>0&&c.boostEnergyCost<=100&&
  std::isfinite(c.energyRegeneration)&&c.energyRegeneration>=0&&c.energyRegeneration<=100&&
  std::isfinite(c.radius)&&c.radius>=.2F&&c.radius<=5&&
- std::isfinite(c.height)&&c.height>=2*c.radius&&c.height<=20;
+ std::isfinite(c.height)&&c.height>=2*c.radius&&c.height<=20&&
+ std::isfinite(c.jetAcceleration)&&c.jetAcceleration>=9.81F&&c.jetAcceleration<=90.F&&
+ std::isfinite(c.jetDrainPerSecond)&&c.jetDrainPerSecond>0&&c.jetDrainPerSecond<=100.F&&
+ std::isfinite(c.maximumJetHeight)&&c.maximumJetHeight>=3.F&&c.maximumJetHeight<=60.F;
 }
 Float3 integrate_mech_motor(MechMotorState& s,const MechMotorConfig& cfg,
                             MechMotorInput in,float dt) noexcept {
@@ -86,7 +90,7 @@ Float3 integrate_mech_motor(MechMotorState& s,const MechMotorConfig& cfg,
  const auto delta=minus(desired,Float3{s.velocity.x,s.velocity.y,0});
  const float maxDelta=(amplitude>.01F?cfg.acceleration:cfg.braking)*dt;
  const auto correction=scaled(delta,mag(delta)>maxDelta?maxDelta/mag(delta):1.F);
- s.velocity.x+=correction.x;s.velocity.y+=correction.y;s.velocity.z=0;
+ s.velocity.x+=correction.x;s.velocity.y+=correction.y; // M6: do not erase vertical jet velocity.
  if(boost){s.velocity.x=desired.x;s.velocity.y=desired.y;}
  if(amplitude>.05F)s.legsYaw=turn(s.legsYaw,angle_to(move),dt*4.5F);
  return scaled(s.velocity,dt);
@@ -105,8 +109,15 @@ void register_mecha_components(ComponentTypeRegistry& r){
   {"acceleration",24.0,false,false,"Acceleration (m/s2)"},
   {"boost_speed",24.0,false,false,"Directional boost speed (m/s)"},
   {"radius",.95,false,false,"Collision capsule radius (m)"},
-  {"height",3.5,false,false,"Collision capsule height (m)"}});
+  {"height",3.5,false,false,"Collision capsule height (m)"},
+  {"camera_mode",std::int64_t{0},false,false,"0 tactical, 1 third person"},
+  {"jet_acceleration",22.0,false,false,"Jump-jet vertical acceleration"},
+  {"jet_drain",32.0,false,false,"Jump-jet energy consumed per second"},
+  {"jet_height",18.0,false,false,"Maximum jump height above spawn"}});
  add(std::string(torsoType),"Mech rotating torso (visual-only)",{});
+ add(std::string(legType),"Mech gait segment (visual-only)",{
+  {"side",std::int64_t{1},false,false,"-1 left, 1 right"},
+  {"segment",std::int64_t{0},false,false,"0 thigh, 1 shin"}});
  add(std::string(targetType),"Mech target (visual-only)",{
   {"health",100.0,false,false,"Hit points"},
   {"hit_radius",1.2,false,false,"Gameplay hit sphere radius"},
@@ -125,6 +136,7 @@ bool validate_mecha_scene(std::span<const PrototypeObjectView> objects,std::stri
  const auto registry=ComponentTypeRegistry::make_default();
  std::set<std::string> keys;
  int players=0,rules=0,torsos=0,targets=0,extractions=0;std::int64_t requiredTargets=0;
+ std::set<std::pair<std::int64_t,std::int64_t>> legSlots;
  for(const auto& o:objects){
   unsigned roles=0;
   for(const auto& c:o.components)if(c.enabled&&c.type.starts_with(kPrototypePrefix)){
@@ -145,9 +157,21 @@ bool validate_mecha_scene(std::span<const PrototypeObjectView> objects,std::stri
     cfg.acceleration=float(property(c,"acceleration",24.0));
     cfg.boostSpeed=float(property(c,"boost_speed",24.0));
     cfg.radius=float(property(c,"radius",.95));cfg.height=float(property(c,"height",3.5));
+    cfg.jetAcceleration=float(property(c,"jet_acceleration",22.0));
+    cfg.jetDrainPerSecond=float(property(c,"jet_drain",32.0));
+    cfg.maximumJetHeight=float(property(c,"jet_height",18.0));
+    const auto camera=property(c,"camera_mode",std::int64_t{0});
+    if(camera<0||camera>1)return fail("Invalid mech camera mode");
     if(!valid_mech_motor_config(cfg))return fail("Invalid mech motor configuration");
    }
    if(c.type==torsoType){++torsos;if(o.marker)return fail("Mech torso needs visible geometry");}
+   if(c.type==legType){
+    if(o.marker)return fail("Mech gait segment needs visible geometry");
+    const auto side=property(c,"side",std::int64_t{1});
+    const auto segment=property(c,"segment",std::int64_t{0});
+    if((side!=-1&&side!=1)||(segment!=0&&segment!=1)||
+       !legSlots.emplace(side,segment).second)return fail("Invalid or duplicate leg segment slot");
+   }
    if(c.type==targetType){++targets;if(o.marker)return fail("Mech target needs visible geometry");
     auto h=property(c,"health",100.0),r=property(c,"hit_radius",1.2);
     if(!std::isfinite(h)||h<=0||h>100000||!std::isfinite(r)||r<.1||r>10)return fail("Invalid mech target health or radius");
@@ -161,10 +185,12 @@ bool validate_mecha_scene(std::span<const PrototypeObjectView> objects,std::stri
    }
   }
  }
- if(players!=1||rules!=1||torsos>1||extractions>1||targets<1||targets>64||requiredTargets>targets)return fail("Mech scene requires one player, one rules marker, at most one torso and 64 targets");
+ if(players!=1||rules!=1||torsos>1||extractions>1||targets<1||targets>64||requiredTargets>targets||
+    (!legSlots.empty()&&legSlots.size()!=4))return fail("Mech scene requires one player, one rules marker, at most one torso and 64 targets");
  return true;
 }
 struct MechaGame::Impl {
+ struct Leg {GameObjectId id{};int side{},segment{};};
  struct Target {
   GameObjectId id{};std::string key;float hp{},initial{},radius{};
   MechEnemyKind kind{MechEnemyKind::Dummy};
@@ -199,6 +225,11 @@ struct MechaGame::Impl {
  Float3 start{};
  float primaryCooldown{},rocketCooldown{},cameraFollow{};
  bool lastBoost{},lastPause{},lastRestart{},lastDebug{},started{};
+ MechCameraMode cameraMode{MechCameraMode::Tactical};
+ float orbitYaw{},orbitPitch{.23F},gaitPhase{};
+ bool jetAirborne{},jetActive{},lastCamera{},lastLock{};
+ std::string lockKey;
+ std::vector<Leg> legs;
  std::vector<Target> targets;
  std::vector<MechProjectile> rockets;
  std::vector<RacingVisualEffect> impacts;
@@ -207,18 +238,46 @@ struct MechaGame::Impl {
  std::uint64_t boostUses{};
  explicit Impl(GameWorld& w):world(w){hud.active=false;hud.mecha=true;hud.maximumHealth=hud.health=100;}
  void camera(bool snap=false){
-  const Float3 focus=plus(motor.position,{0,0,1.5F});
-  const Float3 desired=plus(focus,{0,-28,35});
+  const Float3 focus=plus(motor.position,{0,0,cameraMode==MechCameraMode::ThirdPerson?2.45F:1.5F});
+  Float3 desired;
+  if(cameraMode==MechCameraMode::Tactical){
+   desired=plus(focus,{0,-28,35});
+   cam.verticalFovRadians=.85F;
+  }else{
+   // Z-up shoulder camera: orbit yaw independent of the running chassis, pitched
+   // upward to show ground and cover. Geometry clip avoids seeing through walls.
+   const auto along=facing(orbitYaw);
+   const Float3 right{along.y,-along.x,0};
+   const float dist=11.F;
+   desired=plus(focus,plus(scaled(along,-dist*std::cos(orbitPitch)),
+                 plus(scaled(right,1.05F),{0,0,dist*std::sin(orbitPitch)+1.1F})));
+   const auto ray=minus(desired,focus);const float length=mag(ray);
+   if(length>.1F)if(const auto hit=world.raycast(focus,scaled(ray,1.F/length),length)){
+    desired=plus(focus,scaled(ray,std::clamp((hit->distance-.35F)/length,.08F,1.F)));
+   }
+   cam.verticalFovRadians=1.03F;
+  }
   const float alpha=snap?1.F:.18F;
   cam.position=plus(cam.position,scaled(minus(desired,cam.position),alpha));
   cam.target=plus(cam.target,scaled(minus(focus,cam.target),alpha));
-  cam.up={0,0,1};cam.verticalFovRadians=.85F;
+  cam.up={0,0,1};
  }
  void publish(){
   (void)world.set_position(player,motor.position);
   (void)world.set_rotation(player,rotation(motor.legsYaw));
   if(torso){(void)world.set_position(torso,plus(motor.position,{0,0,2.F}));
    (void)world.set_rotation(torso,rotation(motor.torsoYaw));}
+  for(const auto& leg:legs){
+   const float phase=gaitPhase+(leg.side>0?pi:0.F);
+   const float stride=jetAirborne?0.F:std::sin(phase);
+   const float lift=jetAirborne?.10F:std::max(0.F,stride)*.24F;
+   const float swing=leg.segment==0?.36F*stride:-.54F*std::max(0.F,-stride);
+   const Float3 local{float(leg.side),.23F*stride,
+      (leg.segment==0?1.55F:.55F)+lift};
+   (void)world.set_position(leg.id,plus(motor.position,rotate(rotation(motor.legsYaw),local)));
+   (void)world.set_rotation(leg.id,multiply(rotation(motor.legsYaw),
+       quaternion_from_axis_angle({1,0,0},swing)));
+  }
  }
  void refresh_hud(){
   hud.active=true;

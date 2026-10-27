@@ -101,6 +101,8 @@ struct TextureResidencyStats {
 // BC7 block stream per mip. Returning false falls back to RGBA8.
 using TextureBc7Encoder = std::function<bool(
     const PolygonTextureMipChain&, std::vector<std::vector<std::byte>>&, std::string*)>;
+// Same mip-chain callback contract for two BC4_UNORM planes (BC5).
+using TextureBc5Encoder = TextureBc7Encoder;
 
 // Control/upload-thread texture residency. enqueue() is thread-safe and performs no RHI work;
 // pump() owns all device interaction and can be bounded per frame by upload bytes.
@@ -108,7 +110,8 @@ class TextureResidencyManager {
 public:
     explicit TextureResidencyManager(rhi::IDevice& device,
                                      std::size_t budgetBytes = 256U * 1024U * 1024U,
-                                     TextureBc7Encoder encoder = {});
+                                     TextureBc7Encoder encoder = {},
+                                     TextureBc5Encoder bc5Encoder = {});
     ~TextureResidencyManager();
     TextureResidencyManager(const TextureResidencyManager&) = delete;
     TextureResidencyManager& operator=(const TextureResidencyManager&) = delete;
@@ -129,7 +132,9 @@ private:
         TextureUploadRequest request;
         PolygonTextureMipChain mipChain;
         std::vector<std::vector<std::byte>> bc7Blocks;
+        std::vector<std::vector<std::byte>> bc5Blocks;
         std::size_t encodedBytes{};
+        std::size_t bc5EncodedBytes{};
         bool encodeFailed{};
         std::size_t bytes{};
         std::uint64_t sourceHash{};
@@ -137,6 +142,7 @@ private:
     enum class Admission { Proceed, Unchanged, Rejected };
     struct UploadChoice {
         bool useBc7{};
+        bool useBc5{};
         rhi::TextureFormat format{rhi::TextureFormat::RGBA8Unorm};
         std::size_t bytes{};
     };
@@ -149,6 +155,7 @@ private:
 
     rhi::IDevice& device_;
     const TextureBc7Encoder bc7Encoder_;
+    const TextureBc5Encoder bc5Encoder_;
     mutable std::mutex mutex_;
     std::deque<Pending> pending_;
     std::unordered_map<std::uint64_t, ResidentTexture> resident_;

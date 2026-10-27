@@ -97,6 +97,7 @@ message(STATUS "DVE geometry profile: ${DVE_GEOMETRY_MODE_NORMALIZED}")
 add_library(dve_core
     src/material_surface_detail.cpp
     src/compressed_texture.cpp
+    src/texture_native_cook.cpp
     src/brick.cpp
     src/voxel_object.cpp
     src/damage.cpp
@@ -751,6 +752,7 @@ if(DVE_BUILD_RHI)
         src/render/sprite_renderer.cpp
         src/render/texture_residency.cpp
         src/render/material_bake_residency.cpp
+        src/render/normal_bc5_codec.cpp
         src/render/texture_preview.cpp
         src/render/text3d_renderer.cpp
         src/render/gabor_volume_renderer.cpp
@@ -2008,6 +2010,9 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_compressed_texture_tests tests/test_compressed_texture.cpp)
         target_link_libraries(dve_compressed_texture_tests PRIVATE dve::core dve::rhi)
         add_test(NAME dve_compressed_texture_tests COMMAND dve_compressed_texture_tests)
+        add_executable(dve_texture_native_cook_tests tests/test_texture_native_cook.cpp)
+        target_link_libraries(dve_texture_native_cook_tests PRIVATE dve::core dve::rhi)
+        add_test(NAME dve_texture_native_cook_tests COMMAND dve_texture_native_cook_tests)
         add_executable(dve_texture_t1_format_tests tests/test_texture_t1_formats.cpp)
         target_link_libraries(dve_texture_t1_format_tests PRIVATE dve::core dve::rhi)
         add_test(NAME dve_texture_t1_format_tests COMMAND dve_texture_t1_format_tests)
@@ -3404,6 +3409,12 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     add_executable(dve_texture_residency_tests tests/test_texture_residency.cpp)
     target_link_libraries(dve_texture_residency_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_texture_residency_tests COMMAND dve_texture_residency_tests)
+    add_executable(dve_texture_bc5_tests tests/test_texture_bc5.cpp)
+    target_link_libraries(dve_texture_bc5_tests PRIVATE dve::render_bridge dve::rhi)
+    add_test(NAME dve_texture_bc5_tests COMMAND dve_texture_bc5_tests)
+    add_executable(dve_texture_bc5_quality_bench apps/dve_texture_bc5_quality_bench.cpp)
+    target_link_libraries(dve_texture_bc5_quality_bench PRIVATE dve::render_bridge)
+
 
     add_executable(dve_hybrid_reference_rendering_tests tests/test_hybrid_reference_rendering.cpp)
     target_link_libraries(dve_hybrid_reference_rendering_tests PRIVATE dve::render_bridge)
@@ -3803,5 +3814,25 @@ if(DVE_ENABLE_BC7F_POC OR DVE_ENABLE_BC7F_ENCODER)
             target_link_libraries(dve_texture_bc7f_residency_tests PRIVATE dve_texture_bc7f dve::rhi)
             add_test(NAME dve_texture_bc7f_residency_tests COMMAND dve_texture_bc7f_residency_tests)
         endif()
+    endif()
+endif()
+ 
+
+# T3: optional standards-compliant native KTX2 export via Khronos libktx.
+# No network fetch / external requirement in default builds.
+option(DVE_ENABLE_KTX2_EXPORT "Enable optional native KTX2 texture exporter through libktx" OFF)
+if(DVE_ENABLE_KTX2_EXPORT)
+    find_path(DVE_KTX_INCLUDE_DIR NAMES ktx.h REQUIRED)
+    find_library(DVE_KTX_LIBRARY NAMES ktx REQUIRED)
+    add_library(dve_texture_ktx2_export STATIC src/texture_ktx2_export.cpp)
+    target_include_directories(dve_texture_ktx2_export PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS}
+        PRIVATE ${DVE_KTX_INCLUDE_DIR})
+    target_link_libraries(dve_texture_ktx2_export PUBLIC dve::core PRIVATE ${DVE_KTX_LIBRARY})
+    target_compile_features(dve_texture_ktx2_export PUBLIC cxx_std_23)
+    if(DVE_BUILD_TESTS)
+        add_executable(dve_texture_ktx2_export_tests tests/test_texture_ktx2_export.cpp)
+        target_link_libraries(dve_texture_ktx2_export_tests PRIVATE
+            dve_texture_ktx2_export dve::rhi)
+        add_test(NAME dve_texture_ktx2_export_tests COMMAND dve_texture_ktx2_export_tests)
     endif()
 endif()

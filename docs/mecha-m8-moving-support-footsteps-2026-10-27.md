@@ -17,7 +17,7 @@ M8 also limits rendered ankle slope articulation to approximately 35° while pre
 - Support-object identifier, left/right side, and normalized landing intensity.
 - A maximum of two contacts in one fixed step.
 
-Events only occur on the swing-to-ground transition, not when the game starts, idles, reloads, or repeatedly probes a stationary foot. This enables future particle, sound, decal, rumble and camera-shake systems to share one source of truth. It is intentionally **not** a new particle renderer or GPU emitter binding.
+Events only occur on the swing-to-ground transition, not when the game starts, idles, reloads, or repeatedly probes a stationary foot. This enables future particle, sound, decal, rumble and camera-shake systems to share one source of truth. `PrototypeGame::mecha_footstep_events()` exposes the event stream to the standard game host, and each confirmed footfall creates a small dust preview through the **existing CPU impact-visual path**. This is intentionally **not** a new particle renderer or GPU emitter binding.
 
 `MechFootContact` exposes `supportObject` for diagnostics and tests.
 

@@ -5,6 +5,7 @@
 #include "dve/editor_component_inspector.hpp"
 #include "dve/editor_prototype.hpp"
 #include "dve/physics3d_backend.hpp"
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <memory>
@@ -149,6 +150,40 @@ void bone_roll_follows_chassis_heading(){
   }
  }
 }
+void feet_never_teleport_while_walking_or_stopping(){
+ // Stopping in the middle of a stride used to pop a swinging foot (and a foot the hip had outrun)
+ // up to ~1.2 m in a single tick. Planted feet may not slide beyond a small drag and a stopped mech
+ // may only finish its step at a bounded speed.
+ float worstStopped=0.F,worstPlantedSlide=0.F,worstReach=0.F;
+ for(unsigned stop=10;stop<90;stop+=3){
+  Scene s;
+  s.world.set_axis("move_y",1.F);
+  auto previous=s.game->foot_contacts();
+  unsigned idleTicks=0;
+  for(unsigned i=0;i<stop+260;++i){
+   if(i==stop)s.world.set_axis("move_y",0.F);
+   s.tick();
+   idleTicks=std::hypot(s.game->motor().velocity.x,s.game->motor().velocity.y)<1.e-4F?idleTicks+1:0;
+   const bool stoppedBefore=idleTicks>90;
+   const auto now=s.game->foot_contacts();
+   for(int f=0;f<2;++f){
+    const float d=length3(now[f].ankle,previous[f].ankle);
+    const auto& m=s.game->motor();
+    const auto off=rotate(quaternion_from_axis_angle({0,0,1},m.legsYaw),{f?1.F:-1.F,0,2.05F});
+    const Float3 hip{m.position.x+off.x,m.position.y+off.y,m.position.z+off.z};
+    worstReach=std::max(worstReach,length3(hip,now[f].ankle));
+    if(idleTicks>0)worstStopped=std::max(worstStopped,d);
+    if(stoppedBefore&&d>=1.e-5F)std::cout<<"stop "<<stop<<" i "<<i<<" foot "<<f<<" d "<<d<<" planted "<<now[f].planted<<" "<<now[f].ankle.y<<","<<now[f].ankle.z<<" idle "<<idleTicks<<"\n";
+    if(previous[f].planted&&now[f].planted)worstPlantedSlide=std::max(worstPlantedSlide,d);
+   }
+   previous=now;
+  }
+ }
+ check(worstReach<MechLegIkConfig{}.thighLength+MechLegIkConfig{}.shinLength-.04F,
+       "walking and stopping never over-extend the legs (pads stay attached)");
+ check(worstStopped<.07F,"stopping mid-stride finishes the step without teleporting");
+ check(worstPlantedSlide<.12F,"planted feet are never teleported");
+}
 void slope_normal_and_height(){
  Scene s(true);
  const auto feet=s.game->foot_contacts();
@@ -222,6 +257,7 @@ int main(){
   analytic_ik_contract();
   planted_world_stability_and_swing();
   bone_roll_follows_chassis_heading();
+  feet_never_teleport_while_walking_or_stopping();
   slope_normal_and_height();
   unsupported_contact_releases_plant();
   controller_compatibility();

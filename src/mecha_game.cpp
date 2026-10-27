@@ -311,6 +311,18 @@ struct MechaGame::Impl {
   cam.target=plus(cam.target,scaled(minus(focus,cam.target),alpha));
   cam.up={0,0,1};
  }
+ // Must match the distance-driven gait phase advance in tick().
+ static constexpr float gaitRadiansPerMeter=2.5F;
+ // Fastest stride progress (eased 0..1 per second): bounds how far a foot can move in one frame.
+ static constexpr float kSwingMaxRate=20.F;
+ // Speed (m/s) at which a foot finishes a stride after the mech stops.
+ static constexpr float kFinishSpeed=8.F;
+ // How far ahead of the hip a landing foot can sit: stepReach, limited to what the legs can span
+ // (with margin) from the current hip height above the foot.
+ float stance_half_reach(Float3 hip,Float3 foot)const{
+  const float dz=hip.z-foot.z,span=ikConfig.thighLength+ikConfig.shinLength-.12F;
+  return std::min(stepReach,std::sqrt(std::max(0.F,span*span-dz*dz))*.92F);
+ }
  static int foot_index(int side){return side<0?0:1;}
  Float3 hip_at(int side)const{
   return plus(motor.position,rotate(rotation(motor.legsYaw),
@@ -320,7 +332,8 @@ struct MechaGame::Impl {
   return plus(motor.position,rotate(rotation(motor.legsYaw),
                {float(side)*1.0F,0,.16F}));
  }
- std::optional<GroundContact> ground(Float3 xy,int side)const{
+ // `hipRef` is where the hip will be when the foot is down (the current hip for a stance probe).
+ std::optional<GroundContact> ground(Float3 xy,Float3 hipRef)const{
   // Use the same world query for polygons and destructible voxels. Probe again
   // while planted: demolished supports invalidate foot planting immediately.
   const Float3 origin{xy.x,xy.y,motor.position.z+2.35F};
@@ -331,18 +344,18 @@ struct MechaGame::Impl {
   // by the authored two-link leg. Never classify it as a planted contact.
   const auto ankle=plus(hit->worldPosition,scaled(unit(hit->worldNormal),.115F));
   if(hit->worldPosition.z>motor.position.z+1.0F||
-     mag(minus(ankle,hip_at(side)))>
+     mag(minus(ankle,hipRef))>
         ikConfig.thighLength+ikConfig.shinLength-.035F)return std::nullopt;
   return GroundContact{ankle,unit(hit->worldNormal)};
  }
- void update_feet(float horizontalMeters,bool snap=false){
+ void update_feet(float horizontalMeters,float dt,bool snap=false){
   if(legs.empty())return;
   for(const int side:{-1,1}){
    auto& f=feet[foot_index(side)];
    const auto home=neutral_ankle(side);
    const auto hip=hip_at(side);
    if(!f.initialized||snap){
-    const auto hit=ground(home,side);
+    const auto hit=ground(home,hip);
     f.ankle=hit?hit->point:home;
     f.swingFrom=f.swingTo=f.ankle;
     f.normal=hit?hit->normal:Float3{0,0,1};
@@ -356,32 +369,65 @@ struct MechaGame::Impl {
     continue;
    }
    const float cycle=std::fmod(std::fmod(gaitPhase+(side>0?pi:0.F),2.F*pi)+2.F*pi,2.F*pi);
-   const bool swing=horizontalMeters>.0002F&&cycle<pi;
-   if(swing){
+   const bool wantsSwing=horizontalMeters>.0002F&&cycle<pi;
+   bool stance=true;
+   if(!wantsSwing&&f.lastSwing){
+    // The mech stopped (or the cycle left the swing half) mid-stride: finish the step. The planned
+    // landing assumed the hip would keep travelling, so pull it back within reach of the hip, then
+    // move the foot there at a bounded speed; it never pops to the landing spot.
+    auto to=f.swingTo;
+    const float dz=hip.z-to.z,span=ikConfig.thighLength+ikConfig.shinLength-.12F;
+    const float allowed=std::sqrt(std::max(0.F,span*span-dz*dz))*.92F;
+    const float ox=to.x-hip.x,oy=to.y-hip.y,offset=std::hypot(ox,oy);
+    if(offset>allowed&&offset>1.e-6F){to.x=hip.x+ox*(allowed/offset);to.y=hip.y+oy*(allowed/offset);}
+    if(const auto hit=ground(to,hip)){to=hit->point;f.normal=hit->normal;f.supported=true;}
+    else f.supported=false;
+    f.swingTo=to;
+    const auto remaining=minus(to,f.ankle);
+    const float distance=mag(remaining),step=kFinishSpeed*std::max(dt,0.F);
+    f.planted=false;
+    if(distance<=step||distance<1.e-3F){f.ankle=to;f.lastSwing=false;}
+    else{f.ankle=plus(f.ankle,scaled(remaining,step/distance));stance=false;}
+   }else if(wantsSwing){
+    float current=0.F; // eased progress along the stride, recovered from the foot itself
     if(!f.lastSwing){
-     f.swingFrom=f.ankle;
      const auto horizontal=Float3{motor.velocity.x,motor.velocity.y,0};
      const auto direction=mag(horizontal)>.1F?unit(horizontal):facing(motor.legsYaw);
-     const auto desired=plus(home,scaled(direction,stepReach));
-     const auto hit=ground(desired,side);
-     f.swingTo=hit?hit->point:home;
+     // The hip keeps travelling for the rest of the swing, so aim at where the hip WILL be, with the
+     // foot a little ahead of it (stepReach, limited to what the legs can actually span).
+     const float remaining=std::max(0.F,pi-cycle)/gaitRadiansPerMeter;
+     const auto landingHip=plus(hip,scaled(direction,remaining));
+     const auto desired=plus(home,scaled(direction,remaining+stance_half_reach(hip,f.ankle)));
+     const auto hit=ground(desired,landingHip);
+     f.swingFrom=f.ankle;
+     f.swingTo=hit?hit->point:plus(home,scaled(direction,remaining));
      f.normal=hit?hit->normal:Float3{0,0,1};
      f.supported=bool(hit);
+    }else{
+     const float sx=f.swingTo.x-f.swingFrom.x,sy=f.swingTo.y-f.swingFrom.y,len2=sx*sx+sy*sy;
+     current=len2>1.e-4F?std::clamp(((f.ankle.x-f.swingFrom.x)*sx+(f.ankle.y-f.swingFrom.y)*sy)/len2,0.F,1.F):1.F;
     }
-    const float t=std::clamp(cycle/pi,0.F,1.F);
-    const float eased=t*t*(3.F-2.F*t);
+    // Follow the gait cycle, never moving backwards and never faster than a bounded rate, so a
+    // frame hitch or a restore cannot teleport the foot.
+    const float t=cycle/pi,target=t*t*(3.F-2.F*t);
+    const float eased=std::clamp(target,current,std::min(1.F,current+std::max(dt,0.F)*kSwingMaxRate));
+    const float phase=.5F-std::sin(std::asin(std::clamp(1.F-2.F*eased,-1.F,1.F))/3.F); // inverse smoothstep
     f.ankle=plus(plus(scaled(f.swingFrom,1.F-eased),scaled(f.swingTo,eased)),
-                 {0,0,footLift*std::sin(pi*t)});
-    f.planted=false;f.lastSwing=true;
-   }else{
-    if(f.lastSwing)f.ankle=f.swingTo;
-    f.lastSwing=false;
+                 {0,0,footLift*std::sin(pi*phase)});
+    f.planted=false;f.lastSwing=true;stance=false;
+   }
+   if(stance){
     // Foot XY stays in world space during stance. We adjust only its height to
     // track terrain changes and keep planted feet from sliding with the hips.
-    auto support=ground(f.ankle,side);
-    const auto distance=mag(minus(f.ankle,hip));
-    if(distance>ikConfig.thighLength+ikConfig.shinLength-.08F)
-     support=ground(home,side),f.ankle=home;
+    // A stance foot that the hip has outrun is dragged along at full extension (continuous), never
+    // teleported to a new place.
+    const float dz=hip.z-f.ankle.z,span=ikConfig.thighLength+ikConfig.shinLength-.08F;
+    const float maxHorizontal=std::sqrt(std::max(0.F,span*span-dz*dz));
+    const float dx=f.ankle.x-hip.x,dy=f.ankle.y-hip.y,dist=std::hypot(dx,dy);
+    if(dist>maxHorizontal&&dist>1.e-6F){
+     f.ankle.x=hip.x+dx*(maxHorizontal/dist);f.ankle.y=hip.y+dy*(maxHorizontal/dist);
+    }
+    auto support=ground(f.ankle,hip);
     if(support){
      f.ankle={f.ankle.x,f.ankle.y,support->point.z};
      f.normal=support->normal;f.planted=f.supported=true;
@@ -472,7 +518,7 @@ struct MechaGame::Impl {
    (void)world.set_enabled(t.id,true);(void)world.set_position(t.id,t.spawn);
    (void)world.set_rotation(t.id,rotation(0));
   }
-  feet={};update_feet(0.F,true);
+  feet={};update_feet(0.F,0.F,true);
   publish();camera(true);refresh_hud();
  }
  Target* locked(){
@@ -767,7 +813,7 @@ struct MechaGame::Impl {
    const float rest=std::round(gaitPhase/pi)*pi;
    gaitPhase=wrap(turn(gaitPhase,rest,dt*7.F));
   }
-  update_feet(horizontal);
+  update_feet(horizontal,dt);
   const float aimX=axis(world.get_axis("look_x"));
   const float aimY=axis(world.get_axis("look_y"));
   if(cameraMode==MechCameraMode::ThirdPerson){
@@ -1117,7 +1163,7 @@ bool MechaGame::after_restore(std::string_view encoded,std::string* error){
  if(version>=3)s.feet=savedFeet;
  else s.feet={};
  s.motor=motor;s.primaryCooldown=primary;s.rocketCooldown=secondary;
- if(version<3)s.update_feet(0.F,true);
+ if(version<3)s.update_feet(0.F,0.F,true);
  s.rounds=rounds;s.missiles=missiles;s.nextProjectile=next;s.boostUses=boosts;
  s.telemetry=telemetry;s.rockets=std::move(rockets);
  s.extractionReady=ready!=0;s.hud.phase=PrototypePhase(phase);

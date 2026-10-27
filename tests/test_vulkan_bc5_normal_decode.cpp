@@ -2,6 +2,7 @@
 // BC5_UNORM texture sampling; (2) MainMaterialDescriptorTable::bind_resident_normal publishes a
 // BC5 view + flag (and undoes it) on a real device. Skips without Vulkan unless DVE_REQUIRE_VULKAN
 // is set; the GPU decode half also needs the dxc-compiled probe (DVE_BC5_SHADER_DIR).
+#include "dve_test_skip.hpp"
 #include "dve/render/main_material_table.hpp"
 #include "dve/render/normal_texture_binding.hpp"
 #include "dve/render/texture_residency.hpp"
@@ -37,16 +38,16 @@ void append_constant_bc5_block(std::vector<std::byte>& out, std::uint8_t r, std:
 
 void gpu_decode_parity(rhi::VulkanDevice& device) {
 #ifndef DVE_BC5_SHADER_DIR
-    std::cout << "BC5 GPU decode parity skipped: no dxc SPIR-V probe was built\n";
+    dve::testing::note_skip("BC5 GPU decode parity: no dxc SPIR-V probe was built");
     (void)device;
 #else
     const auto spirvPath = std::filesystem::path(DVE_BC5_SHADER_DIR) / "bc5_normal_decode_reference.spv";
     if (!std::filesystem::exists(spirvPath)) {
-        std::cout << "BC5 GPU decode parity skipped: missing " << spirvPath.string() << '\n';
+        dve::testing::note_skip("BC5 GPU decode parity: missing " + spirvPath.string());
         return;
     }
     if (!device.texture_format_capabilities(rhi::TextureFormat::BC5RGUnorm).sampled) {
-        std::cout << "BC5 GPU decode parity skipped: device cannot sample BC5\n";
+        dve::testing::note_skip("BC5 GPU decode parity: device cannot sample BC5");
         return;
     }
     constexpr std::array<std::array<std::uint8_t, 2>, 8> texels{{
@@ -210,13 +211,14 @@ int main() {
             if (std::getenv("DVE_REQUIRE_VULKAN") != nullptr)
                 throw std::runtime_error("required Vulkan device unavailable: " +
                                          std::string(device.device_loss_reason()));
-            std::cout << "Vulkan BC5 normal decode test skipped: " << device.device_loss_reason() << '\n';
-            return 0;
+            return dve::testing::skip(std::string("Vulkan BC5 normal decode test: ") +
+                                      std::string(device.device_loss_reason()));
         }
         vulkan_live_binding(device);
         gpu_decode_parity(device);
-        std::cout << "dve_vulkan_bc5_normal_decode_tests: PASS\n";
-        return 0;
+        std::cout << "dve_vulkan_bc5_normal_decode_tests: " <<
+            (dve::testing::skipped_parts() > 0 ? "PASS (with skipped parts)" : "PASS") << '\n';
+        return dve::testing::exit_code(false);
     } catch (const std::exception& e) {
         std::cerr << "dve_vulkan_bc5_normal_decode_tests: FAIL: " << e.what() << '\n';
         return 1;

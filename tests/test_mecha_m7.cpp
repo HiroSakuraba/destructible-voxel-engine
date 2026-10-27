@@ -126,6 +126,29 @@ void planted_world_stability_and_swing(){
  check(idle[0].supported&&idle[1].supported,
        "foot placement reattaches after walking");
 }
+void bone_roll_follows_chassis_heading(){
+ // The visual limb boxes are not square: their roll about the bone axis must follow the
+ // chassis heading, not the (arbitrary) tilt direction of the bone.
+ const MechLegIkConfig cfg;
+ for(const float yaw:{0.F,.6F,1.1F,2.3F,-1.7F}){
+  const auto q=quaternion_from_axis_angle({0,0,1},yaw);
+  const Float3 hip=rotate(q,{1,0,2.05F}),foot=rotate(q,{1.12F,.62F,.16F});
+  const Float3 pole=rotate(q,{.16F,1,.03F}),forward=rotate(q,{0,1,0});
+  const auto pose=solve_mech_leg_ik(hip,foot,pole,cfg,forward);
+  check(bool(pose),"roll pose");
+  // A downward bone's +X is mirrored, which a symmetric box cannot show; only the axis matters.
+  const auto thighAxis=rotate(pose->thighRotation,{0,0,1});
+  const Float3 thigh{pose->knee.x-pose->hip.x,pose->knee.y-pose->hip.y,pose->knee.z-pose->hip.z};
+  check(thighAxis.x*thigh.x+thighAxis.y*thigh.y+thighAxis.z*thigh.z>cfg.thighLength*.999F,
+        "thigh local Z still lies along the bone");
+  for(const auto& bone:{pose->thighRotation,pose->shinRotation}){
+   const auto x=rotate(bone,{1,0,0});
+   const auto side=rotate(q,{1,0,0});
+   check(std::abs(x.x*side.x+x.y*side.y+x.z*side.z)>.9F,
+         "bone local X stays on the chassis lateral axis for every heading");
+  }
+ }
+}
 void slope_normal_and_height(){
  Scene s(true);
  const auto feet=s.game->foot_contacts();
@@ -198,6 +221,7 @@ int main(){
  try{
   analytic_ik_contract();
   planted_world_stability_and_swing();
+  bone_roll_follows_chassis_heading();
   slope_normal_and_height();
   unsupported_contact_releases_plant();
   controller_compatibility();

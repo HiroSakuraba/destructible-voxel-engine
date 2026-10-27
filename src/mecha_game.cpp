@@ -403,7 +403,8 @@ struct MechaGame::Impl {
    const auto hip=hip_at(leg.side);
    const auto pole=rotate(rotation(motor.legsYaw),
               {float(leg.side)*.16F,1.F,.03F});
-   const auto pose=solve_mech_leg_ik(hip,foot.ankle,pole,ikConfig);
+   const auto pose=solve_mech_leg_ik(hip,foot.ankle,pole,ikConfig,
+      rotate(rotation(motor.legsYaw),{0,1,0}));
    if(!pose)continue;
    (void)world.set_position(leg.id,leg.segment==0?pose->thighCenter:pose->shinCenter);
    (void)world.set_rotation(leg.id,leg.segment==0?pose->thighRotation:pose->shinRotation);

@@ -19,8 +19,12 @@ struct MechLegIkPose {
 // Pole indicates the preferred forward-facing knee bend in world coordinates.
 // Unreachable feet clamp to the nearest point in the joint's admissible range,
 // rather than introducing stretch or NaNs.
+// boneForward fixes the roll of the thigh/shin rotations about their own axes
+// (local +Y is its projection perpendicular to the bone) so non-square limb
+// meshes follow the chassis heading instead of the bone's tilt direction. A
+// zero or non-finite boneForward falls back to the knee direction.
 [[nodiscard]] std::optional<MechLegIkPose> solve_mech_leg_ik(
     Float3 hip, Float3 desiredAnkle, Float3 kneePole,
-    const MechLegIkConfig& config={}) noexcept;
+    const MechLegIkConfig& config={}, Float3 boneForward={}) noexcept;
 [[nodiscard]] Quaternion mech_align_z_axis(Float3 direction) noexcept;
 } // namespace dve

@@ -203,6 +203,23 @@ inline constexpr Format FormatBc1RgbaSrgbBlock = 134;
 inline constexpr Format FormatBc3UnormBlock = 137;
 inline constexpr Format FormatBc3SrgbBlock = 138;
 inline constexpr Format FormatBc5UnormBlock = 141;
+inline constexpr Format FormatBc4UnormBlock = 139;
+inline constexpr Format FormatBc6hUfloatBlock = 143;
+inline constexpr Format FormatBc6hSfloatBlock = 144;
+inline constexpr Format FormatBc7UnormBlock = 145;
+inline constexpr Format FormatBc7SrgbBlock = 146;
+inline constexpr Format FormatEtc2R8G8B8UnormBlock = 147;
+inline constexpr Format FormatEtc2R8G8B8SrgbBlock = 148;
+inline constexpr Format FormatEtc2R8G8B8A8UnormBlock = 151;
+inline constexpr Format FormatEtc2R8G8B8A8SrgbBlock = 152;
+inline constexpr Format FormatEacR11UnormBlock = 153;
+inline constexpr Format FormatEacR11G11UnormBlock = 155;
+inline constexpr Format FormatAstc4x4UnormBlock = 157;
+inline constexpr Format FormatAstc4x4SrgbBlock = 158;
+inline constexpr Format FormatAstc6x6UnormBlock = 165;
+inline constexpr Format FormatAstc6x6SrgbBlock = 166;
+inline constexpr Format FormatAstc8x8UnormBlock = 171;
+inline constexpr Format FormatAstc8x8SrgbBlock = 172;
 inline constexpr ImageType ImageType2D = 1;
 inline constexpr ImageType ImageType3D = 2;
 inline constexpr ImageTiling ImageTilingOptimal = 0;
@@ -394,7 +411,11 @@ struct PhysicalDeviceFeatures {
     Bool32 alphaToOne;
     Bool32 multiViewport;
     Bool32 samplerAnisotropy;
-    Bool32 remaining[35];
+    // Vulkan 1.0 features 20-22: requested explicitly, not implied by format properties.
+    Bool32 textureCompressionETC2;
+    Bool32 textureCompressionASTC_LDR;
+    Bool32 textureCompressionBC;
+    Bool32 remaining[32];
 };
 // The prefix of VkPhysicalDeviceProperties is stable in Vulkan 1.0. The opaque
 // tail intentionally over-allocates storage so the loader may write the complete

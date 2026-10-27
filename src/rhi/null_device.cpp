@@ -64,7 +64,8 @@ std::optional<std::size_t> texture_layer_bytes(const TextureDesc& desc) noexcept
         const std::uint64_t depth = desc.dimension == TextureDimension::Texture3D
             ? mip_dimension(desc.depth, mip) : desc.depth;
         const std::uint64_t bytes = is_block_compressed(desc.format)
-            ? static_cast<std::uint64_t>((width + 3U) / 4U) * ((height + 3U) / 4U) *
+            ? static_cast<std::uint64_t>texture_rows(desc.format, static_cast<std::uint32_t>(height)) *
+                  ((width + texture_block_width(desc.format) - 1U) / texture_block_width(desc.format)) *
                   depth * texture_block_bytes(desc.format)
             : width * height * depth * texture_pixel_bytes(desc.format);
         if (bytes > std::numeric_limits<std::size_t>::max() - total) return std::nullopt;
@@ -92,7 +93,8 @@ std::optional<std::size_t> texture_subresource_offset(const TextureDesc& desc,
         const std::uint64_t d = desc.dimension == TextureDimension::Texture3D
             ? mip_dimension(desc.depth, index) : desc.depth;
         offset += is_block_compressed(desc.format)
-            ? ((w + 3U) / 4U) * ((h + 3U) / 4U) * d * texture_block_bytes(desc.format)
+            ? texture_rows(desc.format, static_cast<std::uint32_t>(h)) *
+                  ((w + texture_block_width(desc.format) - 1U) / texture_block_width(desc.format)) * d * texture_block_bytes(desc.format)
             : w * h * d * texture_pixel_bytes(desc.format);
     }
     if (offset > std::numeric_limits<std::size_t>::max()) return std::nullopt;

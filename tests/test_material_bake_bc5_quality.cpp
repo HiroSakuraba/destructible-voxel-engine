@@ -82,6 +82,22 @@ void run_one(unsigned pattern) {
     const auto& image=baked.images.at(MaterialBakeMap::Normal);
     require(image.width==settings.resolution && image.height==settings.resolution,
             "unexpected baked normal dimensions");
+    // The bake must carry the authored pattern: a baker that ignored the input normal map would
+    // return a flat map, and BC5 would then trivially "pass" the error bounds below.
+    double maxTilt=0.0,meanSlope=0.0;
+    for(std::size_t p=0;p<image.rgba8.size()/4U;++p) {
+        const double nx=static_cast<double>(image.rgba8[4U*p])/127.5-1.0;
+        const double ny=static_cast<double>(image.rgba8[4U*p+1U])/127.5-1.0;
+        const double nz=static_cast<double>(image.rgba8[4U*p+2U])/127.5-1.0;
+        maxTilt=std::max(maxTilt,std::acos(std::clamp(nz/std::sqrt(nx*nx+ny*ny+nz*nz),-1.0,1.0))
+                                  *180.0/3.14159265358979323846);
+        meanSlope+=(std::abs(nx)+std::abs(ny))/static_cast<double>(image.rgba8.size()/4U);
+    }
+    if(pattern==0U)
+        require(maxTilt<1.0,"flat authored normal did not bake to a flat map");
+    else
+        require(maxTilt>10.0&&meanSlope>0.1,
+                "baked normal lost the authored ripple/woven pattern (baker ignored the normal map?)");
     const auto mips=generate_semantic_texture_mips(image,TextureSemantic::Normal);
     std::vector<std::vector<std::byte>> blocks,repeat;
     std::string error;
@@ -94,7 +110,7 @@ void run_one(unsigned pattern) {
         rgbaBytes+=mips.levels[i].rgba8.size();
         bc5Bytes+=blocks[i].size();
         const auto angle=bc5_mean_normal_angle_degrees(mips.levels[i],blocks[i]);
-        require(angle>=0.0 && angle<10.0,"DVE baked normal angular error exceeds 10 degrees");
+        require(angle>=0.0 && angle<3.0,"DVE baked normal mean angular error exceeds 3 degrees");
     }
     require(bc5Bytes*2U<=rgbaBytes+32U,"BC5 bake is not substantially smaller than RGBA8");
     const auto reconstructed=decode_bc5_to_rgba(image,blocks.front());
@@ -115,7 +131,7 @@ void run_one(unsigned pattern) {
             *180.0/3.14159265358979323846;
         worst=std::max(worst,angle);
     }
-    require(worst<20.0,"maximum baked texel normal deviation exceeds 20 degrees");
+    require(worst<4.0,"maximum baked texel normal deviation exceeds 4 degrees");
     // These images are from the real DVE bake engine. Null RHI verifies the
     // exact encoded GPU byte payload, while HLSL math is checked in T4 tests.
     rhi::NullDevice gpu;

@@ -13,8 +13,10 @@ option to an independently exercised interoperability test (when its CI job pass
 authored 32x32 normal maps representing flat, ripple and woven texture patterns.
 It calls `bake_material_textures` with normal-only 64x64 output and 2x2 coverage
 sampling, then `generate_semantic_texture_mips` and the T3 BC5 encoder.
-The test verifies deterministic encoded mips, per-mip mean angular error below
-10 degrees, worst texel angular deviation below 20 degrees, at least about
+The test first checks that the bake really carried the authored pattern (flat stays within 1 degree
+of +Z, ripple and woven tilt by more than 10 degrees), so a baker that ignored the normal map cannot pass.
+It then verifies deterministic encoded mips, per-mip mean angular error below
+3 degrees (observed 1.54 at worst), worst texel angular deviation below 4 degrees (observed 1.68), at least about
 half the RGBA8 footprint, and exact byte accounting in the real DVE Null RHI.
 The compressed output is decoded using the T4 shader's CPU mirror
 `decode_bc5_normal_sample` to catch a mismatch between encode and shader semantics.
@@ -24,16 +26,27 @@ the textures under test are produced by the real DVE material baker.
 
 ## Independent Khronos KTX2 interoperability
 
-`dve_texture_ktx2_export_tests` calls DVE's optional exporter, then asks the
-real `ktxTexture2_CreateFromMemory` reader to parse the produced container and
-`ktxTexture2_GetImageOffset`/`ktxTexture_GetData` to independently verify every
-BC5/BC7/ASTC mip. It checks dimensions, Vulkan format, no supercompression,
-the exact original compressed payload and deterministic file bytes. A second
-roundtrip through the DVE native KTX2 reader detects disagreement.
-Malformed mip input and truncated output are rejected.
+`dve_texture_ktx2_export_tests` calls DVE's optional exporter, then validates the file two ways that do
+not use DVE's reader:
+
+- raw bytes against the KTX 2.0 specification: identifier, `vkFormat`, `typeSize`, pixel size, face/layer
+  counts, `levelCount`, `supercompressionScheme == 0`, DFD placement and size, DFD colour model and transfer
+  function (**sRGB vs linear**), level-index byte lengths against block-padded sizes computed by hand from the
+  block dimensions (BC 4x4, ASTC 6x6 / 8x8; 1x1 and 2x2 tails still occupy a whole block), 16-byte alignment and
+  smallest-mip-first storage;
+- the real `ktxTexture2_CreateFromMemory` reader: format, dimensions, layout, no transcoding, colour model,
+  transfer function, per-level image size and offset, and a `memcmp` of every compressed mip.
+
+It also checks deterministic file bytes, a roundtrip through the DVE native KTX2 reader, and that malformed
+mips and truncated files are rejected by DVE and libktx. Mip counts are derived from the texture size
+(complete chains, plus one deliberately shorter chain): libktx refuses a chain longer than
+`floor(log2(max(w,h)))+1`, so `encode_native_ktx2` now rejects it with a descriptive error, and the test
+asserts that. libktx error codes are included in the exporter's messages.
 
 `.github/workflows/texture-t5.yml` builds pinned Khronos KTX-Software v4.4.2
-with its own CMake build, installs libktx, then compiles and runs this real
+with its own CMake build, installs libktx (the tag is resolved and compared with the pinned commit
+`4d6fc70eaf62ad0558e63e8d97eb9766118327a6`; submodules are not fetched because the only one is the unused
+conformance suite; the installed library is cached per commit), then compiles and runs this real
 interoperability test. This is a separate job from the editor-bake quality
 job; either can fail independently. Optional libktx remains OFF in ordinary builds.
 

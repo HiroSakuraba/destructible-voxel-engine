@@ -115,8 +115,9 @@ PolygonTextureMipChain generate_semantic_texture_mips(const PolygonImage& image,
 }
 
 TextureResidencyManager::TextureResidencyManager(rhi::IDevice& device, std::size_t budgetBytes,
-                                                 TextureBc7Encoder encoder)
-    : device_(device), bc7Encoder_(std::move(encoder)) {
+                                                 TextureBc7Encoder encoder,
+                                                 TextureBc5Encoder bc5Encoder)
+    : device_(device), bc7Encoder_(std::move(encoder)), bc5Encoder_(std::move(bc5Encoder)) {
     stats_.budgetBytes = std::max<std::size_t>(budgetBytes, 4U);
 }
 
@@ -188,8 +189,35 @@ bool TextureResidencyManager::enqueue(TextureUploadRequest request, std::string*
             pending.encodeFailed = true;
         }
     }
+    if (pending.request.compression == TextureCompressionPreference::PreferBc5ForNormals &&
+        pending.request.semantic == TextureSemantic::Normal && bc5Encoder_) {
+        bool ok=false;
+        try {
+            std::string encodeError;
+            ok=bc5Encoder_(pending.mipChain,pending.bc5Blocks,&encodeError);
+        } catch (...) {
+            ok=false;
+        }
+        if (ok && pending.bc5Blocks.size()==pending.mipChain.levels.size()) {
+            for (std::size_t level=0U;level<pending.bc5Blocks.size();++level) {
+                const auto& mip=pending.mipChain.levels[level];
+                const auto bytes=rhi::texture_row_bytes(rhi::TextureFormat::BC5RGUnorm,mip.width)*
+                                 rhi::texture_rows(rhi::TextureFormat::BC5RGUnorm,mip.height);
+                if (pending.bc5Blocks[level].size()!=bytes ||
+                    bytes>std::numeric_limits<std::size_t>::max()-pending.bc5EncodedBytes) {
+                    ok=false; break;
+                }
+                pending.bc5EncodedBytes+=bytes;
+            }
+        } else ok=false;
+        if (!ok || pending.bc5EncodedBytes==0U) {
+            pending.bc5Blocks.clear();
+            pending.bc5EncodedBytes=0U;
+            pending.encodeFailed=true;
+        }
+    }
     std::scoped_lock lock(mutex_);
-    if (pending.encodedBytes != 0U) ++stats_.compressionEncoded;
+    if (pending.encodedBytes != 0U || pending.bc5EncodedBytes != 0U) ++stats_.compressionEncoded;
     if (pending.encodeFailed) ++stats_.compressionEncodeFailures;
     // Re-check under the lock: another producer may have queued/published the same asset while
     // this thread was encoding. (Only one terminal duplicate/unchanged stat is ever counted per
@@ -256,15 +284,26 @@ TextureResidencyManager::Admission TextureResidencyManager::admit_locked(
 TextureResidencyManager::UploadChoice TextureResidencyManager::choose_upload(
     const Pending& pending) const {
     UploadChoice choice;
-    choice.format = rhi::TextureFormat::RGBA8Unorm;
-    choice.bytes = pending.bytes;
-    if (pending.encodedBytes == 0U ||
-        pending.request.compression != TextureCompressionPreference::PreferBc7) return choice;
-    const auto bc7 = pending.request.semantic == TextureSemantic::BaseColor ||
-                     pending.request.semantic == TextureSemantic::Emissive
+    choice.format=rhi::TextureFormat::RGBA8Unorm;
+    choice.bytes=pending.bytes;
+    if (pending.request.compression==TextureCompressionPreference::PreferBc5ForNormals &&
+        pending.request.semantic==TextureSemantic::Normal &&
+        pending.bc5EncodedBytes!=0U &&
+        device_.texture_format_capabilities(rhi::TextureFormat::BC5RGUnorm).sampled) {
+        choice.useBc5=true;
+        choice.format=rhi::TextureFormat::BC5RGUnorm;
+        choice.bytes=pending.bc5EncodedBytes;
+        return choice;
+    }
+    if (pending.encodedBytes==0U ||
+        pending.request.compression!=TextureCompressionPreference::PreferBc7) return choice;
+    const auto bc7=pending.request.semantic==TextureSemantic::BaseColor ||
+                   pending.request.semantic==TextureSemantic::Emissive
         ? rhi::TextureFormat::BC7RGBASrgb : rhi::TextureFormat::BC7RGBAUnorm;
     if (!device_.texture_format_capabilities(bc7).sampled) return choice;
-    choice.useBc7 = true; choice.format = bc7; choice.bytes = pending.encodedBytes;
+    choice.useBc7=true;
+    choice.format=bc7;
+    choice.bytes=pending.encodedBytes;
     return choice;
 }
 
@@ -314,6 +353,7 @@ std::size_t TextureResidencyManager::pump(std::size_t maximumUploadBytes, std::s
             stats_.pendingCount = pending_.size();
         }
         const bool useBc7 = choice.useBc7;
+        const bool useBc5 = choice.useBc5;
         const std::size_t uploadBytes = choice.bytes;
         // enqueue() can inspect resident_ on an asset worker. Protect the
         // publication transaction from that concurrent read; callbacks perform
@@ -326,7 +366,7 @@ std::size_t TextureResidencyManager::pump(std::size_t maximumUploadBytes, std::s
             if (replacing) ++stats_.failedReplacementsPreserved;
             continue;
         }
-        if (!useBc7 && pending.request.compression != TextureCompressionPreference::Uncompressed)
+        if (!useBc7 && !useBc5 && pending.request.compression != TextureCompressionPreference::Uncompressed)
             ++stats_.compressionFallbacks;
         rhi::TextureDesc desc;
         desc.format = choice.format;
@@ -344,9 +384,9 @@ std::size_t TextureResidencyManager::pump(std::size_t maximumUploadBytes, std::s
             for (std::uint32_t mip = 0U; mip < desc.mipLevels; ++mip) {
                 const auto& level = pending.mipChain.levels[mip];
                 const auto rowBytes = rhi::texture_row_bytes(desc.format, level.width);
-                if (useBc7) {
-                    ok = device_.write_texture(texture, mip, 0U,
-                        pending.bc7Blocks[mip], rowBytes, &localError);
+                if (useBc7 || useBc5) {
+                    const auto& blocks=useBc5 ? pending.bc5Blocks[mip] : pending.bc7Blocks[mip];
+                    ok=device_.write_texture(texture,mip,0U,blocks,rowBytes,&localError);
                 } else {
                     ok = device_.write_texture(texture, mip, 0U,
                         std::as_bytes(std::span<const std::uint8_t>(level.rgba8)),

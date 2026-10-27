@@ -2122,8 +2122,35 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_vulkan_texture_t1_format_tests tests/test_vulkan_texture_t1_formats.cpp)
         target_link_libraries(dve_vulkan_texture_t1_format_tests PRIVATE dve::core dve::rhi_vulkan)
         add_test(NAME dve_vulkan_texture_t1_format_tests COMMAND dve_vulkan_texture_t1_format_tests)
+        add_executable(dve_vulkan_bc5_normal_decode_tests tests/test_vulkan_bc5_normal_decode.cpp)
+        target_link_libraries(dve_vulkan_bc5_normal_decode_tests PRIVATE dve::rhi_vulkan dve::render_bridge)
+        add_test(NAME dve_vulkan_bc5_normal_decode_tests COMMAND dve_vulkan_bc5_normal_decode_tests)
+        # Optional GPU decode parity probe: needs a DXC with SPIR-V codegen (not present in CI images).
+        find_program(DVE_DXC_EXECUTABLE NAMES dxc)
+        if(DVE_DXC_EXECUTABLE)
+            set(_bc5_probe_dir "${CMAKE_CURRENT_BINARY_DIR}/dxc-bc5-probe")
+            file(MAKE_DIRECTORY "${_bc5_probe_dir}")
+            file(WRITE "${_bc5_probe_dir}/probe.hlsl" "float4 main() : SV_Target { return 0; }\n")
+            execute_process(COMMAND "${DVE_DXC_EXECUTABLE}" -spirv -T ps_6_0 -E main
+                    -Fo "${_bc5_probe_dir}/probe.spv" "${_bc5_probe_dir}/probe.hlsl"
+                RESULT_VARIABLE _bc5_probe_result OUTPUT_QUIET ERROR_QUIET)
+            if(_bc5_probe_result EQUAL 0 AND EXISTS "${_bc5_probe_dir}/probe.spv")
+                set(_bc5_shader_dir "${CMAKE_CURRENT_BINARY_DIR}/bc5-shaders")
+                file(GLOB _bc5_shader_headers CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/common/*.hlsli")
+                add_custom_command(OUTPUT "${_bc5_shader_dir}/bc5_normal_decode_reference.spv"
+                    COMMAND ${CMAKE_COMMAND} -E make_directory "${_bc5_shader_dir}"
+                    COMMAND "${DVE_DXC_EXECUTABLE}" -spirv -fspv-target-env=vulkan1.2 -fvk-use-dx-layout
+                        -T cs_6_0 -E main -Fo "${_bc5_shader_dir}/bc5_normal_decode_reference.spv"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/bc5_normal_decode_reference.hlsl"
+                    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/bc5_normal_decode_reference.hlsl" ${_bc5_shader_headers}
+                    VERBATIM)
+                add_custom_target(dve_bc5_test_shaders DEPENDS "${_bc5_shader_dir}/bc5_normal_decode_reference.spv")
+                add_dependencies(dve_vulkan_bc5_normal_decode_tests dve_bc5_test_shaders)
+                target_compile_definitions(dve_vulkan_bc5_normal_decode_tests PRIVATE DVE_BC5_SHADER_DIR="${_bc5_shader_dir}")
+            endif()
+        endif()
         if(EXISTS "/usr/lib/chromium/vk_swiftshader_icd.json")
-            set_tests_properties(dve_vulkan_buffer_tests dve_vulkan_graphics_tests dve_v193_vulkan_sprite_tests dve_depth_only_rhi_tests dve_vulkan_compute_tests dve_vulkan_camera_outputs_tests dve_vulkan_environment_lighting_tests dve_vulkan_live_environment_renderer_tests dve_vulkan_dashr_tests dve_vulkan_shadow_material_table_tests dve_vulkan_main_material_table_tests dve_vulkan_texture_t1_format_tests PROPERTIES
+            set_tests_properties(dve_vulkan_buffer_tests dve_vulkan_graphics_tests dve_v193_vulkan_sprite_tests dve_depth_only_rhi_tests dve_vulkan_compute_tests dve_vulkan_camera_outputs_tests dve_vulkan_environment_lighting_tests dve_vulkan_live_environment_renderer_tests dve_vulkan_dashr_tests dve_vulkan_shadow_material_table_tests dve_vulkan_main_material_table_tests dve_vulkan_texture_t1_format_tests dve_vulkan_bc5_normal_decode_tests PROPERTIES
                 ENVIRONMENT "VK_ICD_FILENAMES=/usr/lib/chromium/vk_swiftshader_icd.json;DVE_REQUIRE_VULKAN=1")
         endif()
     endif()

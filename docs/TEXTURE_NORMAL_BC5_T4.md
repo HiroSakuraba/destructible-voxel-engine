@@ -25,31 +25,49 @@ sync with the actually bound GPU view.
 Normal-map compression *preference* cannot authorize shader decoding. The
 TextureResidencyManager may fall back from BC5 to RGBA8. The helper
 configure_bound_normal_format() verifies that the supplied ResidentTexture
-has Normal semantics, matches the actual view being bound and uses BC5 or
-RGBA8. It clears the BC5 flag for all invalid, missing and RGBA8 cases.
+has Normal semantics, matches the actual view being bound and uses BC5, linear
+RGBA8 or linear BC7 (PreferBc7 normals use the legacy RGB decode). It clears the
+BC5 flag for every invalid, missing, RGBA8 and BC7 case; sRGB and other formats
+are rejected.
 
 MainMaterialDescriptorTable::bind_resident_normal(assetHash,materialIndex,resident,error)
-can replace an already-authored normal texture view with either verified
-resident format. It stages a new bind group, writes the correct mapping flags,
-then replaces the descriptor. Invalid resident input leaves the old descriptor
-intact. For optimal safety the host must call this on the render/control thread
-between frames, and MUST retain the external resident view until rebound or
-descriptor invalidation. No automatic destruction or lifetime transfer occurs.
+can replace an already-authored normal texture view with a verified resident
+format. It stages a new bind group, then drains in-flight GPU work with
+device.wait_idle() (the renderer submits frames asynchronously and every frame
+shares the mapping record and the previous bind group), writes the correct
+mapping flags and swaps the descriptor. Any failure before the swap leaves the
+old descriptor and mapping flags untouched; rejected input never stalls the GPU.
+Call it on the render/control thread between frames.
+
+restore_authored_normal(assetHash,materialIndex,error) undoes the override:
+the authored view is rebound and the BC5 flag cleared. The host MUST call it
+(or invalidate the asset) before destroying, evicting or hot-reloading an
+external resident view; the table never owns or destroys external views, and
+TextureResidencyManager may evict or replace views during pump().
 
 ## Tests
 
 - dve_bc5_shader_mapping_tests: correct view identity, RGBA fallback, bit 4
-  preservation and BC5 decode numerical oracle.
+  preservation and a BC5 round-trip oracle (known normals -> T3 codec -> decode
+  -> compared with the source; invalid XY clamp, +Z hemisphere, unit length)
+  using the CPU mirror decode_bc5_normal_sample().
 - dve_bc5_main_material_binding_tests: Null-RHI material table, BC5 publication,
-  replacement by RGBA8, stale flag clearing, bad update rejection, resource counts.
+  replacement by RGBA8, stale flag clearing, bad update rejection (semantic, sRGB,
+  unsupported format), wait-idle ordering, BC7 acceptance, restore/undo, flag
+  preservation and resource counts.
+- dve_vulkan_bc5_normal_decode_tests: real-device (lavapipe/SwiftShader) live
+  binding with a BC5 resident, plus, when a SPIR-V capable DXC exists at build
+  time, an HLSL compute probe (shaders/bc5_normal_decode_reference.hlsl) that
+  samples a real BC5 texture and compares the production decoder with the CPU
+  mirror. Without DXC the GPU decode half is skipped.
 - dve_bc5_shader_source_contracts: source-level guard for DASHR, UV, triplanar
   projections and the unchanged whiteout blending formulas.
 - Existing DVE material mapping, main material table and BC5 tests run alongside.
 
 ## Limitations / next batch
 
-- Shader source contract tests and numerical reference tests do not equal
-  optical parity screenshots on a Vulkan GPU. Validate with DVE baked normal
+- The GPU probe checks decode math, not full-frame lighting: shader source
+  contract tests and numerical tests do not equal optical parity screenshots. Validate with DVE baked normal
   maps and differential renders before enabling BC5 as an editor default.
 - The host must explicitly opt into BC5 and call bind_resident_normal for a
   material with an authored normal channel; there is no automatic texture-table

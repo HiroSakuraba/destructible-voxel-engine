@@ -40,7 +40,24 @@ std::size_t texture_pixel_bytes(TextureFormat format) noexcept {
     case TextureFormat::BC1RGBASrgb:
     case TextureFormat::BC3RGBAUnorm:
     case TextureFormat::BC3RGBASrgb:
-    case TextureFormat::BC5RGUnorm: return 0U;
+    case TextureFormat::BC5RGUnorm:
+    case TextureFormat::BC4RUnorm:
+    case TextureFormat::BC6HRGBUfloat:
+    case TextureFormat::BC6HRGBSfloat:
+    case TextureFormat::BC7RGBAUnorm:
+    case TextureFormat::BC7RGBASrgb:
+    case TextureFormat::ETC2RGBUnorm:
+    case TextureFormat::ETC2RGBSrgb:
+    case TextureFormat::ETC2RGBAUnorm:
+    case TextureFormat::ETC2RGBASrgb:
+    case TextureFormat::EACR11Unorm:
+    case TextureFormat::EACRG11Unorm:
+    case TextureFormat::ASTC4x4RGBAUnorm:
+    case TextureFormat::ASTC4x4RGBASrgb:
+    case TextureFormat::ASTC6x6RGBAUnorm:
+    case TextureFormat::ASTC6x6RGBASrgb:
+    case TextureFormat::ASTC8x8RGBAUnorm:
+    case TextureFormat::ASTC8x8RGBASrgb: return 0U;
     case TextureFormat::RGBA8Unorm:
     case TextureFormat::RGBA8Srgb:
     case TextureFormat::BGRA8Unorm:

@@ -9,6 +9,8 @@ on:
       - "src/rhi/null_device.cpp"
       - "src/compressed_texture.cpp"
       - "tests/test_texture_t1_formats.cpp"
+      - "tests/test_vulkan_texture_t1_formats.cpp"
+      - "apps/dve_device_test_runner.cpp"
       - "apps/dve_bc7f_poc.cpp"
       - "docs/COMPRESSED_TEXTURES.md"
       - ".github/workflows/texture-t1.yml"
@@ -35,9 +37,9 @@ jobs:
             -DDVE_ENABLE_FLUODDITY=OFF -DDVE_ENABLE_SIMULATION_ENERGY_COMPILER=OFF \
             -DDVE_ENABLE_SOFT_BODIES=OFF -DDVE_ENABLE_CPU_HAIR=OFF
       - name: Compile T1 and Vulkan mapping
-        run: cmake --build build-t1 --target dve_compressed_texture_tests dve_texture_t1_format_tests dve_rhi_vulkan --parallel 2
+        run: cmake --build build-t1 --target dve_compressed_texture_tests dve_texture_t1_format_tests dve_vulkan_texture_t1_format_tests dve_rhi_vulkan --parallel 2
       - name: Run compressed texture contracts
-        run: ctest --test-dir build-t1 -R '^(dve_compressed_texture_tests|dve_texture_t1_format_tests)$' --output-on-failure
+        run: ctest --test-dir build-t1 -R '^(dve_compressed_texture_tests|dve_texture_t1_format_tests|dve_vulkan_texture_t1_format_tests)$' --output-on-failure
 
   bc7f-optin:
     name: bc7f pinned upstream experiment

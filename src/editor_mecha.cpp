@@ -24,7 +24,7 @@ void mesh_part(CookedPolygonAsset& out,Float3 pos,Float3 size,unsigned mat){
 }
 }
 EditorDocument make_mecha_starter(){
- EditorDocument d("Iron Yard - Mecha Combat M1-M6");
+ EditorDocument d("Iron Yard - Mecha Combat M1-M7");
  auto box=[&](std::string label,Float3 pos,Float3 size,Float4 color,bool collide)->EditorObject&{
   EditorObject o(d.allocate_object_id(),std::move(label));
   o.flags.anchored=true;o.flags.collisionEnabled=collide;o.transform.position=pos;
@@ -77,6 +77,15 @@ EditorDocument make_mecha_starter(){
        (segment==0?"_upper":"_lower")));
   limb.components.back().properties["side"]=std::int64_t{side};
   limb.components.back().properties["segment"]=std::int64_t{segment};
+ }
+ // Ground-contact pads are independent, non-physical visual pieces. Orientation
+ // follows the probed normal of the actual voxel or polygon floor.
+ for(int side:{-1,1}){
+  auto& foot=box(side<0?"Left Foot Pad":"Right Foot Pad",
+     {float(side),-23,.14F},{.92F,1.32F,.22F},
+     {.22F,.57F,.61F,1},false);
+  foot.components.push_back(role("mech_foot",side<0?"left_foot":"right_foot"));
+  foot.components.back().properties["side"]=std::int64_t{side};
  }
 
  auto& torso=box("Swiveling Cannon Turret",{0,-23,2.05F},{3,2,1.4F},

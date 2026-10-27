@@ -740,7 +740,7 @@ std::string MechaGame::save_state() const {
  // not produce a save that cannot be loaded, so such paths are dropped instead.
  const auto encode=[&](bool paths){
  std::ostringstream out;out.imbue(std::locale::classic());
- out<<std::setprecision(9)<<"DVE_MECHA 1 "<<unsigned(s.hud.phase)<<' '
+ out<<std::setprecision(9)<<"DVE_MECHA 2 "<<unsigned(s.hud.phase)<<' '
     <<s.hud.health<<' '<<int(s.hud.debug)<<' '<<int(s.extractionReady)<<' '
     <<s.motor.position.x<<' '<<s.motor.position.y<<' '<<s.motor.position.z<<' '
     <<s.motor.velocity.x<<' '<<s.motor.velocity.y<<' '<<s.motor.velocity.z<<' '
@@ -765,6 +765,8 @@ std::string MechaGame::save_state() const {
   out<<p.position.x<<' '<<p.position.y<<' '<<p.position.z<<' '
      <<p.velocity.x<<' '<<p.velocity.y<<' '<<p.velocity.z<<' '
      <<p.remainingSeconds<<' '<<p.sequence<<'\n';
+ out<<"M6 "<<unsigned(s.cameraMode)<<' '<<s.orbitYaw<<' '<<s.orbitPitch<<' '
+    <<int(s.jetAirborne)<<' '<<s.gaitPhase<<' '<<std::quoted(s.lockKey)<<'\n';
  return out.str();
  };
  auto encoded=encode(true);
@@ -793,7 +795,7 @@ bool MechaGame::after_restore(std::string_view encoded,std::string* error){
    >>telemetry.targetsDestroyed>>telemetry.impacts
    >>telemetry.voxelCarvesQueued>>telemetry.enemyShots
    >>telemetry.navigationReplans>>nTargets;
- if(!in||magic!="DVE_MECHA"||version!=1||phase>3||debug>1||ready>1
+ if(!in||magic!="DVE_MECHA"||(version!=1&&version!=2)||phase>3||debug>1||ready>1
     ||!finite3(motor.position)||!finite3(motor.velocity)
     ||!std::isfinite(motor.legsYaw)||!std::isfinite(motor.torsoYaw)
     ||!std::isfinite(motor.energy)||motor.energy<0||motor.energy>100
@@ -841,10 +843,28 @@ bool MechaGame::after_restore(std::string_view encoded,std::string* error){
    return fail("invalid rocket");
   rockets.push_back(p);
  }
+ // M6 is appended so v1 checkpoints are still readable without relaxing old
+ // world-state validation. New checkpoints preserve camera, lock and air state.
+ unsigned savedCamera=unsigned(s.cameraMode),savedAirborne=0;
+ float savedOrbit=0.F,savedPitch=.23F,savedGait=0.F;
+ std::string savedLock;
+ if(version>=2){
+  std::string marker;
+  in>>marker>>savedCamera>>savedOrbit>>savedPitch>>savedAirborne>>savedGait
+    >>std::quoted(savedLock);
+  if(!in||marker!="M6"||savedCamera>1||savedAirborne>1||
+     !std::isfinite(savedOrbit)||std::abs(savedOrbit)>pi+0.001F||
+     !std::isfinite(savedPitch)||savedPitch<.05F||savedPitch>1.12F||
+     !std::isfinite(savedGait)||std::abs(savedGait)>pi+.001F||
+     (!savedLock.empty()&&!key_ok(savedLock)))
+   return fail("invalid M6 camera, jet or lock state");
+ }
  in>>std::ws;
  if(!in.eof())return fail("trailing data");
  if(defeated!=telemetry.targetsDestroyed||ready!=(defeated>=s.requiredTargets))
   return fail("mission or kill count inconsistent");
+ if(!savedLock.empty()&&(!saved.contains(savedLock)||saved.at(savedLock).hp<=0))
+  return fail("locked target is not alive");
  if((phase==unsigned(PrototypePhase::Won)&&!ready)||
     (phase==unsigned(PrototypePhase::Lost)&&health>0))
   return fail("phase inconsistent with objectives or health");
@@ -860,6 +880,9 @@ bool MechaGame::after_restore(std::string_view encoded,std::string* error){
    return fail("saved enemy transform mismatch");
  }
  // Parse-and-validate before committing: failed quickloads retain the live PlayerSession.
+ s.cameraMode=MechCameraMode(savedCamera);
+ s.orbitYaw=savedOrbit;s.orbitPitch=savedPitch;s.jetAirborne=savedAirborne!=0;
+ s.jetActive=false;s.gaitPhase=savedGait;s.lockKey=std::move(savedLock);
  s.motor=motor;s.primaryCooldown=primary;s.rocketCooldown=secondary;
  s.rounds=rounds;s.missiles=missiles;s.nextProjectile=next;s.boostUses=boosts;
  s.telemetry=telemetry;s.rockets=std::move(rockets);
@@ -871,7 +894,7 @@ bool MechaGame::after_restore(std::string_view encoded,std::string* error){
   t.turretYaw=snap.yaw;t.path=std::move(snap.path);t.waypoint=snap.waypoint;
  }
  s.impacts.clear();s.lastBoost=s.lastPause=s.lastRestart=s.lastDebug=false;
- s.camera(true);s.refresh_hud();
+ s.publish();s.camera(true);s.refresh_hud();
  return true;
 }
 

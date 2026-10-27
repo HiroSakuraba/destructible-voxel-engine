@@ -3667,3 +3667,57 @@ if(DVE_EXPERIMENTAL_REGION_INDEX)
         target_link_libraries(dve_region_dirty_bench PRIVATE dve_region_dirty_index)
     endif()
 endif()
+
+
+# R3.1: optional damage-ingress and frame-budgeted GPU/navigation dispatcher.
+# Collision and persistence remain separate explicit consumers.
+if(DVE_EXPERIMENTAL_REGION_INDEX)
+    add_library(dve_region_dirty_dispatch STATIC src/region_dirty_dispatch.cpp)
+    target_include_directories(dve_region_dirty_dispatch PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
+    target_link_libraries(dve_region_dirty_dispatch PUBLIC dve_region_dirty_index dve::core)
+    target_compile_features(dve_region_dirty_dispatch PUBLIC cxx_std_23)
+
+    # GameWorld damage events may fragment/rebuild voxel objects. This adapter
+    # snapshots post-damage generations without changing GameWorld's callback ABI.
+    add_library(dve_region_game_damage STATIC src/region_game_damage.cpp)
+    target_include_directories(dve_region_game_damage PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
+    target_link_libraries(dve_region_game_damage PUBLIC dve_region_dirty_dispatch dve::core)
+    target_compile_features(dve_region_game_damage PUBLIC cxx_std_23)
+    if(MSVC)
+        target_compile_options(dve_region_dirty_dispatch PRIVATE /W4 /permissive-)
+        target_compile_options(dve_region_game_damage PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(dve_region_dirty_dispatch PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+        target_compile_options(dve_region_game_damage PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    endif()
+
+    if(DVE_BUILD_TESTS)
+        # Small isolated harness for contract, capacity and stale-ticket tests.
+        # The real DVE-linked test below validates the actual GPU/nav paths.
+        add_executable(dve_region_dirty_dispatch_tests
+            src/region_catalog.cpp src/region_dirty_index.cpp src/region_dirty_dispatch.cpp
+            tests/test_region_dirty_dispatch.cpp)
+        target_include_directories(dve_region_dirty_dispatch_tests BEFORE PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/region_dirty_dispatch_stub)
+        target_include_directories(dve_region_dirty_dispatch_tests PRIVATE ${DVE_PUBLIC_INCLUDE_DIRS})
+        target_compile_features(dve_region_dirty_dispatch_tests PRIVATE cxx_std_23)
+        if(NOT MSVC)
+            target_compile_options(dve_region_dirty_dispatch_tests PRIVATE
+                -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror)
+        endif()
+        add_test(NAME dve_region_dirty_dispatch_tests COMMAND dve_region_dirty_dispatch_tests)
+
+        add_executable(dve_region_dirty_dispatch_real_tests tests/test_region_dirty_dispatch_real.cpp)
+        target_link_libraries(dve_region_dirty_dispatch_real_tests PRIVATE dve_region_dirty_dispatch)
+        add_test(NAME dve_region_dirty_dispatch_real_tests COMMAND dve_region_dirty_dispatch_real_tests)
+
+        # Actual player GameWorld damage listener, post-fragment snapshot, GPU convergence.
+        add_executable(dve_region_game_damage_real_tests tests/test_region_game_damage_real.cpp)
+        target_link_libraries(dve_region_game_damage_real_tests PRIVATE dve_region_game_damage)
+        add_test(NAME dve_region_game_damage_real_tests COMMAND dve_region_game_damage_real_tests)
+
+        add_executable(dve_region_dirty_dispatch_budget_tests tests/test_region_dirty_dispatch_budget.cpp)
+        target_link_libraries(dve_region_dirty_dispatch_budget_tests PRIVATE dve::core)
+        add_test(NAME dve_region_dirty_dispatch_budget_tests COMMAND dve_region_dirty_dispatch_budget_tests)
+    endif()
+endif()

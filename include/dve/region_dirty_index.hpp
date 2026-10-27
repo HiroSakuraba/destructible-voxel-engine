@@ -72,11 +72,13 @@ public:
     // Query budget is checked before issuing any tickets; no partial batch.
     [[nodiscard]] std::optional<std::vector<RegionDirtyTicket>> lease_box(
         std::uint32_t worldId, std::uint8_t lod, BrickKey minimumRegion,
-        BrickKey maximumRegion, std::size_t maximumTickets);
+        BrickKey maximumRegion, std::size_t maximumTickets,
+        RegionDirtyChannels channels = kAllRegionDirtyChannels);
     [[nodiscard]] RegionDirtyCompletion complete(const RegionDirtyTicket& ticket, bool success);
 
     // Required before replacing/restoring an object when generations can reset.
     [[nodiscard]] std::size_t forget_object(std::uint64_t objectId);
+    [[nodiscard]] std::size_t task_capacity() const noexcept { return config_.maximumTasks; }
     [[nodiscard]] std::size_t task_count() const noexcept { return tasks_.size(); }
     [[nodiscard]] std::size_t inflight_count() const noexcept { return inFlight_; }
     [[nodiscard]] std::size_t pending_count() const noexcept { return tasks_.size() - inFlight_; }

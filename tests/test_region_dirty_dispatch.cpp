@@ -80,4 +80,19 @@ static void channels_and_limits() {
     require(d.offer(0,0,0,std::span<const AppliedBrickEdit>(&edits[0],1),gpuNav)==RegionDirtyOfferResult::Invalid);
 }
 
-int main(){budgeted_delivery();stale_and_failed();channels_and_limits();}
+static void no_navigation_starvation() {
+    RegionCatalog c;RegionDirtyIndex q(c);
+    RegionDirtyDispatcher d(q,{.maximumBufferedEdits=32,.maximumTicketsPerTick=1,.maximumDispatcherMicroseconds=100000,.interestRadius=1});
+    VoxelObject o;for(int x=0;x<5;++x)o.bricks.emplace(BrickKey{x,0,0},Brick{1});
+    GpuBrickMirror m;DynamicNavigationWorld nav;
+    const auto lookup=[&](std::uint64_t){return RegionDirtyTargets{&o,&m,nullptr,&nav,.1F};};
+    std::vector<AppliedBrickEdit> edits;
+    for(int x=0;x<5;++x)edits.push_back(e({x,0,0},1));
+    require(d.offer(0,0,77,edits,gpuNav)==RegionDirtyOfferResult::Accepted);
+    WorkBudget budget;budget.patchBrickLimit=1;
+    (void)d.tick({0,0,0,0,0},budget,lookup); // GPU first
+    (void)d.tick({0,0,0,0,0},budget,lookup); // NAV next
+    require(m.calls>=1 && nav.calls>=1); // cannot starve navigation behind continuous GPU edits
+}
+
+int main(){budgeted_delivery();stale_and_failed();channels_and_limits();no_navigation_starvation();}

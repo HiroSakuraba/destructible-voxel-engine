@@ -151,6 +151,23 @@ void playerapp_save_reload(){
  auto atBoot=resumed->load_game("checkpoint",&error);
  require(bool(atBoot),"load into fresh player: "+error);
  require(resumed->world().state_hash()==baseline,"fresh boot restores same saved world");
+ // Build a structurally valid DVESAVE containing a corrupt mecha game section.
+ // Failure must preserve the live PlayerApp session and all world objects.
+ SaveGameReadReport readReport;
+ auto tampered=app->save_codec().read_file(saved->path,{},&readReport,&error);
+ require(bool(tampered),"read valid save for tampering: "+error);
+ auto& bytes=tampered->gameSections["game.mecha.v1"];
+ require(!bytes.empty(),"mecha section is persisted in the standard DVESAVE file");
+ bytes.assign({std::byte{'X'},std::byte{'Y'},std::byte{'Z'}});
+ const auto invalid=root/"saves"/"invalid.dvesave";
+ GameSaveStats saveStats;
+ require(app->save_codec().write_file(invalid,*tampered,&saveStats,&error),
+   "write invalid controller section: "+error);
+ const auto liveHash=app->world().state_hash();
+ const auto rejected=app->load_game("invalid",&error);
+ require(!rejected,"bad mecha section rejects load");
+ require(app->world().state_hash()==liveHash,
+   "failed load does not mutate the running world");
  std::filesystem::remove_all(root);
 }
 }

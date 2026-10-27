@@ -8,6 +8,7 @@
 #include <cmath>
 #include <iostream>
 #include <memory>
+#include <span>
 #include <stdexcept>
 #include <string>
 using namespace dve;
@@ -179,14 +180,14 @@ void prefab_validation(){
  unsigned feet=0,legs=0;
  for(const auto& [id,obj]:starter.objects()){
   (void)id;
-  if(find_component_by_type(obj.components,"dve.prototype.mech_foot"))++feet;
-  if(find_component_by_type(obj.components,"dve.prototype.mech_leg"))++legs;
+  if(find_component_by_type(std::span<const Component>(obj.components),"dve.prototype.mech_foot"))++feet;
+  if(find_component_by_type(std::span<const Component>(obj.components),"dve.prototype.mech_leg"))++legs;
  }
  check(feet==2&&legs==4,"Iron Yard has two foot pads and four IK segments");
  auto invalid=make_mecha_starter();
  for(const auto& [id,obj]:invalid.objects()){
   (void)obj;auto* o=invalid.find_object(id);
-  if(auto* foot=find_component_by_type(o->components,"dve.prototype.mech_foot")){
+  if(auto* foot=find_component_by_type(std::span<Component>(o->components),"dve.prototype.mech_foot")){
    foot->properties["side"]=std::int64_t{0};break;
   }
  }

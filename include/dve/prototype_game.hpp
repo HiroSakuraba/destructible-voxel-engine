@@ -8,7 +8,6 @@
 #include <vector>
 namespace dve {
 class GameWorld;
-struct MechFootstepEvent;
 class OceanField;
 struct WaterVolumeSettings;
 struct UnderwaterLamp;
@@ -30,6 +29,14 @@ struct WaterSprayEffect {
 };
 // Monotone event sequences cross the fixed-step / real-time audio boundary.
  // The driver de-duplicates them across render frames and avoids replay after quickload.
+// Gameplay events, NOT renderer-owned particles. The consumer chooses sound,
+// decal and VFX presets, and may ignore events when culled.
+struct MechFootstepEvent {
+    Float3 position{},normal{0,0,1};
+    std::uint64_t supportObject{};
+    float intensity{};
+    std::int32_t side{};
+};
 struct MechAudioState {
     std::uint64_t primaryShots{}, rockets{}, impacts{}, enemyShots{}, boostUses{};
 };

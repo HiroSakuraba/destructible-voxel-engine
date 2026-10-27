@@ -48,7 +48,8 @@ public:
     [[nodiscard]] bool start(std::string* error=nullptr);
     void step(float dt);
     void look(float yawDelta,float pitchDelta);
-    [[nodiscard]] bool after_restore(std::string* error=nullptr);
+    [[nodiscard]] bool after_restore(std::string_view state,std::string* error=nullptr);
+    [[nodiscard]] std::string save_state() const;
     [[nodiscard]] const PrototypeHud& hud() const noexcept;
     [[nodiscard]] PrototypeCamera camera() const noexcept;
     [[nodiscard]] const MechMotorState& motor() const noexcept;

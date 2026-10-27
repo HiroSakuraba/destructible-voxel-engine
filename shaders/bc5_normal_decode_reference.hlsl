@@ -2,10 +2,11 @@
 // BC5_UNORM texture through a sampled image, so the CPU mirror decode_bc5_normal_sample() can be
 // compared with real GPU texture decode + HLSL math. Not used by any render pass.
 #include "common/material_mapping.hlsli"
+#include "common/live_bindings.hlsli"
 
-[[vk::binding(0,0)]] [[vk::combinedImageSampler]] Texture2D<float4> gBc5Normals : register(t0);
-[[vk::binding(0,0)]] [[vk::combinedImageSampler]] SamplerState gBc5Sampler : register(s0);
-[[vk::binding(1,0)]] RWStructuredBuffer<float4> gBc5DecodeResults : register(u0);
+DVE_LIVE_IMAGE(0,0) Texture2D<float4> gBc5Normals : register(t0);
+DVE_LIVE_IMAGE(0,0) SamplerState gBc5Sampler : register(s0);
+DVE_LIVE_BIND(1,0) RWStructuredBuffer<float4> gBc5DecodeResults : register(u0);
 
 // The texture is 32x4: eight constant 4x4 BC5 blocks. Thread i samples the center of block i.
 [numthreads(8,1,1)]

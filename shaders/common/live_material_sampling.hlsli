@@ -58,7 +58,9 @@ float3 SampleLiveMaterialNormal(Texture2D<float4> image,SamplerState samplerStat
     if(m.mappingMode<kMaterialMappingWorldTriplanar){
         const float2 uv=LiveMaterialUv(m,uv0,uv1,m.normalTexcoord);
         return ApplyLiveDerivativeNormal(N,worldPosition,uv,
-            image.SampleGrad(samplerState,uv,ddx(uv),ddy(uv)).xyz,m.normalScale);
+            DecodeMaterialNormalSample(
+                image.SampleGrad(samplerState,uv,ddx(uv),ddy(uv)).xyz,
+                m.mappingFlags),m.normalScale);
     }
     const bool local=m.mappingMode==kMaterialMappingObjectTriplanar;
     const float3 sourceN=local?mul(transpose(objectRotation),N):N;

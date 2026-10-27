@@ -1,6 +1,8 @@
 #pragma once
 
 #include <memory>
+#include <filesystem>
+#include <cstdint>
 
 #include "dve/rhi/device.hpp"
 
@@ -10,9 +12,25 @@ namespace dve::rhi {
 // color/depth targets, shader modules, render passes, dynamic viewport/scissor state, and
 // indexed/instanced draws. Presentation, descriptor binding, compute, and timestamps remain
 // explicit unsupported operations until their dedicated work packages.
+// Durations measure actual vkCreate*Pipelines driver calls, not shader compilation,
+// GPU execution or disk-cache hits. Cache-load success means validated seed accepted,
+// not that any individual PSO was a hit.
+struct VulkanPipelineCacheStats {
+    bool cacheAvailable{}, diskSeedAccepted{}, diskSaveSucceeded{};
+    std::uint64_t diskSeedBytes{}, diskSavedBytes{};
+    std::uint64_t graphicsAttempts{}, computeAttempts{};
+    std::uint64_t graphicsTotalNanoseconds{}, computeTotalNanoseconds{};
+    std::uint64_t graphicsMaxNanoseconds{}, computeMaxNanoseconds{};
+};
+
 class VulkanDevice final : public IDevice {
 public:
     VulkanDevice();
+    // Empty path = in-memory cache only. Nonempty path opts into validated
+    // persistent cache; DVE_PSO_CACHE_FILE provides the default constructor's path.
+    explicit VulkanDevice(std::filesystem::path pipelineCacheFile);
+    [[nodiscard]] VulkanPipelineCacheStats pipeline_cache_stats() const noexcept;
+    [[nodiscard]] bool flush_pipeline_cache() noexcept;
     ~VulkanDevice() override;
     VulkanDevice(const VulkanDevice&) = delete;
     VulkanDevice& operator=(const VulkanDevice&) = delete;

@@ -3412,6 +3412,10 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     add_executable(dve_texture_bc5_tests tests/test_texture_bc5.cpp)
     target_link_libraries(dve_texture_bc5_tests PRIVATE dve::render_bridge dve::rhi)
     add_test(NAME dve_texture_bc5_tests COMMAND dve_texture_bc5_tests)
+    add_executable(dve_bc5_shader_mapping_tests tests/test_bc5_shader_mapping.cpp)
+    target_link_libraries(dve_bc5_shader_mapping_tests PRIVATE dve::render_bridge dve::rhi)
+    add_test(NAME dve_bc5_shader_mapping_tests COMMAND dve_bc5_shader_mapping_tests)
+
     add_executable(dve_texture_bc5_quality_bench apps/dve_texture_bc5_quality_bench.cpp)
     target_link_libraries(dve_texture_bc5_quality_bench PRIVATE dve::render_bridge)
 

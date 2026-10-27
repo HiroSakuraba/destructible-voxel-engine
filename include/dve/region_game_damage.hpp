@@ -8,6 +8,12 @@ namespace dve {
 struct RegionGameDamageObject {
     GameObjectId id{};
     std::vector<AppliedBrickEdit> fullEdits{};
+    // fullEdits only name bricks that exist now. GPU mirrors never drop slots on an
+    // incremental update, so bricks removed by a queued-destruction commit or a fragment
+    // split would stay visible. The host must call
+    // RegionDirtyDispatcher::mark_geometry_replaced(id) when this is true (it always is:
+    // the adapter has no previous snapshot to prove that no brick disappeared).
+    bool rebuildRequired{true};
 };
 struct RegionGameDamageSnapshot {
     std::vector<RegionGameDamageObject> refreshed{};

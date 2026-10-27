@@ -6,10 +6,12 @@
 #include "dve/region_dirty_index.hpp"
 #include "dve/work_debt.hpp"
 #include <cstddef>
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <functional>
 #include <optional>
+#include <set>
 #include <span>
 #include <vector>
 
@@ -46,6 +48,7 @@ struct RegionDirtyDispatchStats {
     std::size_t coalesced{};
     std::size_t gpuTickets{};
     std::size_t gpuBatches{};
+    std::size_t gpuRebuilds{};
     std::size_t navigationInvalidations{};
     std::size_t superseded{};
     std::size_t retried{};
@@ -75,6 +78,13 @@ public:
     // Explicit lifecycle invalidation: remove outstanding edits on object
     // teardown, restore or generation reset before the ID can be reused.
     void forget_object(std::uint64_t objectId);
+
+    // GPU mirrors only gain or overwrite slots on incremental updates; they never drop
+    // bricks that disappeared from the authority. When an object's voxel storage was
+    // replaced (queued destruction commit, fragment split, restore) call this so the next
+    // tick rebuilds the GPU mirror/packed scene from the authority snapshot. The request
+    // is retained until a rebuild succeeds (or forget_object). Authority-thread-only.
+    void mark_geometry_replaced(std::uint64_t objectId);
     [[nodiscard]] std::size_t buffered_edit_count() const noexcept { return bufferedEdits_; }
     [[nodiscard]] std::size_t buffer_capacity() const noexcept { return config_.maximumBufferedEdits; }
 
@@ -87,10 +97,11 @@ private:
         std::vector<AppliedBrickEdit> edits{};
         std::size_t cursor{};
     };
-    void forward_ingress(RegionDirtyDispatchStats& stats);
+    void forward_ingress(RegionDirtyDispatchStats& stats, std::chrono::steady_clock::time_point deadline);
     RegionDirtyIndex& queue_;
     RegionDirtyDispatchConfig config_;
     std::deque<Buffered> ingress_{};
+    std::set<std::uint64_t> rebuild_{};
     std::size_t bufferedEdits_{};
     std::size_t totalOffered_{};
     bool favorNavNext_{};

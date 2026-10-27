@@ -42,6 +42,7 @@ int main() {
     require(events.front().refreshed.front().id==id);
     const auto& edits=events.front().refreshed.front().fullEdits;
     require(!edits.empty());
+    require(events.front().refreshed.front().rebuildRequired);
 
     RegionCatalog catalog;
     RegionDirtyIndex queue(catalog);
@@ -49,6 +50,7 @@ int main() {
         .maximumDispatcherMicroseconds=500000,.interestRadius=2});
     require(dispatcher.offer(0,0,id,edits,region_dirty_channel(RegionDirtyConsumer::Gpu))
         == RegionDirtyOfferResult::Accepted);
+    dispatcher.mark_geometry_replaced(id);
     WorkBudget budget;
     auto stats=dispatcher.tick({0,0,0,0,0},budget,[&](std::uint64_t requestedId) {
         if (requestedId!=id) return RegionDirtyTargets{};
@@ -56,7 +58,7 @@ int main() {
         return current.empty()?RegionDirtyTargets{}:
             RegionDirtyTargets{current.front().voxels,&mirror,&packed,nullptr,.1F};
     });
-    require(stats.gpuTickets>0 && queue.task_count()==0);
+    require(stats.gpuRebuilds==1 && stats.gpuTickets>0 && queue.task_count()==0);
     const auto after=world.render_objects();
     require(after.size()==1 && after.front().voxels);
     require(mirror.validate_against(*after.front().voxels));

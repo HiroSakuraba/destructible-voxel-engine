@@ -1,5 +1,6 @@
 #include "dve/render/bc7f_texture_encoder.hpp"
 #include "dve/rhi/null_device.hpp"
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>

@@ -7,6 +7,7 @@
 #include <cmath>
 #include <iostream>
 #include <memory>
+#include <span>
 #include <stdexcept>
 #include <string>
 using namespace dve;
@@ -211,14 +212,14 @@ void validates_complete_leg_rig(){
  unsigned segments=0;
  for(const auto& [id,o]:d.objects()){
   (void)id;
-  if(find_component_by_type(o.components,"dve.prototype.mech_leg"))++segments;
+  if(find_component_by_type(std::span<const Component>(o.components),"dve.prototype.mech_leg"))++segments;
  }
  require(segments==4,"Iron Yard has two thighs and two shins");
  auto invalid=make_mecha_starter();
  for(const auto& [id,o]:invalid.objects()){
   (void)o;
   auto* object=invalid.find_object(id);
-  if(auto* c=find_component_by_type(object->components,"dve.prototype.mech_leg")){
+  if(auto* c=find_component_by_type(std::span<Component>(object->components),"dve.prototype.mech_leg")){
    c->properties["side"]=std::int64_t{0};
    break;
   }

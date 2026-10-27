@@ -15,6 +15,7 @@ on:
       - "src/region_streaming*.cpp"
       - "tests/test_region_catalog.cpp"
       - "tests/test_region_dirty*.cpp"
+      - "tests/test_region_game_damage_real.cpp"
       - "tests/region_dirty_dispatch_stub/**"
       - "tests/test_region_streaming*.cpp"
       - "tests/region_streaming_contract_stub/**"
@@ -77,5 +78,5 @@ jobs:
       - name: Build and run R2 against real DVE scene staging and renderer
         if: matrix.mode == 'release'
         run: |
-          cmake --build build-region --target dve_region_streaming_real_tests dve_region_dirty_gpu_tests dve_region_dirty_dispatch_real_tests dve_region_dirty_dispatch_budget_tests dve_region_game_damage --parallel 2
-          ctest --test-dir build-region -R '^dve_region_(streaming_real_tests|dirty_gpu_tests|dirty_dispatch_real_tests|dirty_dispatch_budget_tests)$' --output-on-failure
+          cmake --build build-region --target dve_region_streaming_real_tests dve_region_dirty_gpu_tests dve_region_dirty_dispatch_real_tests dve_region_dirty_dispatch_budget_tests dve_region_game_damage_real_tests --parallel 2
+          ctest --test-dir build-region -R '^dve_region_(streaming_real_tests|dirty_gpu_tests|dirty_dispatch_real_tests|dirty_dispatch_budget_tests|game_damage_real_tests)$' --output-on-failure

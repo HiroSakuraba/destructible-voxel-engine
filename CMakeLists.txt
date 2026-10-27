@@ -3708,6 +3708,11 @@ if(DVE_EXPERIMENTAL_REGION_INDEX)
         target_link_libraries(dve_region_dirty_dispatch_real_tests PRIVATE dve_region_dirty_dispatch)
         add_test(NAME dve_region_dirty_dispatch_real_tests COMMAND dve_region_dirty_dispatch_real_tests)
 
+        # Actual player GameWorld damage listener, post-fragment snapshot, GPU convergence.
+        add_executable(dve_region_game_damage_real_tests tests/test_region_game_damage_real.cpp)
+        target_link_libraries(dve_region_game_damage_real_tests PRIVATE dve_region_game_damage)
+        add_test(NAME dve_region_game_damage_real_tests COMMAND dve_region_game_damage_real_tests)
+
         add_executable(dve_region_dirty_dispatch_budget_tests tests/test_region_dirty_dispatch_budget.cpp)
         target_link_libraries(dve_region_dirty_dispatch_budget_tests PRIVATE dve::core)
         add_test(NAME dve_region_dirty_dispatch_budget_tests COMMAND dve_region_dirty_dispatch_budget_tests)

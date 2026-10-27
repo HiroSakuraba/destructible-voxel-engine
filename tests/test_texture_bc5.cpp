@@ -73,7 +73,7 @@ void test_residency_and_fallback() {
     require(bytes>0U,"BC5 residency pump failed");
     const auto* record=manager.find(111U);
     require(record && record->format==rhi::TextureFormat::BC5RGUnorm,"BC5 GPU format");
-    require(record->residentBytes==80U,"7x5 BC5 3-level total should be 80 bytes");
+    require(record->residentBytes==96U,"7x5 BC5 3-level total should be 96 bytes");
     const auto old=manager.reference(111U);
     require(old.has_value(),"missing BC5 reference");
     require(manager.enqueue(request(image),&error),"BC5 unchanged request");

@@ -31,14 +31,6 @@ struct MechFootContact {
     std::uint64_t supportObject{};
     bool planted{},supported{};
 };
-// Gameplay events, NOT renderer-owned particles. The consumer chooses sound,
-// decal and VFX presets, and may ignore events when culled.
-struct MechFootstepEvent {
-    Float3 position{},normal{0,0,1};
-    std::uint64_t supportObject{};
-    float intensity{};
-    std::int32_t side{};
-};
 enum class MechCameraMode : std::uint8_t { Tactical, ThirdPerson };
 enum class MechWeaponKind : std::uint8_t { Autocannon, Rocket };
 struct MechProjectile {

@@ -573,6 +573,10 @@ void MechaGame::step(float dt){
 std::string MechaGame::save_state() const {
  const auto& s=*impl_;
  if(!s.started)return {};
+ // Navigation paths are a cache: a replan is forced when one is empty. A route longer than the
+ // loader accepts (256 points), or a section that would exceed the 64 KiB loader cap, must
+ // not produce a save that cannot be loaded, so such paths are dropped instead.
+ const auto encode=[&](bool paths){
  std::ostringstream out;out.imbue(std::locale::classic());
  out<<std::setprecision(9)<<"DVE_MECHA 1 "<<unsigned(s.hud.phase)<<' '
     <<s.hud.health<<' '<<int(s.hud.debug)<<' '<<int(s.extractionReady)<<' '
@@ -586,12 +590,13 @@ std::string MechaGame::save_state() const {
     <<s.telemetry.voxelCarvesQueued<<' '<<s.telemetry.enemyShots<<' '
     <<s.telemetry.navigationReplans<<' '<<s.targets.size()<<'\n';
  for(const auto& t:s.targets){
+  const bool keep=paths&&t.path.size()<=256U&&t.waypoint<=t.path.size();
   const auto p=s.world.position(t.id).value_or(t.spawn);
   out<<std::quoted(t.key)<<' '<<t.hp<<' '<<t.cooldown<<' '
-     <<t.replanCountdown<<' '<<t.turretYaw<<' '
+     <<(keep?t.replanCountdown:0.F)<<' '<<t.turretYaw<<' '
      <<p.x<<' '<<p.y<<' '<<p.z<<' '
-     <<t.waypoint<<' '<<t.path.size()<<'\n';
-  for(const auto& q:t.path)out<<q.x<<' '<<q.y<<' '<<q.z<<'\n';
+     <<(keep?t.waypoint:std::size_t{0})<<' '<<(keep?t.path.size():std::size_t{0})<<'\n';
+  if(keep)for(const auto& q:t.path)out<<q.x<<' '<<q.y<<' '<<q.z<<'\n';
  }
  out<<s.rockets.size()<<'\n';
  for(const auto& p:s.rockets)
@@ -599,6 +604,10 @@ std::string MechaGame::save_state() const {
      <<p.velocity.x<<' '<<p.velocity.y<<' '<<p.velocity.z<<' '
      <<p.remainingSeconds<<' '<<p.sequence<<'\n';
  return out.str();
+ };
+ auto encoded=encode(true);
+ if(encoded.size()>65536U)encoded=encode(false);
+ return encoded;
 }
 bool MechaGame::after_restore(std::string_view encoded,std::string* error){
  auto& s=*impl_;

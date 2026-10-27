@@ -553,9 +553,141 @@ void MechaGame::step(float dt){
   }
  s.world.tick(dt);s.age_effects(dt);s.camera();s.refresh_hud();
 }
-bool MechaGame::after_restore(std::string* error){
- // M5 will serialize full combat state. Do not pretend that quickload restores combat targets.
- if(error)*error="M1/M2 mecha quickload is not supported until combat-state serialization (M5)";
- return false;
+// A small versioned application section in DVESAVE. World voxels, objects, transforms,
+// physics and timing stay in the authoritative GameWorld section; these are ONLY the
+// mecha-controller values absent from GameWorld (ammo, aim, AI cooldowns, mission state).
+std::string MechaGame::save_state() const {
+ const auto& s=*impl_;
+ if(!s.started)return {};
+ std::ostringstream out;out.imbue(std::locale::classic());
+ out<<std::setprecision(9)<<"DVE_MECHA 1 "<<unsigned(s.hud.phase)<<' '
+    <<s.hud.health<<' '<<int(s.hud.debug)<<' '<<int(s.extractionReady)<<' '
+    <<s.motor.position.x<<' '<<s.motor.position.y<<' '<<s.motor.position.z<<' '
+    <<s.motor.velocity.x<<' '<<s.motor.velocity.y<<' '<<s.motor.velocity.z<<' '
+    <<s.motor.legsYaw<<' '<<s.motor.torsoYaw<<' '<<s.motor.energy<<' '
+    <<s.primaryCooldown<<' '<<s.rocketCooldown<<' '
+    <<s.rounds<<' '<<s.missiles<<' '<<s.nextProjectile<<' '<<s.boostUses<<' '
+    <<s.telemetry.autocannonShots<<' '<<s.telemetry.rocketsFired<<' '
+    <<s.telemetry.targetsDestroyed<<' '<<s.telemetry.impacts<<' '
+    <<s.telemetry.voxelCarvesQueued<<' '<<s.telemetry.enemyShots<<' '
+    <<s.telemetry.navigationReplans<<' '<<s.targets.size()<<'\n';
+ for(const auto& t:s.targets){
+  const auto p=s.world.position(t.id).value_or(t.spawn);
+  out<<std::quoted(t.key)<<' '<<t.hp<<' '<<t.cooldown<<' '
+     <<t.replanCountdown<<' '<<t.turretYaw<<' '
+     <<p.x<<' '<<p.y<<' '<<p.z<<' '
+     <<t.waypoint<<' '<<t.path.size()<<'\n';
+  for(const auto& q:t.path)out<<q.x<<' '<<q.y<<' '<<q.z<<'\n';
+ }
+ out<<s.rockets.size()<<'\n';
+ for(const auto& p:s.rockets)
+  out<<p.position.x<<' '<<p.position.y<<' '<<p.position.z<<' '
+     <<p.velocity.x<<' '<<p.velocity.y<<' '<<p.velocity.z<<' '
+     <<p.remainingSeconds<<' '<<p.sequence<<'\n';
+ return out.str();
 }
+bool MechaGame::after_restore(std::string_view encoded,std::string* error){
+ auto& s=*impl_;
+ const auto fail=[&](std::string reason){if(error)*error="Invalid mecha save: "+reason;return false;};
+ if(encoded.empty())return fail("missing mecha game section (older saves cannot restore M1-M4 combat state)");
+ if(encoded.size()>65536U)return fail("section exceeds 64 KiB");
+ std::istringstream in{std::string(encoded)};in.imbue(std::locale::classic());
+ std::string magic;unsigned version{},phase{},debug{},ready{};
+ MechMotorState motor{};
+ float health{},primary{},secondary{};
+ unsigned rounds{},missiles{};
+ std::uint64_t next{},boosts{};
+ MechCombatTelemetry telemetry{};
+ std::size_t nTargets{};
+ in>>magic>>version>>phase>>health>>debug>>ready
+   >>motor.position.x>>motor.position.y>>motor.position.z
+   >>motor.velocity.x>>motor.velocity.y>>motor.velocity.z
+   >>motor.legsYaw>>motor.torsoYaw>>motor.energy
+   >>primary>>secondary>>rounds>>missiles>>next>>boosts
+   >>telemetry.autocannonShots>>telemetry.rocketsFired
+   >>telemetry.targetsDestroyed>>telemetry.impacts
+   >>telemetry.voxelCarvesQueued>>telemetry.enemyShots
+   >>telemetry.navigationReplans>>nTargets;
+ if(!in||magic!="DVE_MECHA"||version!=1||phase>3||debug>1||ready>1
+    ||!finite3(motor.position)||!finite3(motor.velocity)
+    ||!std::isfinite(motor.legsYaw)||!std::isfinite(motor.torsoYaw)
+    ||!std::isfinite(motor.energy)||motor.energy<0||motor.energy>100
+    ||!std::isfinite(health)||health<0||health>s.hud.maximumHealth
+    ||!std::isfinite(primary)||primary<0||primary>1
+    ||!std::isfinite(secondary)||secondary<0||secondary>2
+    ||rounds>200||missiles>12||next==0||next>1000000000000ULL
+    ||nTargets!=s.targets.size()||nTargets>64)return fail("header out of range");
+ struct TargetSnapshot {
+  float hp{},cooldown{},replan{},yaw{};
+  Float3 position{};std::size_t waypoint{};
+  std::vector<Float3> path;
+ };
+ std::map<std::string,TargetSnapshot> saved;
+ std::uint64_t defeated{};
+ for(std::size_t i=0;i<nTargets;++i){
+  std::string key;TargetSnapshot t;std::size_t points{};
+  in>>std::quoted(key)>>t.hp>>t.cooldown>>t.replan>>t.yaw
+    >>t.position.x>>t.position.y>>t.position.z>>t.waypoint>>points;
+  if(!in||!key_ok(key)||!std::isfinite(t.hp)||t.hp<0
+    ||!std::isfinite(t.cooldown)||t.cooldown<0||t.cooldown>30
+    ||!std::isfinite(t.replan)||t.replan<0||t.replan>10
+    ||!std::isfinite(t.yaw)||!finite3(t.position)
+    ||points>256||t.waypoint>points)return fail("enemy state out of range");
+  t.path.resize(points);
+  for(auto& q:t.path){
+   in>>q.x>>q.y>>q.z;
+   if(!in||!finite3(q))return fail("navigation path invalid");
+  }
+  if(t.hp==0)++defeated;
+  if(!saved.emplace(std::move(key),std::move(t)).second)return fail("duplicate enemy key");
+ }
+ std::size_t rocketCount{};in>>rocketCount;
+ if(!in||rocketCount>128)return fail("invalid rocket count");
+ std::vector<MechProjectile> rockets;rockets.reserve(rocketCount);
+ std::set<std::uint64_t> sequences;
+ for(std::size_t i=0;i<rocketCount;++i){
+  MechProjectile p;
+  in>>p.position.x>>p.position.y>>p.position.z
+    >>p.velocity.x>>p.velocity.y>>p.velocity.z
+    >>p.remainingSeconds>>p.sequence;
+  if(!in||!finite3(p.position)||!finite3(p.velocity)
+     ||!std::isfinite(p.remainingSeconds)||p.remainingSeconds<=0||p.remainingSeconds>4
+     ||p.sequence==0||p.sequence>=next||!sequences.insert(p.sequence).second)
+   return fail("invalid rocket");
+  rockets.push_back(p);
+ }
+ in>>std::ws;
+ if(!in.eof())return fail("trailing data");
+ if(defeated!=telemetry.targetsDestroyed||ready!=(defeated>=s.requiredTargets))
+  return fail("mission or kill count inconsistent");
+ if((phase==unsigned(PrototypePhase::Won)&&!ready)||
+    (phase==unsigned(PrototypePhase::Lost)&&health>0))
+  return fail("phase inconsistent with objectives or health");
+ if(auto position=s.world.position(s.player);!position||
+    mag(minus(*position,motor.position))>.015F)return fail("saved chassis transform mismatch");
+ for(const auto& t:s.targets){
+  const auto it=saved.find(t.key);if(it==saved.end())return fail("missing enemy key");
+  const auto& snap=it->second;
+  if(snap.hp>t.initial)return fail("enemy health exceeds authored maximum");
+  if(s.world.is_enabled(t.id)!=(snap.hp>0))return fail("world enemy enabled state mismatch");
+  const auto position=s.world.position(t.id);
+  if(!position||mag(minus(*position,snap.position))>.015F)
+   return fail("saved enemy transform mismatch");
+ }
+ // Parse-and-validate before committing: failed quickloads retain the live PlayerSession.
+ s.motor=motor;s.primaryCooldown=primary;s.rocketCooldown=secondary;
+ s.rounds=rounds;s.missiles=missiles;s.nextProjectile=next;s.boostUses=boosts;
+ s.telemetry=telemetry;s.rockets=std::move(rockets);
+ s.extractionReady=ready!=0;s.hud.phase=PrototypePhase(phase);
+ s.hud.health=health;s.hud.debug=debug!=0;
+ for(auto& t:s.targets){
+  auto& snap=saved.at(t.key);
+  t.hp=snap.hp;t.cooldown=snap.cooldown;t.replanCountdown=snap.replan;
+  t.turretYaw=snap.yaw;t.path=std::move(snap.path);t.waypoint=snap.waypoint;
+ }
+ s.impacts.clear();s.lastBoost=s.lastPause=s.lastRestart=s.lastDebug=false;
+ s.camera(true);s.refresh_hud();
+ return true;
+}
+
 } // namespace dve

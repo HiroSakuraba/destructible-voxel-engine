@@ -15,6 +15,20 @@ static const uint kMaterialFlagDoubleSided = 1u << 0u;
 static const uint kMaterialFlagBaseColorSrgb = 1u << 1u;
 static const uint kMaterialFlagEmissiveSrgb = 1u << 2u;
 static const uint kMaterialFlagDetailBaseColorSrgb = 1u << 3u;
+static const uint kMaterialFlagNormalBc5 = 1u << 4u;
+
+// Returns a legacy-compatible [0,1] XYZ normal. BC5_UNORM supplies just RG;
+// the original Z is discarded by compression and must be reconstructed from
+// the two sampled channels. Clamp outside-unit XY after GPU interpolation and
+// guard flat/degenerate samples before normalization. No sRGB conversion.
+float3 DecodeMaterialNormalSample(float3 sampled, uint mappingFlags) {
+    if ((mappingFlags & kMaterialFlagNormalBc5) == 0u) return sampled;
+    const float2 xy = sampled.xy * 2.0f - 1.0f;
+    const float z = sqrt(max(0.0f, 1.0f - dot(xy, xy)));
+    const float3 n = float3(xy, z);
+    const float3 unit = n * rsqrt(max(dot(n, n), 1.0e-12f));
+    return saturate(unit * 0.5f + 0.5f);
+}
 
 struct PolygonMaterialMappingRecord {
     uint mappingMode;

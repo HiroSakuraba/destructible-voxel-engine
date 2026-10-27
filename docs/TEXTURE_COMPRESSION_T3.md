@@ -1,6 +1,6 @@
 # T3 — BC5 normal compression, texture quality evidence and native packaging
 
-T3 stacks on T2 PR #243; T2 is still open. The new code is independently reviewable and does not require a merge of #243.
+T3 builds on T2 (PR #243, merged): it reuses the `TextureResidencyManager` byte-accounting and encode-before-duplicate-check behavior and adds a BC5 path beside the BC7 hook.
 
 ## BC5 native blocks
 
@@ -16,7 +16,7 @@ Added an optional BC5 encoder callback to TextureResidencyManager. For Normal + 
 
 ## Packaging and benchmarks
 
-Implemented deterministic DDS DX10 writer for already encoded BC1/3/4/5/6H/7 with exact mip-chain validation. Added an optional native KTX2 writer through Khronos libktx, default off and requiring an installed libktx; it avoids hand-writing a potentially invalid KTX Data Format Descriptor. KTX2 universal/Basis supercompression and transcode remain future work.
+Implemented deterministic DDS DX10 writer for already encoded BC1/3/4/5/6H/7 with exact mip-chain validation (header uses DDSD_LINEARSIZE with the top-mip byte size; DDSCAPS_COMPLEX|MIPMAP only for chains of two or more mips). Added an optional native KTX2 writer through Khronos libktx, default off and requiring an installed libktx; it avoids hand-writing a potentially invalid KTX Data Format Descriptor. KTX2 universal/Basis supercompression and transcode remain future work.
 
 Added a benchmark using representative **synthetic** flat/wavy/woven normals, or a caller-supplied RGBA8 normal texture file from a DVE material bake. It reports encoded bytes, time, mean angular reconstruction error. Do not interpret it as a measured game-frame improvement.
 

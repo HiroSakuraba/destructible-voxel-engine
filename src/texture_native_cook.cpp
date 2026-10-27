@@ -55,14 +55,17 @@ bool encode_native_bc_dds(const CompressedTextureAsset& texture,
     dds.resize(total);
     put(dds,0U,0x20534444U); // DDS
     put(dds,4U,124U); // DDS_HEADER size
-    put(dds,8U,0x0002100FU); // caps | height | width | pixel format | linear size | mipmaps
+    // DDSD_CAPS|HEIGHT|WIDTH|PIXELFORMAT|MIPMAPCOUNT|LINEARSIZE. Block-compressed payloads store the
+    // top-level byte size in dwPitchOrLinearSize, so DDSD_LINEARSIZE (not DDSD_PITCH) applies.
+    put(dds,8U,0x1U|0x2U|0x4U|0x1000U|0x20000U|0x80000U);
     put(dds,12U,height);put(dds,16U,width);
     put(dds,20U,static_cast<std::uint32_t>(texture.mips.front().blocks.size()));
     put(dds,28U,static_cast<std::uint32_t>(texture.mips.size()));
     put(dds,76U,32U); // DDS_PIXELFORMAT size
     put(dds,80U,0x4U); // DDS_FOURCC
     put(dds,84U,0x30315844U); // 'DX10'
-    put(dds,108U,0x1000U|0x8U|(texture.mips.size()>1U?0x400000U:0U)); // texture/complex/mipmap
+    // DDSCAPS_TEXTURE always; COMPLEX|MIPMAP only when a mip chain is present.
+    put(dds,108U,0x1000U|(texture.mips.size()>1U?(0x8U|0x400000U):0U));
     put(dds,128U,format);
     put(dds,132U,3U); // D3D10_RESOURCE_DIMENSION_TEXTURE2D
     put(dds,136U,0U); // misc flag

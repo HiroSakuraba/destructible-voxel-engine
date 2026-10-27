@@ -26,6 +26,33 @@ dve::CompressedTextureAsset asset(dve::rhi::TextureFormat format,
     }
     return image;
 }
+std::uint32_t le32(const std::vector<std::byte>& b,std::size_t o) {
+    std::uint32_t v=0;
+    for(std::size_t i=0;i<4U;++i) v|=static_cast<std::uint32_t>(std::to_integer<unsigned>(b[o+i]))<<(8U*i);
+    return v;
+}
+// Exact DDS/DX10 header contract (the parser ignores most of these fields, so assert them here).
+void header_contract(dve::rhi::TextureFormat format,std::uint32_t dxgi) {
+    for(const unsigned mips:{1U,3U}) {
+        auto image=asset(format,7U,5U,mips);
+        std::vector<std::byte> dds;std::string error;
+        check(dve::encode_native_bc_dds(image,dds,&error),"DDS header cook failed");
+        check(le32(dds,0)==0x20534444U && le32(dds,4)==124U && le32(dds,76)==32U,"DDS magic/header sizes");
+        const auto flags=le32(dds,8);
+        check((flags&0x1U)&&(flags&0x2U)&&(flags&0x4U)&&(flags&0x1000U),"DDS required header flags");
+        check((flags&0x80000U)!=0U,"compressed DDS must set DDSD_LINEARSIZE");
+        check((flags&0x8U)==0U,"compressed DDS must not set DDSD_PITCH");
+        check(((flags&0x20000U)!=0U)==true && le32(dds,28)==mips,"DDS mip count flag/value");
+        check(le32(dds,12)==5U && le32(dds,16)==7U,"DDS height/width order");
+        check(le32(dds,20)==image.mips.front().blocks.size(),"DDS linear size is top mip bytes");
+        check(le32(dds,80)==0x4U && le32(dds,84)==0x30315844U,"DDS FOURCC DX10");
+        const auto caps=le32(dds,108);
+        check((caps&0x1000U)!=0U,"DDSCAPS_TEXTURE");
+        check(((caps&0x8U)!=0U)==(mips>1U) && ((caps&0x400000U)!=0U)==(mips>1U),
+              "DDS COMPLEX/MIPMAP caps only with a mip chain");
+        check(le32(dds,128)==dxgi && le32(dds,132)==3U && le32(dds,140)==1U,"DX10 header");
+    }
+}
 void roundtrip(dve::rhi::TextureFormat format) {
     auto image=asset(format,7U,5U,3U);
     std::vector<std::byte> dds;std::string error;
@@ -55,6 +82,10 @@ int main(){try {
     roundtrip(dve::rhi::TextureFormat::BC7RGBAUnorm);
     roundtrip(dve::rhi::TextureFormat::BC7RGBASrgb);
     roundtrip(dve::rhi::TextureFormat::BC6HRGBUfloat);
+    header_contract(dve::rhi::TextureFormat::BC5RGUnorm,83U);
+    header_contract(dve::rhi::TextureFormat::BC6HRGBUfloat,95U);
+    header_contract(dve::rhi::TextureFormat::BC7RGBAUnorm,98U);
+    header_contract(dve::rhi::TextureFormat::BC7RGBASrgb,99U);
     auto unsupported=asset(dve::rhi::TextureFormat::ASTC6x6RGBAUnorm,7U,5U,1U);
     std::vector<std::byte> out;std::string err;
     check(!dve::encode_native_bc_dds(unsupported,out,&err),

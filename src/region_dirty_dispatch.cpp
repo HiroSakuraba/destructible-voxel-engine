@@ -41,7 +41,7 @@ RegionDirtyOfferResult RegionDirtyDispatcher::offer(std::uint32_t world, std::ui
     std::uint64_t id, std::span<const AppliedBrickEdit> edits, RegionDirtyChannels channels) {
     if (id == 0 || !valid_channels(channels)) return RegionDirtyOfferResult::Invalid;
     if (static_cast<std::size_t>(std::popcount(static_cast<unsigned>(channels))) > queue_.task_capacity())
-        return RegionDirtyOfferResult::Backpressure;
+        return RegionDirtyOfferResult::Invalid;
     if (edits.size() > config_.maximumBufferedEdits - bufferedEdits_) return RegionDirtyOfferResult::Backpressure;
     // Allocation and copy finish before mutating observable queue state.
     Buffered buffer{world, lod, id, channels, {edits.begin(),edits.end()}, 0};
@@ -101,10 +101,37 @@ RegionDirtyDispatchStats RegionDirtyDispatcher::tick(RegionKey camera, const Wor
     const BrickKey lo=region_corner(camera,config_.interestRadius,false);
     const BrickKey hi=region_corner(camera,config_.interestRadius,true);
 
-    // Prioritize GPU publications. Only lease channels this dispatcher can acknowledge.
+    // Every frame reserves some service for navigation; with a one-ticket
+    // budget, alternate which consumer gets first refusal. Empty navigation
+    // queues surrender their reserved slot to GPU rather than waste a frame.
     const auto gpuChannel=region_dirty_channel(RegionDirtyConsumer::Gpu);
     const auto navChannel=region_dirty_channel(RegionDirtyConsumer::Navigation);
-    auto gpu=queue_.lease_box(camera.worldId,camera.lod,lo,hi,cap,gpuChannel);
+    auto publish_nav=[&](std::size_t maximumTickets) -> std::size_t {
+        if (maximumTickets==0 || time_exceeded()) return 0;
+        auto nav=queue_.lease_box(camera.worldId,camera.lod,lo,hi,maximumTickets,navChannel);
+        if (!nav) { stats.queryRejected=true; return 0; }
+        for (const auto& t:*nav) {
+            if (time_exceeded()) { stats.hitTimeBudget=true; (void)queue_.complete(t,false); continue; }
+            const auto target=lookup(t.key.objectId);
+            const auto bounds=RegionDirtyIndex::voxel_bounds(t.key.brick);
+            bool ok=false;
+            if (target.navigation && bounds && std::isfinite(target.metresPerVoxel) && target.metresPerVoxel>0.0F) {
+                try { target.navigation->mark_voxel_edit(bounds->minimum,bounds->maximum,target.metresPerVoxel); ok=true; }
+                catch (...) { ++stats.failed; }
+            }
+            const auto done=queue_.complete(t,ok);
+            if (done==RegionDirtyCompletion::Retired) ++stats.navigationInvalidations;
+            else if (done==RegionDirtyCompletion::Superseded) ++stats.superseded;
+            else ++stats.retried;
+        }
+        return nav->size();
+    };
+    const bool favorNav=favorNavNext_;
+    favorNavNext_=!favorNavNext_;
+    const std::size_t preNav=(cap==1 && favorNav)?publish_nav(1):0;
+    const std::size_t gpuQuota=(cap==1)?cap-preNav:cap-1;
+    auto gpu=gpuQuota ? queue_.lease_box(camera.worldId,camera.lod,lo,hi,gpuQuota,gpuChannel)
+                      : std::optional<std::vector<RegionDirtyTicket>>(std::vector<RegionDirtyTicket>{});
     if (!gpu) { stats.queryRejected=true; stats.pending=queue_.task_count(); return stats; }
     std::map<std::uint64_t,std::vector<RegionDirtyTicket>> groups;
     for (const auto& t:*gpu) groups[t.key.objectId].push_back(t);
@@ -154,26 +181,10 @@ RegionDirtyDispatchStats RegionDirtyDispatcher::tick(RegionKey camera, const Wor
         }
         used += tickets.size();
     }
-    if (used >= cap) stats.hitTicketBudget=true;
+    if (preNav + used >= cap) stats.hitTicketBudget=true;
 
-    if (!time_exceeded() && used < cap) {
-        auto nav=queue_.lease_box(camera.worldId,camera.lod,lo,hi,cap-used,navChannel);
-        if (!nav) stats.queryRejected=true;
-        else for (const auto& t:*nav) {
-            if (time_exceeded()) { stats.hitTimeBudget=true; (void)queue_.complete(t,false); continue; }
-            const auto target=lookup(t.key.objectId);
-            const auto bounds=RegionDirtyIndex::voxel_bounds(t.key.brick);
-            bool ok=false;
-            if (target.navigation && bounds && std::isfinite(target.metresPerVoxel) && target.metresPerVoxel>0.0F) {
-                try { target.navigation->mark_voxel_edit(bounds->minimum,bounds->maximum,target.metresPerVoxel); ok=true; }
-                catch (...) { ++stats.failed; }
-            }
-            const auto done=queue_.complete(t,ok);
-            if (done==RegionDirtyCompletion::Retired) ++stats.navigationInvalidations;
-            else if (done==RegionDirtyCompletion::Superseded) ++stats.superseded;
-            else ++stats.retried;
-        }
-    }
+    if (!time_exceeded() && preNav + used < cap)
+        (void)publish_nav(cap-preNav-used);
     stats.pending=queue_.task_count();
     stats.hitTimeBudget=stats.hitTimeBudget||time_exceeded();
     return stats;

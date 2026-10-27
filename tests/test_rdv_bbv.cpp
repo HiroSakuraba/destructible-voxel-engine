@@ -1,3 +1,4 @@
+#include "dve_test_skip.hpp"
 #include "dve/render/rdv_bbv.hpp"
 #include "dve/render/rdv_viewport.hpp"
 #include "dve/rhi/null_device.hpp"
@@ -654,10 +655,13 @@ void test_validation() {
                       "native GPU BBV toroidal scroll mapped the wrong occupied slot");
         }
         test_native_gpu_scene_parity(shader);
+    } else {
+        dve::testing::note_skip("native GPU BBV parity: DVE_RDV_TRACE_SPV names no compiled shader");
     }
 #else
     if (std::getenv("DVE_REQUIRE_VULKAN") != nullptr)
         throw std::runtime_error("DVE_REQUIRE_VULKAN is set but the Vulkan RHI backend was not built");
+    dve::testing::note_skip("native GPU BBV parity: the Vulkan RHI backend was not built");
 #endif
 }
 } // namespace
@@ -672,7 +676,7 @@ int main() {
         test_dirty_ranges_are_coalesced();
         test_validation();
         std::cout << "dve_rdv_bbv_tests: PASS\n";
-        return 0;
+        return dve::testing::exit_code(false);
     } catch (const std::exception& e) {
         std::cerr << "dve_rdv_bbv_tests: FAIL: " << e.what() << '\n';
         return 1;

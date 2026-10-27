@@ -1,3 +1,4 @@
+#include "dve_test_skip.hpp"
 #include "dve/gpu_material_surface_detail.hpp"
 #include "dve/polygon_bvh.hpp"
 #include "dve/render/polygon_renderer.hpp"
@@ -349,11 +350,11 @@ void texture_pixels(VulkanDevice& d,const std::filesystem::path& root,const std:
 }
 int main(int argc,char** argv){try{
 #ifndef DVE_SURFACE_SHADER_DIR
-    if(argc<2){if(std::getenv("DVE_REQUIRE_VULKAN"))throw std::runtime_error("DXC surface shaders required");std::cout<<"SKIP: configure DXC or pass shader directory\n";return 0;}
+    if(argc<2){if(std::getenv("DVE_REQUIRE_VULKAN"))throw std::runtime_error("DXC surface shaders required");return dve::testing::skip("GPU surface recipes test: configure DXC or pass a shader directory");}
     const std::filesystem::path root=argv[1];
 #else
     const std::filesystem::path root=argc>1?argv[1]:DVE_SURFACE_SHADER_DIR;
 #endif
-    VulkanDevice d;if(d.status()!=DeviceStatus::Ready){if(std::getenv("DVE_REQUIRE_VULKAN"))throw std::runtime_error(std::string(d.device_loss_reason()));std::cout<<"SKIP: Vulkan unavailable\n";return 0;}
-    if(argc<=3||std::string(argv[3])!="--textures-only"){analytic_conformance(d,root);live_pixels(d,root,argc>2?argv[2]:std::filesystem::path{});}texture_pixels(d,root,argc>2?argv[2]:std::filesystem::path{});std::cout<<"GPU surface recipes passed\n";
+    VulkanDevice d;if(d.status()!=DeviceStatus::Ready){if(std::getenv("DVE_REQUIRE_VULKAN"))throw std::runtime_error(std::string(d.device_loss_reason()));return dve::testing::skip("GPU surface recipes test: Vulkan unavailable");}
+    if(argc<=3||std::string(argv[3])!="--textures-only"){analytic_conformance(d,root);live_pixels(d,root,argc>2?argv[2]:std::filesystem::path{});}texture_pixels(d,root,argc>2?argv[2]:std::filesystem::path{});std::cout<<"GPU surface recipes passed\n";return dve::testing::exit_code(false);
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

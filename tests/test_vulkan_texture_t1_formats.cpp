@@ -2,6 +2,7 @@
 // Skips when no Vulkan device exists unless DVE_REQUIRE_VULKAN is set. A format is only
 // exercised when the device reports it sampled; unsupported formats must report no capability
 // and fail explicit upload instead of being replaced.
+#include "dve_test_skip.hpp"
 #include "dve/compressed_texture.hpp"
 #include "dve/rhi/vulkan_device.hpp"
 
@@ -27,8 +28,8 @@ int main() {
             if (std::getenv("DVE_REQUIRE_VULKAN") != nullptr)
                 throw std::runtime_error("required Vulkan device unavailable: " +
                                          std::string(device.device_loss_reason()));
-            std::cout << "Vulkan T1 format test skipped: " << device.device_loss_reason() << '\n';
-            return 0;
+            return dve::testing::skip(std::string("Vulkan T1 format test: ") +
+                                      std::string(device.device_loss_reason()));
         }
         using F = rhi::TextureFormat;
         constexpr std::array formats{
@@ -87,7 +88,8 @@ int main() {
         std::cout << "Vulkan T1 formats round-tripped: " << tested << '/' << formats.size() << '\n';
         if (std::getenv("DVE_REQUIRE_VULKAN") != nullptr)
             require(tested >= 1U, "required Vulkan device exposes no T1 formats");
-        return 0;
+        if (tested == 0U) dve::testing::note_skip("Vulkan T1 format test: the device exposes no T1 formats");
+        return dve::testing::exit_code(false);
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

@@ -33,6 +33,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DDVE_BUILD_RHI=ON -DDVE_BUILD_TESTS=ON \
             -DDVE_ENABLE_VULKAN_BUFFER_BACKEND=ON \
+            -DDVE_REQUIRE_TEST_GROUPS=Vulkan \
             -DDVE_BUILD_BENCHMARK=OFF \
             -DDVE_BUILD_ASSET_COOKER=OFF \
             -DDVE_BUILD_ASSET_PIPELINE_TESTS=OFF \
@@ -89,4 +90,6 @@ jobs:
           DVE_RDV_TRACE_SPV: ${{ runner.temp }}/rdv_bbv_trace.spv
           # The test fails (instead of silently skipping) when no Vulkan device or shader is found.
           DVE_REQUIRE_VULKAN: "1"
+          # And no part of the test may be Skipped (dve_test_skip.hpp): this job has a software ICD.
+          DVE_REQUIRE_COMPLETE_TESTS: "1"
         run: ctest --test-dir build-rdv -R '^dve_rdv_bbv_tests$' --output-on-failure

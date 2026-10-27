@@ -1,3 +1,4 @@
+#include "dve_test_skip.hpp"
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -51,9 +52,8 @@ int main() {
             if (std::getenv("DVE_REQUIRE_VULKAN") != nullptr)
                 throw std::runtime_error(std::string("required Vulkan device unavailable: ") +
                     std::string(device.device_loss_reason()));
-            std::cout << "dve_v193_vulkan_sprite_tests: SKIP: "
-                      << device.device_loss_reason() << '\n';
-            return 0;
+            return dve::testing::skip(std::string("Vulkan sprite renderer test: ") +
+                                      std::string(device.device_loss_reason()));
         }
 
         std::string error;

@@ -1,3 +1,4 @@
+#include "dve_test_skip.hpp"
 #include "dve/render/live_environment_renderer.hpp"
 #include "dve/render/live_optical_scene.hpp"
 #include "dve/render/optical_scene.hpp"
@@ -184,8 +185,8 @@ int main(int argc,char** argv){try{
 #ifdef DVE_SURFACE_SHADER_DIR
     const std::filesystem::path root=argc>1?argv[1]:DVE_SURFACE_SHADER_DIR;
 #else
-    if(argc<2){if(std::getenv("DVE_REQUIRE_VULKAN"))throw std::runtime_error("DXC shaders required");std::cout<<"SKIP: configure DXC or pass shader directory\n";return 0;}const std::filesystem::path root=argv[1];
+    if(argc<2){if(std::getenv("DVE_REQUIRE_VULKAN"))throw std::runtime_error("DXC shaders required");return dve::testing::skip("GPU clear glass test: configure DXC or pass a shader directory");}const std::filesystem::path root=argv[1];
 #endif
-    VulkanDevice d;if(d.status()!=DeviceStatus::Ready){if(std::getenv("DVE_REQUIRE_VULKAN"))throw std::runtime_error(std::string(d.device_loss_reason()));std::cout<<"SKIP: Vulkan unavailable\n";return 0;}
-    math_probes(d,root);live_images(d,root,argc>2?argv[2]:std::filesystem::path{});std::cout<<"GPU clear glass passed\n";
+    VulkanDevice d;if(d.status()!=DeviceStatus::Ready){if(std::getenv("DVE_REQUIRE_VULKAN"))throw std::runtime_error(std::string(d.device_loss_reason()));return dve::testing::skip("GPU clear glass test: Vulkan unavailable");}
+    math_probes(d,root);live_images(d,root,argc>2?argv[2]:std::filesystem::path{});std::cout<<"GPU clear glass passed\n";return dve::testing::exit_code(false);
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

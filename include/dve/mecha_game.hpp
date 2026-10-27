@@ -1,6 +1,7 @@
 #pragma once
 // M1-M6: portable Z-up mech gameplay; optional third-person controls and jump jets.
 #include "dve/prototype_game.hpp"
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -25,6 +26,10 @@ struct MechMotorInput {
 // Integrates velocity and energy. Caller must sweep the returned displacement before publishing position.
 [[nodiscard]] Float3 integrate_mech_motor(MechMotorState&, const MechMotorConfig&,
                                            MechMotorInput, float dt) noexcept;
+struct MechFootContact {
+    Float3 ankle{},normal{0,0,1};
+    bool planted{},supported{};
+};
 enum class MechCameraMode : std::uint8_t { Tactical, ThirdPerson };
 enum class MechWeaponKind : std::uint8_t { Autocannon, Rocket };
 struct MechProjectile {
@@ -59,6 +64,7 @@ public:
     [[nodiscard]] PrototypeCamera camera() const noexcept;
     [[nodiscard]] const MechMotorState& motor() const noexcept;
     [[nodiscard]] MechCameraMode camera_mode() const noexcept;
+    [[nodiscard]] std::array<MechFootContact,2> foot_contacts() const noexcept;
     [[nodiscard]] std::string_view locked_target_key() const noexcept;
     [[nodiscard]] const MechCombatTelemetry& telemetry() const noexcept;
     [[nodiscard]] std::span<const RacingVisualEffect> impact_visuals() const noexcept;

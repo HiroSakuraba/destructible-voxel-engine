@@ -4,6 +4,7 @@
 // Use a dedicated GPU/navigation RegionDirtyIndex, never a persistence queue.
 #include "dve/region_dirty_dispatch.hpp"
 #include "dve/game_world.hpp"
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -33,6 +34,8 @@ struct RegionGameDamageHostStats {
     std::size_t editsOffered{};
     std::size_t pendingObjects{};
     std::size_t pendingBricks{};
+    std::size_t oversizedObjects{}; // dirty but above maximumSnapshotBricks; not retried until re-damaged or rescanned
+    std::size_t foreignThreadEvents{}; // cumulative; each one forces a full rescan
     bool backpressure{};
     bool snapshotLimit{};
     bool wrongThread{};
@@ -59,8 +62,9 @@ private:
         std::vector<AppliedBrickEdit> edits;
         std::size_t offset{};
     };
+    enum class SnapshotResult : std::uint8_t { Started, Forgotten, TooLarge };
     void reconcile(RegionGameDamageHostStats& stats);
-    bool begin_snapshot(GameObjectId id, RegionGameDamageHostStats& stats);
+    SnapshotResult begin_snapshot(GameObjectId id, RegionGameDamageHostStats& stats);
 
     GameWorld& world_;
     RegionDirtyDispatcher& dispatcher_;
@@ -68,6 +72,9 @@ private:
     std::thread::id ownerThread_;
     std::shared_ptr<Inbox> inbox_;
     std::set<GameObjectId> indexedObjects_;
+    std::set<GameObjectId> oversized_;
     std::optional<Snapshot> current_;
+    std::size_t foreignSeen_{};
+    GameObjectId sweepCursor_{};
 };
 } // namespace dve

@@ -26,6 +26,7 @@ public:
     struct Ingress {std::uint64_t id{};std::size_t count{};};
     std::vector<Ingress> offered;std::size_t capacity{3};std::size_t buffered{};
     std::vector<std::uint64_t> forgotten;
+    std::vector<std::uint64_t> replaced;
     std::size_t buffered_edit_count() const {return buffered;}
     std::size_t buffer_capacity() const {return capacity;}
     RegionDirtyOfferResult offer(std::uint32_t,std::uint8_t,std::uint64_t id,
@@ -35,6 +36,7 @@ public:
         return RegionDirtyOfferResult::Accepted;
     }
     void forget_object(std::uint64_t id) {forgotten.push_back(id);}
+    void mark_geometry_replaced(std::uint64_t id) {replaced.push_back(id);}
     RegionDirtyDispatchStats tick(RegionKey,const WorkBudget&,const RegionDirtyTargetLookup&) {
         buffered=0;return {};
     }

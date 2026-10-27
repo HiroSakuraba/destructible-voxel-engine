@@ -4,10 +4,14 @@
 #include "dve/physics3d_backend.hpp"
 #include <algorithm>
 #include <memory>
+#include <source_location>
+#include <string>
 #include <stdexcept>
 #include <utility>
 using namespace dve;
-static void require(bool ok) {if(!ok)throw std::runtime_error("R3.2 real GameWorld host test failed");}
+static void require(bool ok,std::source_location loc=std::source_location::current()) {
+    if(!ok)throw std::runtime_error("R3.2 real GameWorld host test failed at line "+std::to_string(loc.line()));
+}
 int main() {
     auto physics=create_physics3d_world(Physics3DBackend::Reference);
     require(physics!=nullptr);

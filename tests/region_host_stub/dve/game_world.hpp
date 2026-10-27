@@ -30,7 +30,12 @@ class GameWorld {
 public:
     std::map<GameObjectId,VoxelObject> vox;
     std::vector<std::function<void(const GameDamageEvent&)>> listeners;
+    std::vector<std::function<void(GameObjectId)>> destroyListeners;
     void on_damage(std::function<void(const GameDamageEvent&)> fn) {listeners.push_back(std::move(fn));}
+    void on_destroyed(std::function<void(GameObjectId)> fn) {destroyListeners.push_back(std::move(fn));}
+    // Mirrors GameWorld::destroy_object (also used by retire_oldest_debris): fires the
+    // destroy listeners without any damage event.
+    void destroy(GameObjectId id) {for(auto& listener:destroyListeners)listener(id);vox.erase(id);}
     void damage(GameDamageEvent e) {for(auto& listener:listeners)listener(e);}
     std::vector<GameRenderObject> render_objects() const {
         std::vector<GameRenderObject> views;

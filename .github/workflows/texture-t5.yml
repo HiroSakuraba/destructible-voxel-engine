@@ -1,0 +1,124 @@
+name: T5 DVE baked normal quality and independent libktx validation
+on:
+  pull_request:
+    paths:
+      - "CMakeLists.txt"
+      - "cmake/**"
+      - "tests/test_material_bake_bc5_quality.cpp"
+      - "tests/test_texture_ktx2_export.cpp"
+      - "tests/dve_test_skip.hpp"
+      - "src/texture_ktx2_export.cpp"
+      - "include/dve/texture_ktx2_export.hpp"
+      - "src/compressed_texture.cpp"
+      - "include/dve/compressed_texture.hpp"
+      - "src/render/material_texture_bake.cpp"
+      - "include/dve/render/material_texture_bake.hpp"
+      - "src/render/normal_bc5_codec.cpp"
+      - "include/dve/render/normal_bc5_codec.hpp"
+      - "include/dve/render/normal_texture_binding.hpp"
+      - "src/render/texture_mips.cpp"
+      - "docs/TEXTURE_T5_BAKE_KTX2_VALIDATION.md"
+      - ".github/workflows/texture-t5.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  # Khronos KTX-Software v4.4.2. The tag is a signed annotated tag; the commit it points at is
+  # pinned here so a moved or re-created tag cannot change what CI builds and trusts as the
+  # independent KTX2 reader. libktx is only built for this test job and is not distributed
+  # (KTX-Software is Apache-2.0; some bundled components carry other permissive licences).
+  KTX_TAG: v4.4.2
+  KTX_COMMIT: 4d6fc70eaf62ad0558e63e8d97eb9766118327a6
+jobs:
+  actual-bake-quality:
+    name: Real DVE material bake to BC5
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build dependencies
+        run: sudo apt-get update && sudo apt-get install -y ninja-build libpng-dev libjpeg-dev
+      - name: Configure with actual DVE material baker enabled
+        run: |
+          cmake -S . -B build-bake -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DDVE_BUILD_TESTS=ON -DDVE_BUILD_RHI=ON -DDVE_BUILD_PLATFORM=ON -DDVE_BUILD_PLAYER=ON \
+            -DDVE_BUILD_EDITOR=ON -DDVE_BUILD_NATIVE_EDITOR=OFF \
+            -DDVE_BUILD_ASSET_COOKER=OFF -DDVE_BUILD_ASSET_PIPELINE_TESTS=OFF \
+            -DDVE_BUILD_BENCHMARK=OFF -DDVE_ENABLE_SDL3_HOST=OFF \
+            -DDVE_ENABLE_FLUODDITY=OFF -DDVE_ENABLE_SOFT_BODIES=OFF \
+            -DDVE_ENABLE_CPU_HAIR=OFF -DDVE_ENABLE_SIMULATION_ENERGY_COMPILER=OFF \
+            -DDVE_ENABLE_KTX2_EXPORT=OFF -DDVE_REQUIRE_TEST_GROUPS=Editor
+      - name: Compile actual bake and BC5 quality tests
+        run: cmake --build build-bake --target dve_material_bake_bc5_quality_tests dve_texture_bc5_tests dve_bc5_shader_mapping_tests --parallel 2
+      - name: Verify three actual DVE-baked materials
+        env:
+          DVE_REQUIRE_COMPLETE_TESTS: "1"
+        run: |
+          pattern='^(dve_material_bake_bc5_quality_tests|dve_texture_bc5_tests|dve_bc5_shader_mapping_tests)$'
+          # ctest -R exits 0 when nothing matches, so count the tests that are registered first.
+          test "$(ctest --test-dir build-bake -R "$pattern" -N | sed -n 's/^Total Tests: //p')" = 3
+          ctest --test-dir build-bake -R "$pattern" --no-tests=error --output-on-failure -V
+
+  libktx-interop:
+    name: Pinned Khronos libktx 4.4.2 independent roundtrip
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build dependencies
+        run: sudo apt-get update && sudo apt-get install -y ninja-build libzstd-dev
+      - name: Restore pinned libktx build
+        id: ktx-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ktx-install
+          key: libktx-${{ env.KTX_COMMIT }}-${{ runner.os }}-shared-v1
+      - name: Checkout pinned Khronos libktx release
+        if: steps.ktx-cache.outputs.cache-hit != 'true'
+        run: |
+          # No submodules: the only one is the conformance test suite (tests/cts), which this
+          # build does not use; libktx's third-party code is vendored in the repository.
+          git clone --depth 1 --branch "$KTX_TAG" \
+            https://github.com/KhronosGroup/KTX-Software.git \
+            "$RUNNER_TEMP/KTX-Software"
+          actual="$(git -C "$RUNNER_TEMP/KTX-Software" rev-parse HEAD)"
+          if [ "$actual" != "$KTX_COMMIT" ]; then
+            echo "::error::$KTX_TAG is $actual, expected the pinned commit $KTX_COMMIT"
+            exit 1
+          fi
+      - name: Compile and install upstream libktx (not DVE mocks)
+        if: steps.ktx-cache.outputs.cache-hit != 'true'
+        run: |
+          cmake -S "$RUNNER_TEMP/KTX-Software" -B "$RUNNER_TEMP/ktx-build" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
+            -DKTX_FEATURE_TOOLS=OFF -DKTX_FEATURE_TESTS=OFF \
+            -DKTX_FEATURE_VK_UPLOAD=OFF -DKTX_FEATURE_GL_UPLOAD=OFF \
+            -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/ktx-install"
+          cmake --build "$RUNNER_TEMP/ktx-build" --target ktx --parallel 2
+          cmake --install "$RUNNER_TEMP/ktx-build" --prefix "$RUNNER_TEMP/ktx-install"
+      - name: Check the installed libktx is the pinned release
+        run: |
+          ls -l "$RUNNER_TEMP/ktx-install/lib/"
+          test -e "$RUNNER_TEMP/ktx-install/lib/libktx.so.4.4.2"
+      - name: Configure DVE native exporter with external libktx
+        run: |
+          cmake -S . -B build-ktx -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DDVE_BUILD_TESTS=ON -DDVE_BUILD_RHI=ON -DDVE_BUILD_PLATFORM=ON -DDVE_BUILD_PLAYER=ON \
+            -DDVE_BUILD_EDITOR=OFF -DDVE_BUILD_NATIVE_EDITOR=OFF \
+            -DDVE_BUILD_ASSET_COOKER=OFF -DDVE_BUILD_ASSET_PIPELINE_TESTS=OFF \
+            -DDVE_BUILD_BENCHMARK=OFF -DDVE_ENABLE_SDL3_HOST=OFF \
+            -DDVE_ENABLE_FLUODDITY=OFF -DDVE_ENABLE_SOFT_BODIES=OFF \
+            -DDVE_ENABLE_CPU_HAIR=OFF -DDVE_ENABLE_SIMULATION_ENERGY_COMPILER=OFF \
+            -DDVE_ENABLE_KTX2_EXPORT=ON -DDVE_REQUIRE_TEST_GROUPS=Player \
+            "-DDVE_KTX_INCLUDE_DIR=$RUNNER_TEMP/ktx-install/include" \
+            "-DDVE_KTX_LIBRARY=$RUNNER_TEMP/ktx-install/lib/libktx.so"
+      - name: Compile genuine libktx/DVE interoperability
+        run: cmake --build build-ktx --target dve_texture_ktx2_export_tests dve_texture_t1_format_tests --parallel 2
+      - name: Read native KTX2 independently with libktx
+        env:
+          DVE_REQUIRE_COMPLETE_TESTS: "1"
+          LD_LIBRARY_PATH: "${{ runner.temp }}/ktx-install/lib"
+        run: |
+          pattern='^(dve_texture_ktx2_export_tests|dve_texture_t1_format_tests)$'
+          test "$(ctest --test-dir build-ktx -R "$pattern" -N | sed -n 's/^Total Tests: //p')" = 2
+          ctest --test-dir build-ktx -R "$pattern" --no-tests=error --output-on-failure -V

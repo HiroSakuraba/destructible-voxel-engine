@@ -10,6 +10,9 @@
 #include <iostream>
 #include <memory>
 #include <span>
+#include <sstream>
+#include <utility>
+#include <vector>
 #include <stdexcept>
 #include <string>
 using namespace dve;
@@ -51,7 +54,7 @@ struct Scene {
  GameWorld world{create_physics3d_world(Physics3DBackend::Reference)};
  std::unique_ptr<MechaGame> game;
  GameObjectId ground{},player{},footLeft{},footRight{};
- explicit Scene(bool slope=false,bool makeGround=true){
+ explicit Scene(bool slope=false,bool makeGround=true,bool voxelFloor=false){
   std::string error;
   if(makeGround){
    auto mesh=make_editor_polygon_cube(100);
@@ -63,6 +66,14 @@ struct Scene {
    refresh_editor_polygon(mesh,true);
    ground=world.spawn_cooked_polygon_asset(std::move(mesh),"Ground",{},false);
    check(ground!=0,"create ground");
+  }
+  if(voxelFloor){
+   GameObjectDesc w;w.name="Voxel floor";w.dynamic=false;
+   w.transform.position={-4,-4,-.55F};w.voxelSizeMeters=.5F;
+   w.voxels=std::make_unique<VoxelObject>(900);
+   for(int x=0;x<16;++x)for(int y=0;y<16;++y)(void)w.voxels->set_voxel({x,y,0},MaterialId{2});
+   ground=world.create_object(std::move(w),&error);
+   check(ground!=0,"create voxel floor");
   }
   player=world.spawn_visual_polygon_asset(make_editor_polygon_cube(1),"Mecha",
       make_rigid_transform({0,0,.05F},{}));
@@ -205,6 +216,22 @@ void unsupported_contact_releases_plant(){
  check(!feet[0].planted&&!feet[1].planted,"unsupported feet cannot remain planted");
  check(finite(feet[0].ankle)&&finite(feet[1].ankle),"unsupported IK stays finite");
 }
+void destroyed_voxel_floor_releases_planted_feet(){
+ Scene s(false,false,true);
+ const auto before=s.game->foot_contacts();
+ check(before[0].planted&&before[1].planted,"feet plant on a voxel floor");
+ check(std::abs(before[0].ankle.z-.065F)<.06F,"voxel floor height measured");
+ s.tick(20);
+ check(s.game->foot_contacts()[0].planted,"voxel contact persists");
+ check(bool(s.world.damage_sphere(s.ground,{0,0,-.3F},2.2F)),"carve the supporting voxels");
+ s.tick(3);
+ const auto after=s.game->foot_contacts();
+ check(!after[0].planted&&!after[1].planted&&!after[0].supported&&!after[1].supported,
+       "carving the voxels under planted feet releases both");
+ check(finite(after[0].ankle)&&finite(after[1].ankle),"released feet stay finite");
+ check(length3(s.world.position(s.footLeft).value(),after[0].ankle)<.02F,
+       "visual pad follows the retracted foot");
+}
 void controller_compatibility(){
  Scene s;
  auto current=s.game->save_state();
@@ -231,6 +258,56 @@ void controller_compatibility(){
  v1.replace(10,1,"1");
  check(s.game->after_restore(v1,&error),"M5 controller still accepted");
  check(s.game->foot_contacts()[1].supported,"M5 migration rebuilds terrain contacts");
+}
+std::string replace_foot_token(std::string save,int foot,int token,const std::string& value){
+ const auto start=save.find("M7 2\n")+5;
+ std::size_t line=start;
+ for(int i=0;i<foot;++i)line=save.find('\n',line)+1;
+ const auto end=save.find('\n',line);
+ std::istringstream in(save.substr(line,end-line));
+ std::vector<std::string> tokens;for(std::string t;in>>t;)tokens.push_back(t);
+ tokens.at(std::size_t(token))=value;
+ std::string joined;for(const auto& t:tokens)joined+=(joined.empty()?"":" ")+t;
+ return save.replace(line,end-line,joined);
+}
+void foot_save_validation_and_determinism(){
+ const auto run=[](unsigned ticks){
+  Scene s;s.world.set_axis("move_y",1.F);s.tick(ticks);
+  return s.game->save_state();
+ };
+ check(run(37)==run(37),"identical inputs give an identical controller save");
+ Scene s;s.world.set_axis("move_y",1.F);s.tick(37);
+ const auto mid=s.game->save_state();
+ std::string error;
+ check(s.game->after_restore(mid,&error),"mid-stride save restores");
+ check(s.game->save_state()==mid,"mid-stride foot state round trips");
+ s.tick(60); // the restored feet keep walking without a pop
+ for(const auto& foot:s.game->foot_contacts())check(finite(foot.ankle),"restored feet stay finite");
+ const auto before=s.game->save_state();
+ // Token layout per foot: initialized planted supported swing ankle(3) from(3) to(3) normal(3).
+ const std::pair<int,const char*> bad[]{
+  {1,"2"},{2,"2"},{3,"7"},{4,"inf"},{4,"nan"},{7,"1e30"},{10,"-9e9"},{13,"0"},{13,"9"},{14,"abc"}};
+ for(int foot=0;foot<2;++foot)for(const auto& [token,value]:bad){
+  const auto corrupted=replace_foot_token(mid,foot,token,value);
+  check(!s.game->after_restore(corrupted,&error),"malformed foot state is rejected");
+  check(s.game->save_state()==before,"a rejected foot state leaves the controller untouched");
+ }
+ // planted feet cannot be mid-swing, and cannot be unsupported or uninitialized.
+ auto planted=mid;
+ for(int foot=0;foot<2;++foot){
+  planted=replace_foot_token(planted,foot,0,"1");planted=replace_foot_token(planted,foot,1,"1");
+  planted=replace_foot_token(planted,foot,2,"1");planted=replace_foot_token(planted,foot,3,"1");
+ }
+ check(!s.game->after_restore(planted,&error),"a planted foot cannot also be swinging");
+ auto hovering=mid;
+ for(int foot=0;foot<2;++foot){
+  hovering=replace_foot_token(hovering,foot,1,"1");hovering=replace_foot_token(hovering,foot,2,"0");
+  hovering=replace_foot_token(hovering,foot,3,"0");
+ }
+ check(!s.game->after_restore(hovering,&error),"a planted foot must be supported");
+ check(!s.game->after_restore(mid+"extra",&error),"trailing data after the foot section is rejected");
+ check(!s.game->after_restore(mid.substr(0,mid.rfind('\n',mid.size()-2)+1),&error),
+       "a truncated foot section is rejected");
 }
 void prefab_validation(){
  auto starter=make_mecha_starter();std::string error;
@@ -260,7 +337,9 @@ int main(){
   feet_never_teleport_while_walking_or_stopping();
   slope_normal_and_height();
   unsupported_contact_releases_plant();
+  destroyed_voxel_floor_releases_planted_feet();
   controller_compatibility();
+  foot_save_validation_and_determinism();
   prefab_validation();
   std::cout<<"M7: leg IK, planted contacts, slopes, lost supports and saves passed\n";
   return 0;

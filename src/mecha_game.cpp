@@ -903,7 +903,7 @@ std::string MechaGame::save_state() const {
  // not produce a save that cannot be loaded, so such paths are dropped instead.
  const auto encode=[&](bool paths){
  std::ostringstream out;out.imbue(std::locale::classic());
- out<<std::setprecision(9)<<"DVE_MECHA 2 "<<unsigned(s.hud.phase)<<' '
+ out<<std::setprecision(9)<<"DVE_MECHA 3 "<<unsigned(s.hud.phase)<<' '
     <<s.hud.health<<' '<<int(s.hud.debug)<<' '<<int(s.extractionReady)<<' '
     <<s.motor.position.x<<' '<<s.motor.position.y<<' '<<s.motor.position.z<<' '
     <<s.motor.velocity.x<<' '<<s.motor.velocity.y<<' '<<s.motor.velocity.z<<' '
@@ -930,6 +930,15 @@ std::string MechaGame::save_state() const {
      <<p.remainingSeconds<<' '<<p.sequence<<'\n';
  out<<"M6 "<<unsigned(s.cameraMode)<<' '<<s.orbitYaw<<' '<<s.orbitPitch<<' '
     <<int(s.jetAirborne)<<' '<<s.gaitPhase<<' '<<std::quoted(s.lockKey)<<'\n';
+ out<<"M7 2\n";
+ for(const auto& f:s.feet){
+  out<<int(f.initialized)<<' '<<int(f.planted)<<' '<<int(f.supported)<<' '
+     <<int(f.lastSwing)<<' '
+     <<f.ankle.x<<' '<<f.ankle.y<<' '<<f.ankle.z<<' '
+     <<f.swingFrom.x<<' '<<f.swingFrom.y<<' '<<f.swingFrom.z<<' '
+     <<f.swingTo.x<<' '<<f.swingTo.y<<' '<<f.swingTo.z<<' '
+     <<f.normal.x<<' '<<f.normal.y<<' '<<f.normal.z<<'\n';
+ }
  return out.str();
  };
  auto encoded=encode(true);
@@ -958,7 +967,7 @@ bool MechaGame::after_restore(std::string_view encoded,std::string* error){
    >>telemetry.targetsDestroyed>>telemetry.impacts
    >>telemetry.voxelCarvesQueued>>telemetry.enemyShots
    >>telemetry.navigationReplans>>nTargets;
- if(!in||magic!="DVE_MECHA"||(version!=1&&version!=2)||phase>3||debug>1||ready>1
+ if(!in||magic!="DVE_MECHA"||(version!=1&&version!=2&&version!=3)||phase>3||debug>1||ready>1
     ||!finite3(motor.position)||!finite3(motor.velocity)
     ||!std::isfinite(motor.legsYaw)||!std::isfinite(motor.torsoYaw)
     ||!std::isfinite(motor.energy)||motor.energy<0||motor.energy>100
@@ -1022,6 +1031,28 @@ bool MechaGame::after_restore(std::string_view encoded,std::string* error){
      (!savedLock.empty()&&!key_ok(savedLock)))
    return fail("invalid M6 camera, jet or lock state");
  }
+ std::array<Impl::FootState,2> savedFeet{};
+ if(version>=3){
+  std::string marker;unsigned count{};
+  in>>marker>>count;
+  if(!in||marker!="M7"||count!=2)return fail("invalid foot-state envelope");
+  for(auto& foot:savedFeet){
+   unsigned initialized{},planted{},supported{},swing{};
+   in>>initialized>>planted>>supported>>swing
+     >>foot.ankle.x>>foot.ankle.y>>foot.ankle.z
+     >>foot.swingFrom.x>>foot.swingFrom.y>>foot.swingFrom.z
+     >>foot.swingTo.x>>foot.swingTo.y>>foot.swingTo.z
+     >>foot.normal.x>>foot.normal.y>>foot.normal.z;
+   if(!in||initialized>1||planted>1||supported>1||swing>1||
+      !finite3(foot.ankle)||!finite3(foot.swingFrom)||
+      !finite3(foot.swingTo)||!finite3(foot.normal)||
+      mag(foot.normal)<.8F||mag(foot.normal)>1.2F||
+      (planted&&!supported)||(planted&&swing))
+    return fail("invalid M7 foot state");
+   foot.initialized=initialized!=0;foot.planted=planted!=0;
+   foot.supported=supported!=0;foot.lastSwing=swing!=0;
+  }
+ }
  in>>std::ws;
  if(!in.eof())return fail("trailing data");
  if(defeated!=telemetry.targetsDestroyed||ready!=(defeated>=s.requiredTargets))
@@ -1046,6 +1077,8 @@ bool MechaGame::after_restore(std::string_view encoded,std::string* error){
  s.cameraMode=MechCameraMode(savedCamera);
  s.orbitYaw=savedOrbit;s.orbitPitch=savedPitch;s.jetAirborne=savedAirborne!=0;
  s.jetActive=false;s.gaitPhase=savedGait;s.lockKey=std::move(savedLock);
+ if(version>=3)s.feet=savedFeet;
+ else {s.feet={};s.update_feet(0.F,true);}
  s.motor=motor;s.primaryCooldown=primary;s.rocketCooldown=secondary;
  s.rounds=rounds;s.missiles=missiles;s.nextProjectile=next;s.boostUses=boosts;
  s.telemetry=telemetry;s.rockets=std::move(rockets);

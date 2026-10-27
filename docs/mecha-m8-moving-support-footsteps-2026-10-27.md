@@ -51,3 +51,16 @@ Recommended next tranche **P1: practical 3D combat VFX**:
 5. Only then implement and benchmark a backend GPU kernel + indirect renderer with CPU/GPU comparison harness and device loss/reload tests.
 
 Separate **P2**: artist preview/editor tooling, Niagara/VFX-Graph-style subgraphs and curves, flipbook selection, module presets and hot reload; **P3**: particle lights, soft intersections, transparency sorting / weighted OIT, material-aware collision/decal staging, GPU readback minimization.
+
+
+## Particle correctness audit — concrete findings
+
+The following source-level concerns are worth fixing before increasing particle count:
+
+1. **Coordinate conventions:** `VfxCpuRuntime`'s `GroundCollision` checks particle **Y** against a horizontal plane. The mecha/voxel world is **Z-up**. A 3D world-space collision API must explicitly configure up axis or use geometry queries; reusing the current 2D plane blindly will make dust and debris bounce in the wrong direction.
+2. **Generation identity:** the slot-reuse path in `VfxCpuRuntime::step` assigns `particle = {}` before `++particle.generation`. This resets the generation to zero each time, so a recycled slot receives generation 1 instead of a monotone version. Event consumers cannot reliably identify a reused particle. Preserve the prior generation before reinitializing.
+3. **Upfront CPU capacity:** each `VfxCpuRuntime` allocates `maximumParticles` slots in its constructor, even if the graph spawns only a few particles. `SpriteParticleSystem` defaults to 256 emitter slots. These are **limits**, not an observed performance result; test actual memory and cache residency before scaling emitter counts.
+4. **CPU draw cost:** `SpriteParticleSystem::build_render_packet` creates a full draw item per living particle and stable-sorts the list; this is appropriate for small-to-medium 2D effects but not a substitute for a GPU indirect 3D renderer.
+5. **No GPU execution verification:** `plan_vfx_gpu_frame` calculates dispatch dimensions and buffer estimates. Repository code search found no actual caller that submits these passes. Measure only once a real shader executor and a visible 3D render path are wired up.
+
+For an implementation reference, Unreal Niagara offers CPU ray collisions and GPU depth/distance-field collisions, showing the useful accuracy/performance split: https://dev.epicgames.com/documentation/en-us/unreal-engine/particle-update-group-reference-for-niagara-effects-in-unreal-engine. Unity VFX Graph offers event payloads and GPU subgraphs: https://github.com/Unity-Technologies/Graphics/blob/master/Packages/com.unity.visualeffectgraph/Documentation~/Events.md. AMD's Parallel Sort can later be benchmarked against unsorted/weighted blended transparency for many overlapping sprites: https://gpuopen.com/fidelityfx-parallel-sort/. These are architectural references, not evidence that corresponding DVE backends are implemented.

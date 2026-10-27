@@ -5,16 +5,23 @@ on:
       - "CMakeLists.txt"
       - "include/dve/region_catalog.hpp"
       - "include/dve/region_dirty_index.hpp"
+      - "include/dve/region_dirty_dispatch.hpp"
+      - "include/dve/region_game_damage.hpp"
       - "include/dve/region_streaming*.hpp"
       - "src/region_catalog.cpp"
       - "src/region_dirty_index.cpp"
+      - "src/region_dirty_dispatch.cpp"
+      - "src/region_game_damage.cpp"
       - "src/region_streaming*.cpp"
       - "tests/test_region_catalog.cpp"
       - "tests/test_region_dirty*.cpp"
+      - "tests/test_region_game_damage_real.cpp"
+      - "tests/region_dirty_dispatch_stub/**"
       - "tests/test_region_streaming*.cpp"
       - "tests/region_streaming_contract_stub/**"
       - "docs/REGION_STREAMING_R2.md"
       - "docs/REGION_DIRTY_R3.md"
+      - "docs/REGION_DESTRUCTION_R31.md"
       - "apps/dve_region_dirty_bench.cpp"
       - "apps/dve_region_bench.cpp"
       - ".github/workflows/region-index.yml"
@@ -62,14 +69,14 @@ jobs:
             -DDVE_ENABLE_GRID_FLUIDS=OFF -DDVE_ENABLE_FLIP_LIQUIDS=OFF \
             "${sanitize_args[@]}"
       - name: Build region contract tests
-        run: cmake --build build-region --target dve_region_catalog_tests dve_region_streaming_tests dve_region_streaming_runtime_contract_tests dve_region_dirty_tests --parallel 2
+        run: cmake --build build-region --target dve_region_catalog_tests dve_region_streaming_tests dve_region_streaming_runtime_contract_tests dve_region_dirty_tests dve_region_dirty_dispatch_tests --parallel 2
       - name: Run region contract tests
         env:
           ASAN_OPTIONS: detect_leaks=1
           UBSAN_OPTIONS: halt_on_error=1
-        run: ctest --test-dir build-region -R '^dve_region_(catalog_tests|streaming_tests|streaming_runtime_contract_tests|dirty_tests)$' --output-on-failure
+        run: ctest --test-dir build-region -R '^dve_region_(catalog_tests|streaming_tests|streaming_runtime_contract_tests|dirty_tests|dirty_dispatch_tests)$' --output-on-failure
       - name: Build and run R2 against real DVE scene staging and renderer
         if: matrix.mode == 'release'
         run: |
-          cmake --build build-region --target dve_region_streaming_real_tests dve_region_dirty_gpu_tests --parallel 2
-          ctest --test-dir build-region -R '^dve_region_(streaming_real_tests|dirty_gpu_tests)$' --output-on-failure
+          cmake --build build-region --target dve_region_streaming_real_tests dve_region_dirty_gpu_tests dve_region_dirty_dispatch_real_tests dve_region_dirty_dispatch_budget_tests dve_region_game_damage_real_tests --parallel 2
+          ctest --test-dir build-region -R '^dve_region_(streaming_real_tests|dirty_gpu_tests|dirty_dispatch_real_tests|dirty_dispatch_budget_tests|game_damage_real_tests)$' --output-on-failure

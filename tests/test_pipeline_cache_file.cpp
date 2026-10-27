@@ -67,7 +67,7 @@ void test() {
     check(!load(path,mismatch,loaded)&&loaded.empty(),"driver mismatch loaded from disk");
     // A second save to an existing destination must never corrupt the old
     // cache if the OS doesn't support atomic rename-overwrite.
-    (void)save(path,gpu,source);
+    check(save(path,gpu,source),"cannot atomically replace an existing valid cache");
     check(load(path,gpu,loaded)&&loaded==source,"second save corrupted the cache");
     std::error_code ec;
     std::filesystem::remove_all(dir,ec);

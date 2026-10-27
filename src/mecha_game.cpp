@@ -289,7 +289,13 @@ struct MechaGame::Impl {
   if(extraction)hud.vehicleTelemetry+=extractionReady?"  OBJECTIVE: EXTRACT":"  OBJECTIVE: DISABLE";
   hud.mechAudio={telemetry.autocannonShots,telemetry.rocketsFired,
                   telemetry.impacts,telemetry.enemyShots,boostUses};
-  hud.prompt="WASD MOVE  SHIFT BOOST  J/L AIM  MOUSE 1/2 FIRE  F5 SAVE  F9 LOAD  P PAUSE  R RESET";
+  hud.vehicleTelemetry+=cameraMode==MechCameraMode::ThirdPerson?"  CAM: CHASE":"  CAM: TACTICAL";
+  if(!lockKey.empty())hud.vehicleTelemetry+="  LOCK: "+lockKey;
+  hud.stats+="  ALT "+std::to_string(int(std::max(0.F,motor.position.z-start.z)));
+  telemetry.altitude=std::max(0.F,motor.position.z-start.z);
+  telemetry.verticalSpeed=motor.velocity.z;telemetry.jetActive=jetActive;
+  telemetry.lockedOn=!lockKey.empty();
+  hud.prompt="WASD MOVE SHIFT BOOST SPACE JETS C CAMERA TAB LOCK  MOUSE 1/2 FIRE F5/F9 SAVE P PAUSE R RESET";
   hud.message=hud.phase==PrototypePhase::Won?"MISSION COMPLETE - R TO RESTART":
       hud.phase==PrototypePhase::Paused?"PAUSED - P TO RESUME":
       hud.phase==PrototypePhase::Lost?"MECH DISABLED - R TO RESTART":
@@ -302,6 +308,9 @@ struct MechaGame::Impl {
   hud.phase=PrototypePhase::Playing;hud.health=hud.maximumHealth=100;
   primaryCooldown=rocketCooldown=0;rockets.clear();impacts.clear();nextProjectile=1;
   rounds=200;missiles=12;telemetry={};boostUses=0;extractionReady=false;
+  jetAirborne=jetActive=false;gaitPhase=0;lockKey.clear();
+  orbitYaw=0;orbitPitch=.23F;
+  lastCamera=lastLock=false;
   lastBoost=lastPause=lastRestart=lastDebug=false;
   for(std::size_t i=0;i<targets.size();++i){
    auto& t=targets[i];t.hp=t.initial;
@@ -310,6 +319,51 @@ struct MechaGame::Impl {
    (void)world.set_rotation(t.id,rotation(0));
   }
   publish();camera(true);refresh_hud();
+ }
+ Target* locked(){
+  if(lockKey.empty())return nullptr;
+  for(auto& t:targets)if(t.key==lockKey&&t.hp>0&&world.is_enabled(t.id)){
+   const auto p=world.position(t.id);
+   if(!p||mag(minus(*p,motor.position))>85.F)break;
+   return &t;
+  }
+  lockKey.clear();return nullptr;
+ }
+ // Cycle targets in stable authored-key order. An obstructed or destroyed target
+ // cannot be captured; LOS is rechecked each fixed tick as voxels change.
+ void select_lock(){
+  std::vector<std::string> options;
+  for(const auto& t:targets)if(t.hp>0&&world.is_enabled(t.id)){
+   const auto p=world.position(t.id);if(!p)continue;
+   const auto delta=minus(*p,motor.position);
+   const auto radius=mag(delta);
+   if(radius>85.F||radius<.1F)continue;
+   const auto horiz=unit(Float3{delta.x,delta.y,0});
+   if(dot3(horiz,facing(motor.torsoYaw))<-.15F)continue;
+   // Test visibility from the weapon muzzle toward the target's visual sphere.
+   const auto origin=plus(motor.position,{0,0,2.F});
+   const auto travel=minus(*p,origin);const auto dist=mag(travel);
+   if(dist>.1F)if(const auto hit=world.raycast(origin,unit(travel),dist))
+    if(hit->objectId!=t.id&&hit->distance<dist-t.radius)continue;
+   options.push_back(t.key);
+  }
+  std::sort(options.begin(),options.end());
+  if(options.empty()){lockKey.clear();return;}
+  const auto it=std::find(options.begin(),options.end(),lockKey);
+  lockKey=it==options.end()?options.front():
+     (std::next(it)==options.end()?std::string{}:*std::next(it));
+ }
+ void update_lock(float dt){
+  Target* t=locked();if(!t)return;
+  const auto p=world.position(t->id);if(!p)return;
+  const auto travel=minus(*p,motor.position);
+  const auto origin=plus(motor.position,{0,0,2.F});
+  const auto ray=minus(*p,origin);
+  if(const auto hit=world.raycast(origin,unit(ray),mag(ray)))
+   if(hit->objectId!=t->id&&hit->distance<mag(ray)-t->radius){
+    lockKey.clear();return;
+   }
+  motor.torsoYaw=turn(motor.torsoYaw,angle_to(travel),dt*9.F);
  }
  // Test targets have gameplay hit spheres because their meshes are visual-only.
  // Resolve nearest target against both voxel/polygon swept collisions and exact voxel rays.
@@ -502,6 +556,20 @@ struct MechaGame::Impl {
   if(boost&&!lastBoost)++boostUses;
    lastBoost=boost;
   auto displace=integrate_mech_motor(motor,config,input,dt);
+  // Opt-in vertical locomotion. No jet use => legacy planar M1 fixtures unchanged.
+  // Once airborne, gravity and collision determine the landing; no teleport/snap.
+  jetActive=world.is_action_pressed("mech_jumpjet")&&motor.energy>0.F&&
+     motor.position.z<start.z+config.maximumJetHeight;
+  if(jetActive){
+   jetAirborne=true;
+   motor.velocity.z=std::min(12.F,motor.velocity.z+(config.jetAcceleration-9.81F)*dt);
+   // integrate_mech_motor regenerated energy this frame; compensate so the net
+   // consumption is the authored jet drain independent of planar input.
+   motor.energy=std::max(0.F,motor.energy-
+                (config.jetDrainPerSecond+config.energyRegeneration)*dt);
+  }else if(jetAirborne)motor.velocity.z=std::max(-28.F,motor.velocity.z-9.81F*dt);
+  if(jetAirborne)displace.z=motor.velocity.z*dt;
+  const Float3 before=motor.position;
   // Swept capsule handles polygon and voxel blocking; two slide iterations.
   for(int i=0;i<2&&mag(displace)>1.e-5F;++i){
    const auto feet=motor.position;
@@ -516,10 +584,20 @@ struct MechaGame::Impl {
    displace=minus(remaining,scaled(n,std::min(0.F,dot3(remaining,n))));
    const auto vn=dot3(motor.velocity,n);
    if(vn<0)motor.velocity=minus(motor.velocity,scaled(n,vn));
+   if(jetAirborne&&n.z>.5F&&motor.velocity.z<=0){
+    jetAirborne=false;motor.velocity.z=0;
+   }
   }
+  const auto moved=minus(motor.position,before);
+  const float horizontal=std::hypot(moved.x,moved.y);
+  if(horizontal>.0001F)gaitPhase=wrap(gaitPhase+horizontal*2.5F);
   const float aimX=axis(world.get_axis("look_x"));
   const float aimY=axis(world.get_axis("look_y"));
-  if(std::abs(aimX)+std::abs(aimY)>.15F)
+  if(cameraMode==MechCameraMode::ThirdPerson){
+   orbitYaw=wrap(orbitYaw-aimX*dt*1.8F);
+   orbitPitch=std::clamp(orbitPitch+aimY*dt*.8F,.05F,1.12F);
+   if(lockKey.empty())motor.torsoYaw=turn(motor.torsoYaw,orbitYaw,dt*10.F);
+  }else if(std::abs(aimX)+std::abs(aimY)>.15F)
    motor.torsoYaw=turn(motor.torsoYaw,angle_to({aimX,aimY,0}),dt*7.5F);
   publish();
  }
@@ -529,11 +607,18 @@ MechaGame::~MechaGame()=default;
 const PrototypeHud& MechaGame::hud()const noexcept{return impl_->hud;}
 PrototypeCamera MechaGame::camera()const noexcept{return impl_->cam;}
 const MechMotorState& MechaGame::motor()const noexcept{return impl_->motor;}
+MechCameraMode MechaGame::camera_mode()const noexcept{return impl_->cameraMode;}
+std::string_view MechaGame::locked_target_key()const noexcept{return impl_->lockKey;}
 const MechCombatTelemetry& MechaGame::telemetry()const noexcept{return impl_->telemetry;}
 std::span<const RacingVisualEffect> MechaGame::impact_visuals()const noexcept{return impl_->impacts;}
-void MechaGame::look(float yawDelta,float){
- if(impl_->started&&std::isfinite(yawDelta)&&impl_->hud.phase==PrototypePhase::Playing)
-  impl_->motor.torsoYaw=wrap(impl_->motor.torsoYaw-yawDelta); // Pointer right turns toward screen right (+X).
+void MechaGame::look(float yawDelta,float pitchDelta){
+ if(!impl_->started||impl_->hud.phase!=PrototypePhase::Playing||
+    !std::isfinite(yawDelta)||!std::isfinite(pitchDelta))return;
+ if(impl_->cameraMode==MechCameraMode::ThirdPerson){
+  impl_->orbitYaw=wrap(impl_->orbitYaw-yawDelta);
+  impl_->orbitPitch=std::clamp(impl_->orbitPitch+pitchDelta,.05F,1.12F);
+  if(impl_->lockKey.empty())impl_->motor.torsoYaw=impl_->orbitYaw;
+ }else impl_->motor.torsoYaw=wrap(impl_->motor.torsoYaw-yawDelta);
 }
 bool MechaGame::start(std::string* error){
  auto& s=*impl_;if(s.started){if(error)*error="Mecha game already started";return false;}
@@ -548,7 +633,15 @@ bool MechaGame::start(std::string* error){
    s.config.acceleration=float(property(c,"acceleration",24.0));
    s.config.boostSpeed=float(property(c,"boost_speed",24.0));
    s.config.radius=float(property(c,"radius",.95));s.config.height=float(property(c,"height",3.5));
+   s.config.jetAcceleration=float(property(c,"jet_acceleration",22.0));
+   s.config.jetDrainPerSecond=float(property(c,"jet_drain",32.0));
+   s.config.maximumJetHeight=float(property(c,"jet_height",18.0));
+   s.cameraMode=MechCameraMode(property(c,"camera_mode",std::int64_t{0}));
   }else if(c.type==torsoType)s.torso=o.id;
+  else if(c.type==legType){
+   s.legs.push_back({o.id,int(property(c,"side",std::int64_t{1})),
+                          int(property(c,"segment",std::int64_t{0}))});
+  }
   else if(c.type==extractionType){
    s.extraction=o.id;s.extractionRadius=float(property(c,"radius",5.0));
    s.extractionPosition=s.world.position(o.id).value_or(Float3{});
@@ -567,6 +660,9 @@ bool MechaGame::start(std::string* error){
    t.spawn=s.world.position(o.id).value_or(Float3{});
    s.targets.push_back(std::move(t));
   }
+ }
+ for(const auto& leg:s.legs)if(s.world.has_collision(leg.id).value_or(true)){
+  if(error)*error="Mech visual legs cannot have physics collision";return false;
  }
  for(const auto id:{s.player,s.torso})if(id&&s.world.has_collision(id).value_or(true)){
   if(error)*error="Mech player and torso must disable physical collision (mech motor owns collision)";
@@ -608,12 +704,19 @@ void MechaGame::step(float dt){
   }
   s.reset();s.lastRestart=true;return; // consume the press edge even after world-input restore
  }
+ if(edge("mech_camera",s.lastCamera)){
+  s.cameraMode=s.cameraMode==MechCameraMode::ThirdPerson?
+      MechCameraMode::Tactical:MechCameraMode::ThirdPerson;
+  s.orbitYaw=s.motor.torsoYaw;s.camera(true);
+ }
+ if(edge("mech_lock",s.lastLock))s.select_lock();
  if(edge("pause",s.lastPause))
   s.hud.phase=s.hud.phase==PrototypePhase::Paused?PrototypePhase::Playing:PrototypePhase::Paused;
  if(s.hud.phase!=PrototypePhase::Playing){s.refresh_hud();return;}
  s.primaryCooldown=std::max(0.F,s.primaryCooldown-dt);
  s.rocketCooldown=std::max(0.F,s.rocketCooldown-dt);
  s.move(dt);
+ s.update_lock(dt);s.publish();
  // Gamepad triggers are analog axes in PlayerInput, while mouse buttons are actions.
  // Either representation may drive a weapon; never discard the digital binding.
  if(s.primary_down())s.shoot_primary();

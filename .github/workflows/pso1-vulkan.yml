@@ -62,22 +62,28 @@ jobs:
           test -n "$icd"
           export VK_ICD_FILENAMES="$icd"
           export DVE_REQUIRE_VULKAN=1
-          export DVE_PSO_CACHE_FILE="$RUNNER_TEMP/dve-pso/cache.bin"
-          mkdir -p "$(dirname "$DVE_PSO_CACHE_FILE")"
-          echo "### COLD process: no persisted cache seed"
+          mkdir -p "$RUNNER_TEMP/dve-pso"
+          echo "### GRAPHICS cold, then seeded (separate graphics seed)"
+          export DVE_PSO_CACHE_FILE="$RUNNER_TEMP/dve-pso/graphics.bin"
+          rm -f "$DVE_PSO_CACHE_FILE"
           ./build-pso1-gpu/dve_vulkan_graphics_tests | tee cold-graphics.log
+          test -s "$DVE_PSO_CACHE_FILE"
+          grep -q 'pso_seed_accepted=0' cold-graphics.log
+          ./build-pso1-gpu/dve_vulkan_graphics_tests | tee warm-graphics.log
+          grep -q 'pso_seed_accepted=1' warm-graphics.log
+          echo "### COMPUTE cold, then seeded (separate compute seed)"
+          export DVE_PSO_CACHE_FILE="$RUNNER_TEMP/dve-pso/compute.bin"
+          rm -f "$DVE_PSO_CACHE_FILE"
           ./build-pso1-gpu/dve_vulkan_compute_tests | tee cold-compute.log
           test -s "$DVE_PSO_CACHE_FILE"
-          echo "### SEEDED process: cache seed must be accepted by actual driver"
-          ./build-pso1-gpu/dve_vulkan_graphics_tests | tee warm-graphics.log
+          grep -q 'pso_seed_accepted=0' cold-compute.log
           ./build-pso1-gpu/dve_vulkan_compute_tests | tee warm-compute.log
-          grep -q 'pso_seed_accepted=1' warm-graphics.log
           grep -q 'pso_seed_accepted=1' warm-compute.log
-          echo "PSO-1 cold/warm smoke passed: examine total_ns; no speedup asserted"
+          echo "PSO-1 independent cold/seeded graphics/compute checks passed; speedup is not asserted"
       - name: Preserve raw driver timings
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: pso1-lavapipe-cold-warm
-          path: "*-graphics.log\n*-compute.log"
+          path: |\n            *-graphics.log\n            *-compute.log
           if-no-files-found: warn

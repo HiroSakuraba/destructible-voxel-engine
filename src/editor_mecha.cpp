@@ -24,7 +24,7 @@ void mesh_part(CookedPolygonAsset& out,Float3 pos,Float3 size,unsigned mat){
 }
 }
 EditorDocument make_mecha_starter(){
- EditorDocument d("Iron Yard - Mecha Combat M1-M4");
+ EditorDocument d("Iron Yard - Mecha Combat M1-M5");
  auto box=[&](std::string label,Float3 pos,Float3 size,Float4 color,bool collide)->EditorObject&{
   EditorObject o(d.allocate_object_id(),std::move(label));
   o.flags.anchored=true;o.flags.collisionEnabled=collide;o.transform.position=pos;
@@ -94,6 +94,15 @@ EditorDocument make_mecha_starter(){
    target.components.back().properties["damage_per_shot"]=i==1?8.0:4.0;
    target.components.back().properties["shot_interval"]=i==1?2.0:1.4;
  }
+ // Two-stage M5 objective: disable the hostiles, then physically reach extraction.
+ // A visual beacon accompanies the marker to make the objective readable in-game.
+ box("Extraction Beacon",{0,55,2.0F},{2.0F,2.0F,4.0F},{.19F,.94F,.49F,1},false);
+ EditorObject extraction(d.allocate_object_id(),"Extraction Zone");
+ extraction.flags.anchored=true;extraction.flags.collisionEnabled=false;
+ extraction.transform.position={0,55,0};
+ extraction.components.push_back(role("mech_extraction","extract"));
+ extraction.components.back().properties["radius"]=5.0;
+ d.add_object(std::move(extraction));
  EditorObject rules(d.allocate_object_id(),"Mecha Rules");
  rules.flags.anchored=true;rules.flags.collisionEnabled=false;
  rules.components.push_back(role("mech_rules","rules"));

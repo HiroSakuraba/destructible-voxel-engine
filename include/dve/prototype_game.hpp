@@ -27,6 +27,11 @@ struct WaterSprayEffect {
     Float3 position{},velocity{};
     float age{},lifetime{.8F},radius{.28F},opacity{.6F};
 };
+// Monotone event sequences cross the fixed-step / real-time audio boundary.
+ // The driver de-duplicates them across render frames and avoids replay after quickload.
+struct MechAudioState {
+    std::uint64_t primaryShots{}, rockets{}, impacts{}, enemyShots{}, boostUses{};
+};
 struct RacingAudioState {
     bool active{};
     float speedFraction{};
@@ -41,6 +46,7 @@ struct PrototypeHud {
     std::string vehicleTelemetry;
     std::string flightWeather;
     RacingAudioState vehicleAudio{};
+    MechAudioState mechAudio{};
     PrototypePhase phase{PrototypePhase::Playing};
     float health{},maximumHealth{};
     unsigned collected{},required{};
@@ -74,7 +80,10 @@ public:
     [[nodiscard]] std::span<const UnderwaterLamp> underwater_lamps()const noexcept;
     [[nodiscard]] std::span<const WaterSprayEffect> water_spray_effects()const noexcept;
     // After a GameWorld save restore, recover kit state and rebind saved trigger IDs.
-    [[nodiscard]] bool after_restore(std::string* error=nullptr);
+    [[nodiscard]] bool after_restore(std::string* error=nullptr,std::string_view mechaState={});
+    // Non-mecha prototypes already persist in their own world components.
+    // Mecha serializes through GameSaveData::gameSections, leaving the base file schema unchanged.
+    [[nodiscard]] std::string mecha_save_state() const;
 private: struct Impl;std::unique_ptr<Impl> impl_;
 };
 // Tiny dependency-free HUD renderer used by CPU player readbacks and screenshots.

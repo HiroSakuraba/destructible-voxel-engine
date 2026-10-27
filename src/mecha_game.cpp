@@ -219,6 +219,12 @@ bool validate_mecha_scene(std::span<const PrototypeObjectView> objects,std::stri
 }
 struct MechaGame::Impl {
  struct Leg {GameObjectId id{};int side{},segment{};};
+ struct FootPad {GameObjectId id{};int side{};};
+ struct FootState {
+  Float3 ankle{},swingFrom{},swingTo{},normal{0,0,1};
+  bool initialized{},planted{},supported{},lastSwing{};
+ };
+ struct GroundContact {Float3 point{},normal{};};
  struct Target {
   GameObjectId id{};std::string key;float hp{},initial{},radius{};
   MechEnemyKind kind{MechEnemyKind::Dummy};
@@ -258,7 +264,11 @@ struct MechaGame::Impl {
  float orbitYaw{},orbitPitch{.23F},gaitPhase{};
  bool jetAirborne{},jetActive{},lastCamera{},lastLock{};
  std::string lockKey;
+ MechLegIkConfig ikConfig{};
+ float footLift{.34F},stepReach{.85F};
+ std::array<FootState,2> feet{};
  std::vector<Leg> legs;
+ std::vector<FootPad> footPads;
  std::vector<Target> targets;
  std::vector<MechProjectile> rockets;
  std::vector<RacingVisualEffect> impacts;
@@ -291,21 +301,103 @@ struct MechaGame::Impl {
   cam.target=plus(cam.target,scaled(minus(focus,cam.target),alpha));
   cam.up={0,0,1};
  }
+ static int foot_index(int side){return side<0?0:1;}
+ Float3 hip_at(int side)const{
+  return plus(motor.position,rotate(rotation(motor.legsYaw),
+               {float(side)*1.0F,0,2.05F}));
+ }
+ Float3 neutral_ankle(int side)const{
+  return plus(motor.position,rotate(rotation(motor.legsYaw),
+               {float(side)*1.0F,0,.16F}));
+ }
+ std::optional<GroundContact> ground(Float3 xy)const{
+  // Use the same world query for polygons and destructible voxels. Probe again
+  // while planted: demolished supports invalidate foot planting immediately.
+  const Float3 origin{xy.x,xy.y,motor.position.z+config.height+.6F};
+  const auto hit=world.raycast(origin,{0,0,-1},config.height+5.5F);
+  if(!hit||!finite3(hit->worldPosition)||!finite3(hit->worldNormal)||
+      hit->worldNormal.z<.46F)return std::nullopt;
+  return GroundContact{plus(hit->worldPosition,scaled(unit(hit->worldNormal),.115F)),
+                       unit(hit->worldNormal)};
+ }
+ void update_feet(float horizontalMeters,bool snap=false){
+  if(legs.empty())return;
+  for(const int side:{-1,1}){
+   auto& f=feet[foot_index(side)];
+   const auto home=neutral_ankle(side);
+   const auto hip=hip_at(side);
+   if(!f.initialized||snap){
+    const auto hit=ground(home);
+    f.ankle=hit?hit->point:home;
+    f.swingFrom=f.swingTo=f.ankle;
+    f.normal=hit?hit->normal:Float3{0,0,1};
+    f.initialized=true;f.planted=bool(hit);f.supported=bool(hit);
+    f.lastSwing=false;
+   }
+   if(jetAirborne){
+    f.ankle=plus(home,{0,0,.26F});
+    f.planted=f.supported=f.lastSwing=false;
+    f.normal={0,0,1};
+    continue;
+   }
+   const float cycle=std::fmod(std::fmod(gaitPhase+(side>0?pi:0.F),2.F*pi)+2.F*pi,2.F*pi);
+   const bool swing=horizontalMeters>.0002F&&cycle<pi;
+   if(swing){
+    if(!f.lastSwing){
+     f.swingFrom=f.ankle;
+     const auto horizontal=Float3{motor.velocity.x,motor.velocity.y,0};
+     const auto direction=mag(horizontal)>.1F?unit(horizontal):facing(motor.legsYaw);
+     const auto desired=plus(home,scaled(direction,stepReach));
+     const auto hit=ground(desired);
+     f.swingTo=hit?hit->point:home;
+     f.normal=hit?hit->normal:Float3{0,0,1};
+     f.supported=bool(hit);
+    }
+    const float t=std::clamp(cycle/pi,0.F,1.F);
+    const float eased=t*t*(3.F-2.F*t);
+    f.ankle=plus(plus(scaled(f.swingFrom,1.F-eased),scaled(f.swingTo,eased)),
+                 {0,0,footLift*std::sin(pi*t)});
+    f.planted=false;f.lastSwing=true;
+   }else{
+    if(f.lastSwing)f.ankle=f.swingTo;
+    f.lastSwing=false;
+    // Foot XY stays in world space during stance. We adjust only its height to
+    // track terrain changes and keep planted feet from sliding with the hips.
+    auto support=ground(f.ankle);
+    const auto distance=mag(minus(f.ankle,hip));
+    if(distance>ikConfig.thighLength+ikConfig.shinLength-.08F)
+     support=ground(home),f.ankle=home;
+    if(support){
+     f.ankle={f.ankle.x,f.ankle.y,support->point.z};
+     f.normal=support->normal;f.planted=f.supported=true;
+    }else{
+     // Missing voxel/floor support: do not leave a weight-bearing foot hovering.
+     f.ankle=plus(home,{0,0,.28F});
+     f.normal={0,0,1};f.planted=f.supported=false;
+    }
+   }
+  }
+ }
  void publish(){
   (void)world.set_position(player,motor.position);
   (void)world.set_rotation(player,rotation(motor.legsYaw));
   if(torso){(void)world.set_position(torso,plus(motor.position,{0,0,2.F}));
    (void)world.set_rotation(torso,rotation(motor.torsoYaw));}
   for(const auto& leg:legs){
-   const float phase=gaitPhase+(leg.side>0?pi:0.F);
-   const float stride=jetAirborne?0.F:std::sin(phase);
-   const float lift=jetAirborne?.10F:std::max(0.F,stride)*.24F;
-   const float swing=leg.segment==0?.36F*stride:-.54F*std::max(0.F,-stride);
-   const Float3 local{float(leg.side),.23F*stride,
-      (leg.segment==0?1.55F:.55F)+lift};
-   (void)world.set_position(leg.id,plus(motor.position,rotate(rotation(motor.legsYaw),local)));
-   (void)world.set_rotation(leg.id,multiply(rotation(motor.legsYaw),
-       quaternion_from_axis_angle({1,0,0},swing)));
+   const auto& foot=feet[foot_index(leg.side)];
+   const auto hip=hip_at(leg.side);
+   const auto pole=rotate(rotation(motor.legsYaw),
+              {float(leg.side)*.16F,1.F,.03F});
+   const auto pose=solve_mech_leg_ik(hip,foot.ankle,pole,ikConfig);
+   if(!pose)continue;
+   (void)world.set_position(leg.id,leg.segment==0?pose->thighCenter:pose->shinCenter);
+   (void)world.set_rotation(leg.id,leg.segment==0?pose->thighRotation:pose->shinRotation);
+  }
+  for(const auto& pad:footPads){
+   const auto& foot=feet[foot_index(pad.side)];
+   (void)world.set_position(pad.id,foot.ankle);
+   (void)world.set_rotation(pad.id,multiply(
+       mech_align_z_axis(foot.normal),rotation(motor.legsYaw)));
   }
  }
  void refresh_hud(){
@@ -364,6 +456,7 @@ struct MechaGame::Impl {
    (void)world.set_enabled(t.id,true);(void)world.set_position(t.id,t.spawn);
    (void)world.set_rotation(t.id,rotation(0));
   }
+  feet={};update_feet(0.F,true);
   publish();camera(true);refresh_hud();
  }
  Target* locked(){
@@ -650,6 +743,7 @@ struct MechaGame::Impl {
   const auto moved=minus(motor.position,before);
   const float horizontal=std::hypot(moved.x,moved.y);
   if(horizontal>.0001F)gaitPhase=wrap(gaitPhase+horizontal*2.5F);
+  update_feet(horizontal);
   const float aimX=axis(world.get_axis("look_x"));
   const float aimY=axis(world.get_axis("look_y"));
   if(cameraMode==MechCameraMode::ThirdPerson){
@@ -695,8 +789,15 @@ bool MechaGame::start(std::string* error){
    s.config.jetAcceleration=float(property(c,"jet_acceleration",22.0));
    s.config.jetDrainPerSecond=float(property(c,"jet_drain",32.0));
    s.config.maximumJetHeight=float(property(c,"jet_height",18.0));
+   s.ikConfig.thighLength=float(property(c,"thigh_length",1.15));
+   s.ikConfig.shinLength=float(property(c,"shin_length",1.10));
+   s.footLift=float(property(c,"foot_lift",.34));
+   s.stepReach=float(property(c,"step_reach",.85));
    s.cameraMode=s.authoredCameraMode=MechCameraMode(property(c,"camera_mode",std::int64_t{0}));
   }else if(c.type==torsoType)s.torso=o.id;
+  else if(c.type==footType){
+   s.footPads.push_back({o.id,int(property(c,"side",std::int64_t{1}))});
+  }
   else if(c.type==legType){
    s.legs.push_back({o.id,int(property(c,"side",std::int64_t{1})),
                           int(property(c,"segment",std::int64_t{0}))});
@@ -719,6 +820,9 @@ bool MechaGame::start(std::string* error){
    t.spawn=s.world.position(o.id).value_or(Float3{});
    s.targets.push_back(std::move(t));
   }
+ }
+ for(const auto& pad:s.footPads)if(s.world.has_collision(pad.id).value_or(true)){
+  if(error)*error="Mech visual feet cannot have physics collision";return false;
  }
  for(const auto& leg:s.legs)if(s.world.has_collision(leg.id).value_or(true)){
   if(error)*error="Mech visual legs cannot have physics collision";return false;

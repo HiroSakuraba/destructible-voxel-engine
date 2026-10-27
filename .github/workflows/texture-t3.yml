@@ -1,0 +1,47 @@
+name: T3 BC5 normal maps and native texture packaging
+on:
+  pull_request:
+    paths:
+      - "CMakeLists.txt"
+      - "include/dve/render/normal_bc5_codec.hpp"
+      - "src/render/normal_bc5_codec.cpp"
+      - "include/dve/render/texture_residency.hpp"
+      - "src/render/texture_residency.cpp"
+      - "include/dve/texture_native_cook.hpp"
+      - "src/texture_native_cook.cpp"
+      - "tests/test_texture_bc5.cpp"
+      - "tests/test_texture_native_cook.cpp"
+      - "apps/dve_texture_bc5_quality_bench.cpp"
+      - "docs/TEXTURE_COMPRESSION_T3.md"
+      - ".github/workflows/texture-t3.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  t3-native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: |
+          cmake -S . -B build-t3 -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DDVE_BUILD_TESTS=ON -DDVE_BUILD_RHI=ON -DDVE_BUILD_PLATFORM=ON -DDVE_BUILD_PLAYER=ON \
+            -DDVE_BUILD_ASSET_COOKER=OFF -DDVE_BUILD_ASSET_PIPELINE_TESTS=OFF \
+            -DDVE_BUILD_BENCHMARK=OFF -DDVE_BUILD_EDITOR=OFF -DDVE_BUILD_NATIVE_EDITOR=OFF \
+            -DDVE_ENABLE_SDL3_HOST=OFF -DDVE_BUILD_DEVICE_TEST_RUNNER=OFF \
+            -DDVE_ENABLE_FLUODDITY=OFF -DDVE_ENABLE_SOFT_BODIES=OFF \
+            -DDVE_ENABLE_CPU_HAIR=OFF -DDVE_ENABLE_SIMULATION_ENERGY_COMPILER=OFF \
+            -DDVE_ENABLE_KTX2_EXPORT=OFF
+      - name: Compile codec packaging benchmarks
+        run: |
+          cmake --build build-t3 --target \
+            dve_texture_bc5_tests dve_texture_native_cook_tests \
+            dve_texture_bc5_quality_bench dve_texture_residency_tests \
+            --parallel 2
+      - name: Execute format and backward compatibility tests
+        run: ctest --test-dir build-t3 -R '^(dve_texture_bc5_tests|dve_texture_native_cook_tests|dve_texture_residency_tests)$' --output-on-failure
+      - name: Synthetic quality corpus (not real game assets)
+        run: ./build-t3/dve_texture_bc5_quality_bench

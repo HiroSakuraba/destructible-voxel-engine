@@ -64,7 +64,7 @@ int main(int argc,char** argv) {
             image.rgba8.resize(size);
             std::ifstream in(argv[3],std::ios::binary);
             if(!in||!in.read(reinterpret_cast<char*>(image.rgba8.data()),
-                              static_cast<std::streamsize>(size))||in.peek()!=EOF)
+                              static_cast<std::streamsize>(size))||in.peek()!=std::char_traits<char>::eof())
                 throw std::runtime_error("expected exact WIDTH*HEIGHT*4 RGBA8 file");
             measure(image,true);
         } else if(argc==1) {

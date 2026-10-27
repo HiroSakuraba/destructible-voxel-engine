@@ -36,6 +36,7 @@ float dot3(Float3 a,Float3 b){return a.x*b.x+a.y*b.y+a.z*b.z;}
 float mag(Float3 a){return std::sqrt(dot3(a,a));}
 bool finite3(Float3 a){return std::isfinite(a.x)&&std::isfinite(a.y)&&std::isfinite(a.z);}
 Float3 unit(Float3 a){const auto len=mag(a);return len>1.0e-6F?scaled(a,1.F/len):Float3{};}
+Float3 cross3(Float3 a,Float3 b){return {a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x};}
 float axis(float v){return std::isfinite(v)?std::clamp(v,-1.F,1.F):0.F;}
 float angle_to(Float3 forward){return std::atan2(-forward.x,forward.y);}
 float wrap(float a){return std::remainder(a,2.F*pi);}
@@ -292,7 +293,23 @@ struct MechaGame::Impl {
   hud.mechAudio={telemetry.autocannonShots,telemetry.rocketsFired,
                   telemetry.impacts,telemetry.enemyShots,boostUses};
   hud.vehicleTelemetry+=cameraMode==MechCameraMode::ThirdPerson?"  CAM: CHASE":"  CAM: TACTICAL";
-  if(!lockKey.empty())hud.vehicleTelemetry+="  LOCK: "+lockKey;
+  if(!lockKey.empty())hud.vehicleTelemetry="LOCK "+lockKey+"  "+hud.vehicleTelemetry;
+  hud.mechLockMarker=false;
+  if(!lockKey.empty())for(const auto& t:targets)if(t.key==lockKey&&t.hp>0){
+   if(const auto p=world.position(t.id)){
+    const auto forward=unit(minus(cam.target,cam.position));
+    const auto right=unit(cross3(forward,cam.up));
+    const auto up=unit(cross3(right,forward));
+    const auto delta=minus(*p,cam.position);
+    const auto depth=dot3(delta,forward);
+    const auto size=depth*std::tan(cam.verticalFovRadians*.5F);
+    if(size>.1F){
+     hud.mechLockX=dot3(delta,right)/size;
+     hud.mechLockY=dot3(delta,up)/size;
+     hud.mechLockMarker=std::isfinite(hud.mechLockX)&&std::isfinite(hud.mechLockY);
+    }
+   }
+  }
   hud.stats+="  ALT "+std::to_string(int(std::max(0.F,motor.position.z-start.z)));
   telemetry.altitude=std::max(0.F,motor.position.z-start.z);
   telemetry.verticalSpeed=motor.velocity.z;telemetry.jetActive=jetActive;

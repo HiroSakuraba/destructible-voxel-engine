@@ -74,12 +74,25 @@ jobs:
             -DDVE_ENABLE_GRID_FLUIDS=OFF -DDVE_ENABLE_FLIP_LIQUIDS=OFF \
             "${sanitize_args[@]}"
       - name: Build region contract tests
-        run: cmake --build build-region --target dve_region_catalog_tests dve_region_streaming_tests dve_region_streaming_runtime_contract_tests dve_region_dirty_tests dve_region_dirty_dispatch_tests --parallel 2
+        run: cmake --build build-region --target dve_region_catalog_tests dve_region_streaming_tests dve_region_streaming_runtime_contract_tests dve_region_dirty_tests dve_region_dirty_dispatch_tests dve_region_game_damage_host_contract_tests --parallel 2
       - name: Run region contract tests
         env:
           ASAN_OPTIONS: detect_leaks=1
           UBSAN_OPTIONS: halt_on_error=1
-        run: ctest --test-dir build-region -R '^dve_region_(catalog_tests|streaming_tests|streaming_runtime_contract_tests|dirty_tests|dirty_dispatch_tests)$' --output-on-failure
+        run: ctest --test-dir build-region -R '^dve_region_(catalog_tests|streaming_tests|streaming_runtime_contract_tests|dirty_tests|dirty_dispatch_tests|game_damage_host_contract_tests) --output-on-failure
+      - name: Build and run R2 against real DVE scene staging and renderer
+        if: matrix.mode == 'release'
+        run: |
+          cmake --build build-region --target dve_region_streaming_real_tests dve_region_dirty_gpu_tests dve_region_dirty_dispatch_real_tests dve_region_dirty_dispatch_budget_tests dve_region_game_damage_real_tests dve_region_game_damage_host_real_tests --parallel 2
+          ctest --test-dir build-region -R '^dve_region_(streaming_real_tests|dirty_gpu_tests|dirty_dispatch_real_tests|dirty_dispatch_budget_tests|game_damage_real_tests|game_damage_host_real_tests) --output-on-failure
+ --output-on-failure
+      - name: Build and run R2 against real DVE scene staging and renderer
+        if: matrix.mode == 'release'
+        run: |
+          cmake --build build-region --target dve_region_streaming_real_tests dve_region_dirty_gpu_tests dve_region_dirty_dispatch_real_tests dve_region_dirty_dispatch_budget_tests dve_region_game_damage_real_tests --parallel 2
+          ctest --test-dir build-region -R '^dve_region_(streaming_real_tests|dirty_gpu_tests|dirty_dispatch_real_tests|dirty_dispatch_budget_tests|game_damage_real_tests)$' --output-on-failure
+ --output-on-failure
+ --output-on-failure
       - name: Build and run R2 against real DVE scene staging and renderer
         if: matrix.mode == 'release'
         run: |

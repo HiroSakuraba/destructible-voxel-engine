@@ -1,3 +1,4 @@
+#include "dve_test_skip.hpp"
 #include <array>
 #include <bit>
 #include <cstddef>
@@ -107,8 +108,7 @@ int main() {
             if (std::getenv("DVE_REQUIRE_VULKAN"))
                 throw std::runtime_error(std::string("required Vulkan camera device unavailable: ") +
                                          std::string(device.device_loss_reason()));
-            std::cout << "Vulkan camera outputs test skipped: " << device.device_loss_reason() << '\n';
-            return 0;
+            return dve::testing::skip(std::string("Vulkan camera outputs test: ") + std::string(device.device_loss_reason()));
         }
         std::string error;
         CameraFrameGraph graph;

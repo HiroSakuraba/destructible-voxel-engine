@@ -6,6 +6,7 @@
 // onto a plate with a square hole falls into it when the plate is a convex set and
 // rests on top when the plate is one hull, at 1 mm and 0.1 mm clearance.
 
+#include "dve_test_skip.hpp"
 #include "dve/collision_convex_set.hpp"
 #include "dve/collision_hull.hpp"
 #include "dve/game_world.hpp"
@@ -252,12 +253,12 @@ int main() {
         if (std::getenv("DVE_JOLT_PROBE")) jolt_tuning_probe();
         jolt_drop();
 #else
-        std::cout << "SKIP Jolt drop test: built without DVE_ENABLE_JOLT\n";
+        dve::testing::note_skip("Jolt drop test: built without DVE_ENABLE_JOLT");
 #endif
     } catch (const std::exception& e) {
         std::cerr << "FAIL: " << e.what() << "\n";
         return 1;
     }
     std::cout << "convex collision set tests passed\n";
-    return 0;
+    return dve::testing::exit_code(false);
 }

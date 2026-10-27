@@ -1,3 +1,4 @@
+#include "dve_test_skip.hpp"
 #include "dve/environment_lighting.hpp"
 #include "dve/render/cascaded_shadow_atlas.hpp"
 #include "dve/render/environment_lighting_gpu.hpp"
@@ -18,7 +19,7 @@ int main(){
         dve::rhi::VulkanDevice device;
         if(device.status()!=dve::rhi::DeviceStatus::Ready){
             if(std::getenv("DVE_REQUIRE_VULKAN"))throw std::runtime_error(std::string("required Vulkan unavailable: ")+std::string(device.device_loss_reason()));
-            std::cout<<"Vulkan environment lighting test skipped: "<<device.device_loss_reason()<<'\n';return 0;
+            return dve::testing::skip(std::string("Vulkan environment lighting test: ")+std::string(device.device_loss_reason()));
         }
         dve::IblBakeSettings settings;settings.irradianceResolution=4U;settings.specularResolution=8U;settings.specularMipLevels=4U;settings.sampleCount=16U;settings.brdfResolution=8U;
         const auto asset=dve::make_default_environment_lighting_asset(settings);

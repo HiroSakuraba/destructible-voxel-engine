@@ -4,6 +4,7 @@ on:
     paths:
       - "CMakeLists.txt"
       - "tests/test_texture_render_diff_t6.cpp"
+      - "tests/scripts/t6_make_gallery.py"
       - "docs/TEXTURE_T6_RENDER_DIFF.md"
       - ".github/workflows/texture-t6.yml"
   workflow_dispatch:
@@ -18,9 +19,9 @@ jobs:
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
-      - name: Install image/development dependencies
+      - name: Install image dependencies
         run: sudo apt-get update && sudo apt-get install -y ninja-build libpng-dev libjpeg-dev
-      - name: Configure editor, renderer and real texture baker
+      - name: Configure editor and baker
         run: |
           cmake -S . -B build-t6 -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DDVE_BUILD_TESTS=ON -DDVE_BUILD_RHI=ON -DDVE_BUILD_PLATFORM=ON \
@@ -30,59 +31,18 @@ jobs:
             -DDVE_ENABLE_FLUODDITY=OFF -DDVE_ENABLE_SOFT_BODIES=OFF \
             -DDVE_ENABLE_CPU_HAIR=OFF -DDVE_ENABLE_SIMULATION_ENERGY_COMPILER=OFF \
             -DDVE_ENABLE_BC7F_ENCODER=OFF -DDVE_ENABLE_KTX2_EXPORT=OFF
-      - name: Compile image comparison suite
+      - name: Build T6
         run: cmake --build build-t6 --target dve_texture_render_diff_t6_tests --parallel 2
-      - name: Run and capture comparison images
+      - name: Run rendered-image comparisons
         env:
           DVE_REQUIRE_COMPLETE_TESTS: "1"
           DVE_T6_CAPTURE_DIR: ${{ runner.temp }}/t6-bc5
-        run: ctest --test-dir build-t6 -R '^dve_texture_render_diff_t6_tests
-      - name: Retain diagnostic PPM and metrics CSV
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: t6-cpu-reference-bc5
-          path: ${{ runner.temp }}/t6-bc5/
-          if-no-files-found: warn
-
-  bc7-reference:
-    name: DVE reference renderer A/B BC5 + Basis bc7f
-    runs-on: ubuntu-latest
-    timeout-minutes: 50
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install image/development dependencies
-        run: sudo apt-get update && sudo apt-get install -y ninja-build libpng-dev libjpeg-dev
-      - name: Configure editor and optional pinned Basis transcoder
-        run: |
-          cmake -S . -B build-t6-bc7 -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DDVE_BUILD_TESTS=ON -DDVE_BUILD_RHI=ON -DDVE_BUILD_PLATFORM=ON \
-            -DDVE_BUILD_PLAYER=ON -DDVE_BUILD_EDITOR=ON -DDVE_BUILD_NATIVE_EDITOR=OFF \
-            -DDVE_BUILD_ASSET_COOKER=OFF -DDVE_BUILD_ASSET_PIPELINE_TESTS=OFF \
-            -DDVE_BUILD_BENCHMARK=OFF -DDVE_ENABLE_SDL3_HOST=OFF \
-            -DDVE_ENABLE_FLUODDITY=OFF -DDVE_ENABLE_SOFT_BODIES=OFF \
-            -DDVE_ENABLE_CPU_HAIR=OFF -DDVE_ENABLE_SIMULATION_ENERGY_COMPILER=OFF \
-            -DDVE_ENABLE_BC7F_ENCODER=ON -DDVE_ENABLE_KTX2_EXPORT=OFF
-      - name: Build pinned bc7f and image comparison
-        run: cmake --build build-t6-bc7 --target dve_texture_render_diff_t6_tests --parallel 2
-      - name: Run BC5 + BC7 rendered-image comparisons
-        env:
-          DVE_REQUIRE_COMPLETE_TESTS: "1"
-          DVE_T6_CAPTURE_DIR: ${{ runner.temp }}/t6-bc7
-        run: ctest --test-dir build-t6-bc7 -R '^dve_texture_render_diff_t6_tests
-      - name: Retain reference/encoded/difference frames and metrics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: t6-cpu-reference-bc5-bc7
-          path: ${{ runner.temp }}/t6-bc7/
-          if-no-files-found: warn
- -V --output-on-failure
-      - name: Generate static HTML image review
+        run: ctest --test-dir build-t6 -R '^dve_texture_render_diff_t6_tests$' -V --output-on-failure
+      - name: Generate browser gallery
         env:
           DVE_T6_CAPTURE_DIR: ${{ runner.temp }}/t6-bc5
         run: python3 tests/scripts/t6_make_gallery.py
-      - name: Retain diagnostic PPM and metrics CSV
+      - name: Save images and metrics
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -91,14 +51,14 @@ jobs:
           if-no-files-found: warn
 
   bc7-reference:
-    name: DVE reference renderer A/B BC5 + Basis bc7f
+    name: DVE reference renderer A/B BC5 and Basis BC7
     runs-on: ubuntu-latest
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
-      - name: Install image/development dependencies
+      - name: Install image dependencies
         run: sudo apt-get update && sudo apt-get install -y ninja-build libpng-dev libjpeg-dev
-      - name: Configure editor and optional pinned Basis transcoder
+      - name: Configure editor with pinned Basis transcoder
         run: |
           cmake -S . -B build-t6-bc7 -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DDVE_BUILD_TESTS=ON -DDVE_BUILD_RHI=ON -DDVE_BUILD_PLATFORM=ON \
@@ -108,71 +68,18 @@ jobs:
             -DDVE_ENABLE_FLUODDITY=OFF -DDVE_ENABLE_SOFT_BODIES=OFF \
             -DDVE_ENABLE_CPU_HAIR=OFF -DDVE_ENABLE_SIMULATION_ENERGY_COMPILER=OFF \
             -DDVE_ENABLE_BC7F_ENCODER=ON -DDVE_ENABLE_KTX2_EXPORT=OFF
-      - name: Build pinned bc7f and image comparison
+      - name: Build T6 with Basis
         run: cmake --build build-t6-bc7 --target dve_texture_render_diff_t6_tests --parallel 2
-      - name: Run BC5 + BC7 rendered-image comparisons
+      - name: Run BC5/BC7 rendered-image comparisons
         env:
           DVE_REQUIRE_COMPLETE_TESTS: "1"
           DVE_T6_CAPTURE_DIR: ${{ runner.temp }}/t6-bc7
         run: ctest --test-dir build-t6-bc7 -R '^dve_texture_render_diff_t6_tests$' -V --output-on-failure
-      - name: Retain reference/encoded/difference frames and metrics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: t6-cpu-reference-bc5-bc7
-          path: ${{ runner.temp }}/t6-bc7/
-          if-no-files-found: warn
- -V --output-on-failure
-      - name: Generate static HTML BC5 and BC7 image review
+      - name: Generate browser gallery
         env:
           DVE_T6_CAPTURE_DIR: ${{ runner.temp }}/t6-bc7
         run: python3 tests/scripts/t6_make_gallery.py
-      - name: Retain reference/encoded/difference frames and metrics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: t6-cpu-reference-bc5-bc7
-          path: ${{ runner.temp }}/t6-bc7/
-          if-no-files-found: warn
- -V --output-on-failure
-      - name: Generate static HTML image review
-        env:
-          DVE_T6_CAPTURE_DIR: ${{ runner.temp }}/t6-bc5
-        run: python3 tests/scripts/t6_make_gallery.py
-      - name: Retain diagnostic PPM and metrics CSV
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: t6-cpu-reference-bc5
-          path: ${{ runner.temp }}/t6-bc5/
-          if-no-files-found: warn
-
-  bc7-reference:
-    name: DVE reference renderer A/B BC5 + Basis bc7f
-    runs-on: ubuntu-latest
-    timeout-minutes: 50
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install image/development dependencies
-        run: sudo apt-get update && sudo apt-get install -y ninja-build libpng-dev libjpeg-dev
-      - name: Configure editor and optional pinned Basis transcoder
-        run: |
-          cmake -S . -B build-t6-bc7 -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DDVE_BUILD_TESTS=ON -DDVE_BUILD_RHI=ON -DDVE_BUILD_PLATFORM=ON \
-            -DDVE_BUILD_PLAYER=ON -DDVE_BUILD_EDITOR=ON -DDVE_BUILD_NATIVE_EDITOR=OFF \
-            -DDVE_BUILD_ASSET_COOKER=OFF -DDVE_BUILD_ASSET_PIPELINE_TESTS=OFF \
-            -DDVE_BUILD_BENCHMARK=OFF -DDVE_ENABLE_SDL3_HOST=OFF \
-            -DDVE_ENABLE_FLUODDITY=OFF -DDVE_ENABLE_SOFT_BODIES=OFF \
-            -DDVE_ENABLE_CPU_HAIR=OFF -DDVE_ENABLE_SIMULATION_ENERGY_COMPILER=OFF \
-            -DDVE_ENABLE_BC7F_ENCODER=ON -DDVE_ENABLE_KTX2_EXPORT=OFF
-      - name: Build pinned bc7f and image comparison
-        run: cmake --build build-t6-bc7 --target dve_texture_render_diff_t6_tests --parallel 2
-      - name: Run BC5 + BC7 rendered-image comparisons
-        env:
-          DVE_REQUIRE_COMPLETE_TESTS: "1"
-          DVE_T6_CAPTURE_DIR: ${{ runner.temp }}/t6-bc7
-        run: ctest --test-dir build-t6-bc7 -R '^dve_texture_render_diff_t6_tests$' -V --output-on-failure
-      - name: Retain reference/encoded/difference frames and metrics
+      - name: Save images and metrics
         if: always()
         uses: actions/upload-artifact@v4
         with:

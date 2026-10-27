@@ -59,7 +59,7 @@ environment variable `DVE_REQUIRE_COMPLETE_TESTS=1` for the ctest step, which tu
 | `ci.yml` ctest `linux-gcc-release`, `linux-gcc-asan` | Vulkan, Editor, Player, AssetPipeline, MeshAuthoring, AudioSynth | no | no Lua / Jolt in these presets; no DXC in the image; the hosted runner has no Vulkan device, so the Vulkan GPU tests exit 77 |
 | `ci.yml` ctest `linux-gcc-lua-release` | the above + Lua | no | same |
 | `ci.yml` ctest `linux-gcc-player-release` | the above + Lua, Jolt | no | same; no Box2D / Box3D preset |
-| `ci.yml` windows-msvc | Lua, Jolt, Player, AssetPipeline | no | no Vulkan device, no DXC |
+| `ci.yml` windows-msvc | Lua, Jolt, Vulkan, Editor, Player, AssetPipeline, MeshAuthoring, AudioSynth | no | no Vulkan device, no DXC |
 | `v235-foundations.yml` native physics (Jolt, Box3D) | Jolt / Box3D | yes | the selected adapter test may not skip |
 | `rdv-bbv.yml` | Vulkan | yes (with `DVE_REQUIRE_VULKAN`) | has a software ICD (lavapipe) |
 | `region-index.yml` ctest steps | none (RHI off) | yes | the selected contract tests may not skip |
@@ -117,11 +117,18 @@ There was nothing to fix, so this branch only records the audit.
 
 ## Checks
 
-- **Configuration.** Configuring the working build (Lua and the player on; Vulkan, DXC, Jolt
-  and Box2D/3D off) lists 5 groups as SKIPPED with their reasons and warns.
-- **ctest.** It now runs 387 tests: 0 fail, and 6 are reported as Skipped instead of Passed.
-  - `dve_test_coverage` (the 5 missing groups);
-  - the GPU parts of the AO, atmosphere and radiance-cascade probe tests (no Vulkan);
-  - the Jolt parts of `test_game_save` and `test_game_scene_loader`.
-- **Turning the player on.** This added the 15 player tests. They compiled and passed, which is
-  the first time the player changes in the damage-marks and texturing branches were built.
+- **Configuration.** Each CI preset's list of required groups was configured locally (and the
+  hosted runs print the same report): Linux Release and ASan have every group but Lua, DXC, Jolt and
+  Box2D/3D; the Lua leg adds Lua; the player leg and Windows add Jolt; no job has DXC or Box2D/3D.
+- **An expected group that is missing fails.** Verified by configuring with the group disabled and
+  required: `-DDVE_ENABLE_LUA=OFF -DDVE_REQUIRE_TEST_GROUPS=Lua`,
+  `-DDVE_ENABLE_VULKAN_BUFFER_BACKEND=OFF -DDVE_REQUIRE_TEST_GROUPS="Lua;Vulkan"`,
+  `DVE_REQUIRE_TEST_GROUPS="Lua Jolt"` in the environment (Jolt off), an unknown id, and
+  `DVE_BUILD_TESTS=OFF` with a group named all fail configuration with the report;
+  `-DDVE_REQUIRE_COMPLETE_TESTS=ON` fails while DXC/Jolt/Box2D/Box3D are off.
+- **ctest still exits 0 when something is Skipped** (checked locally and by the green hosted runs); with
+  `DVE_REQUIRE_COMPLETE_TESTS=1` in the environment the self-skipping tests fail instead.
+- **What is Skipped on the hosted runners, and why.** Linux: the Vulkan GPU tests (no device), the DXC
+  tests, `dve_test_coverage`; in the plain Release leg also `test_game_save` / `test_game_scene_loader` /
+  `test_collision_convex_set` (no Lua / Jolt). Windows: the same GPU tests and the two live-editor MCP
+  tests (no Unix sockets).

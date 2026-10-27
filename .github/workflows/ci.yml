@@ -341,7 +341,7 @@ jobs:
             -DVCPKG_TARGET_TRIPLET=x64-windows \
             "-DCMAKE_TOOLCHAIN_FILE=$DVE_VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
             "-DFETCHCONTENT_BASE_DIR=$DVE_WORKSPACE/.cache/fetchcontent/$PRESET-ninja" \
-            "-DDVE_REQUIRE_TEST_GROUPS=Lua,Jolt,Player,AssetPipeline" \
+            "-DDVE_REQUIRE_TEST_GROUPS=Lua,Jolt,Vulkan,Editor,Player,AssetPipeline,MeshAuthoring,AudioSynth" \
             2>&1 | tee configure.log
           exit ${PIPESTATUS[0]}
       - name: Build

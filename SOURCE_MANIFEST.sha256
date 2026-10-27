@@ -1,7 +1,7 @@
 2460a349f4757a5bc533fafc29c8a5d15ae5a76d04ac4106e0c609a4fcf93ec5  .gitattributes
 190a30c8b8f38abc1bfffec0bade22c6c42d6fb96bb050b020a030eebb139f33  .github/ci-image/Dockerfile
 f1692fd4e3c8894b9727fa07d32abe33650e049b0b12b9df0b0c82c94dfc25c7  .github/workflows/ci-image-mirror.yml
-df9b6c7b67d27e3db52fa91dfd8f8b135eea6c27ad5660ebf128dce490249a0b  .github/workflows/ci.yml
+4d4d97e84e314446dc77eb20e03513c7d59e323cdbcf53e6b01ec3f2107704af  .github/workflows/ci.yml
 436a93afb2358f50802dc78abace5bebd09051751285be1a12202e079ea47d97  .github/workflows/rdv-bbv.yml
 734d0ed8161b7b051fbae880e605100c9c3b8010fbdc6ceab30248cd3154004c  .github/workflows/region-index.yml
 87f780e20feea07bd2d1d8a2b1f5b4739c2dc097a125c578a8c9168c80664b78  .github/workflows/texture-t1.yml
@@ -543,7 +543,7 @@ f8f8e2a784b0757340a62ec3268b52a5f7c24f26dda4a5a341aec6e0e6cce4ac  docs/editor-vo
 9891dce150c03da9afde3ede8348571abc3d8a9e4488ec70f3f0ef43488adb03  docs/flying-f1-implementation.md
 ecced9c13bbd615a2589737d0c3cb9d07f73def3aa1cffbb4f23190f92ccfe1c  docs/flying-f2-wind-soaring.md
 356601b91ed42f72f64c33c608c5908bbb0eaef9934e066d9d998b42b2abcc12  docs/game-world-damage-2026-10-08.md
-c2b513ff6cf136a25deda812e7f9b36e2f08b2319c06de49b128aef2e8eb489b  docs/honest-test-coverage-2026-10-27.md
+3e2a5b9da30929e6cad816becd146fdc4479fca740cf0d9c00a7729ec390b0d7  docs/honest-test-coverage-2026-10-27.md
 e569404422550c58e9597ec811269101b0ca62e7830ed4079fa1f21c3f613cd4  docs/images/material-glass-batch5/acceptance.png
 5ae95007ca1fabe55b59e2d8e8ddda415216c0f956de1c99e7f41dfd5663db6c  docs/images/material-presets-batch1/native-material-panel.png
 b50a27590656369403e0d33ff0585c6904c9c6526be45365600cb018162ba540  docs/images/material-presets-batch1/starter-gallery.png

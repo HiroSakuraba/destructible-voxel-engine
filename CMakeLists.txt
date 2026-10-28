@@ -924,6 +924,7 @@ if(DVE_BUILD_EDITOR)
         src/editor_native_real_scale.cpp
         src/editor_native_pivot_edit.cpp
         src/editor_native_cad_detail.cpp
+        src/editor_native_exact_tube.cpp
         src/editor_native_cad_guard.cpp
         src/editor_native_cad_measure.cpp
         src/editor_native_cad_step.cpp

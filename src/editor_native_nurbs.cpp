@@ -26,7 +26,7 @@ void NativeEditorController::refresh_nurbs_menu_state(){
         std::vector<std::string> blocked;
         for(const auto& a:std::as_const(workspace_.menus()).actions())
             if(a.id.starts_with("mesh.")||a.id.starts_with("mirror.")||
-               (a.id.starts_with("polygon.")&&a.id!="polygon.create_plane"&&a.id!="polygon.import"&&a.id!="polygon.import_exact")||a.id=="subdiv.from_polygon")blocked.push_back(a.id);
+               (a.id.starts_with("polygon.")&&a.id!="polygon.create_plane"&&a.id!="polygon.import"&&a.id!="polygon.import_exact"&&a.id!="polygon.create_exact_tube")||a.id=="subdiv.from_polygon")blocked.push_back(a.id);
         for(const auto& a:blocked)(void)workspace_.menus().set_enabled(a,false,"Bake NURBS to a new polygon before polygon editing");
     }
     if(nurbs_control_mode())for(const auto blockedAction:{"edit.copy","edit.cut","edit.delete","edit.duplicate"})

@@ -782,6 +782,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"nurbs.bake_polygon","NURBS","Bake to New Polygon (Keep Source)",""},
         {"polygon.import","Polygon","Import Polygon Model",""}, {"polygon.create_plane","Polygon","Create Mesh Plane",""},
         {"polygon.import_exact","Polygon","Import Exact CAD (STEP, BREP, USD)",""},
+        {"polygon.create_exact_tube","Polygon","Create Exact Tube (CAD)...",""},
         {"polygon.lod","Polygon","LOD Settings",""},
         {"polygon.collision","Polygon","Collision Settings",""}, {"polygon.streaming","Polygon","Streaming Settings",""},
         {"material.library","Materials","Material Library",""}, {"material.globals","Materials","Global Parameters",""},
@@ -885,6 +886,8 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"mesh.exact_boolean_reverse","Polygon","Exact Boolean B minus A (CAD)",""},
         {"mesh.exact_boolean_intersection","Polygon","Exact Boolean Intersection (CAD)",""},
         {"mesh.exact_collision","Polygon","Build Exact Convex Collision (CAD)",""},
+        {"mesh.exact_cope","Polygon","Cope Tube A to B (Exact CAD)...",""},
+        {"mesh.exact_miter","Polygon","Plane Cut / Miter Tube (Exact CAD)...",""},
         {"mesh.hull_fit","Polygon","Fit Convex Collision Hull",""},
         {"mesh.hull_edit","Polygon","Edit Collision Hull Points",""},
         {"mesh.hull_remove","Polygon","Remove Authored Collision Hull",""},
@@ -1002,7 +1005,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     for (auto id:{"polygon.vertex_mode","polygon.edge_mode","polygon.face_mode","polygon.object_mode"})
         configure(id,"Mesh Editing",80,true,"polygon.selection");
     for(auto id:{"mesh.boolean_union","mesh.boolean_difference","mesh.boolean_reverse","mesh.boolean_intersection"})configure(id,"Mesh Booleans",70);
-    for(auto id:{"mesh.exact_boolean_union","mesh.exact_boolean_difference","mesh.exact_boolean_reverse","mesh.exact_boolean_intersection","mesh.exact_collision"})configure(id,"Exact CAD Booleans",71);
+    for(auto id:{"mesh.exact_boolean_union","mesh.exact_boolean_difference","mesh.exact_boolean_reverse","mesh.exact_boolean_intersection","mesh.exact_collision","mesh.exact_cope","mesh.exact_miter"})configure(id,"Exact CAD Booleans",71);
     for(auto id:{"mesh.hull_fit","mesh.hull_edit","mesh.hull_remove"})configure(id,"Collision Hull",75);
     for(auto id:{"mesh.bevel_edges","mesh.subdivide","mesh.displace","mesh.split_edges","mesh.flip_diagonal","mesh.bridge","mesh.cap","mesh.hard_normals","mesh.smooth_normals","mesh.diagnostics","mesh.uv_editor"})configure(id,"Mesh Editing",80);
     for(auto id:{"mesh.uv_editor","mesh.uv_mark_seam","mesh.uv_clear_seam","mesh.uv_toggle_pin","mesh.uv_reset_flags"})configure(id,"UV Editing",82);
@@ -1347,6 +1350,9 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     }
     describe("file.export_exact_step", "Write the selected CAD objects into one STEP file in exports/, each a named solid placed where it is in the scene, from its exact source. Choose millimetres or metres, Z or Y up. The file is read back and checked; nothing is written if that fails. Stretched objects are exported converted and named.", {"step", "stp", "export", "cad", "brep", "exact", "solid", "mechanical"});
     describe("view.measure", "Click two points for the distance between them; snaps to vertices, edge midpoints and, on CAD objects, exact corners and circle centres. CAD points read in millimetres and clicking a CAD face names it (Hole \xC3\x98 12.000 mm). Esc ends.", {"measure", "distance", "ruler", "dimension", "diameter", "radius", "cad"});
+    describe("polygon.create_exact_tube", "Create a hollow round, square or rectangular tube as an exact B-rep (outer solid minus the bore, certified by brepkernel), e.g. round 50.8 3 600 y. Type the size, wall and length in mm; undo removes it.", {"tube", "pipe", "hollow", "round", "square", "rectangular", "cad", "exact", "wall"});
+    describe("mesh.exact_cope", "Cope tube A (active) to tube B: cut away B's solid outer body from A with the exact Boolean, so A's end fits B's outside. Type an optional fit-up gap in mm. Makes a new object; A and B are unchanged. Equal diameters at 90 degrees are cut with an automatic 0.01 mm clearance, and the result says so.", {"cope", "fish mouth", "fishmouth", "notch", "saddle", "tube", "joint", "cad", "exact"});
+    describe("mesh.exact_miter", "Cut a tube on a plane through both walls at an angle from a square cut (e.g. 47.5), keeping the low or high end, with the exact Boolean. Makes a new object; the tube is unchanged.", {"miter", "mitre", "plane cut", "angle cut", "bevel", "tube", "cad", "exact"});
     describe("polygon.cad_detail", "Re-mesh CAD objects from their exact source so the triangles stay within a chosen distance of the true surface (1 mm to 0.005 mm, or typed). The exact source does not change.", {"cad", "accuracy", "tessellation", "deflection", "detail", "exact"});
     describe("select.set_save", "Save the selected objects, or the selected vertices, edges or faces of a mesh, as a named set saved with the scene.", {"selection set", "named", "save", "store"});
     describe("select.set_save_query", "Save the hierarchy filter (a name or a query such as type:mesh tag:rock) as a smart set that is re-evaluated each time.", {"selection set", "smart", "query", "saved search"});

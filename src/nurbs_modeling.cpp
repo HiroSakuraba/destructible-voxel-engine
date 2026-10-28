@@ -82,15 +82,41 @@ std::optional<NurbsFit> rebuild_nurbs_curve(const NurbsSource& source,unsigned c
     for(unsigned i=0;i<513;++i){const double t=std::lerp(lo,hi,double(i)/512);auto a=evaluate_nurbs(source,t),b=evaluate_nurbs(out,t);if(!a||!b)return fail<NurbsFit>(e,"Rebuild validation evaluation failed");fit->maxSampledError=(std::max)(fit->maxSampledError,norm(sub(a->position,b->position)));}
     if(fit->maxSampledError>tolerance)return fail<NurbsFit>(e,"Rebuild exceeds independent sampled error tolerance");return fit;
 }
-std::optional<NurbsSource> attach_nurbs_u(const NurbsSource& reference,const NurbsSource& moving,bool c1,std::string* e){
+std::array<double,4> detail::second_row_control(const NurbsAxis& ru,unsigned n,const NurbsAxis& mu,std::array<double,4> r3,std::array<double,4> r2,std::array<double,4> r1,std::array<double,4> q0,std::array<double,4> q1){
+    // Clamped B-spline end derivatives (The NURBS Book eq. 3.9 applied twice):
+    //   reference end:   C''(b) = pr(pr-1)/A [ (R1-R2)/A - (R2-R3)/B ],  A=b-u[N-1], B=b-u[N-2]
+    //   moving start:    C''(a) = pm(pm-1)/al [ (Q2-Q1)/be - (Q1-Q0)/al ], al=u[p+1]-a, be=u[p+2]-a
+    const double pr=ru.degree,pm=mu.degree,b=ru.knots.back(),a=mu.knots.front();
+    const double A=b-ru.knots[n-1],B=b-ru.knots[n-2],al=mu.knots[mu.degree+1]-a,be=mu.knots[mu.degree+2]-a;
+    std::array<double,4> out{};
+    for(unsigned c=0;c<4;++c){
+        const double S=pr>=2?pr*(pr-1)/A*((r1[c]-r2[c])/A-(r2[c]-r3[c])/B):0.0;
+        out[c]=q1[c]+be*(S*al/(pm*(pm-1))+(q1[c]-q0[c])/al);
+    }
+    return out;
+}
+std::optional<NurbsSource> attach_nurbs_u(const NurbsSource& reference,const NurbsSource& moving,bool c1,std::string* e){return attach_nurbs_u_continuity(reference,moving,c1?1U:0U,e);}
+std::optional<NurbsSource> attach_nurbs_u_continuity(const NurbsSource& reference,const NurbsSource& moving,unsigned order,std::string* e){
     if(!validate_nurbs(reference,e)||!validate_nurbs(moving,e))return {};
     if(reference.is_curve()||moving.is_curve()||reference.rows!=moving.rows||reference.v!=moving.v)return fail<NurbsSource>(e,"Attach requires surfaces with identical V degree, knots and row count; orient/refine first");
+    if(order>2)return fail<NurbsSource>(e,"Attachment continuity order must be 0, 1 or 2");
+    const bool c1=order>=1,c2=order>=2;
+    if(c2&&(moving.columns<4||moving.u.degree<2))return fail<NurbsSource>(e,"C2 attachment needs U degree 2 or more and at least four U controls on the moving patch so its far edge is kept; elevate or insert a U knot first");
     if(c1&&moving.columns<3)return fail<NurbsSource>(e,"C1 attachment needs at least three U controls on the moving patch so its far edge is kept; elevate or insert a U knot first");
     auto out=moving;const double ratio=double(reference.u.degree)*(moving.u.knots[moving.u.degree+1]-moving.u.knots.front())/(double(moving.u.degree)*(reference.u.knots.back()-reference.u.knots[reference.columns-1]));
     double referenceScale=0,movingScale=0;for(auto p:reference.controls)referenceScale=(std::max)(referenceScale,p.weight);for(auto p:moving.controls)movingScale=(std::max)(movingScale,p.weight);
     for(auto& p:out.controls)p.weight/=movingScale;
+    auto homogeneous=[&](NurbsPoint p){const double w=p.weight/referenceScale;return std::array<double,4>{p.x*w,p.y*w,p.z*w,w};};
     for(unsigned j=0;j<out.rows;++j){auto edge=reference.controls[j*reference.columns+reference.columns-1],prev=reference.controls[j*reference.columns+reference.columns-2];edge.weight/=referenceScale;prev.weight/=referenceScale;out.controls[j*out.columns]=edge;
         if(c1){const double w=edge.weight+ratio*(edge.weight-prev.weight);if(!(w>0)||!std::isfinite(w))return fail<NurbsSource>(e,"C1 attachment produced nonpositive homogeneous weights");V q=mul(sub(mul(point(edge),1+ratio),mul(point(prev),ratio*prev.weight/edge.weight)),edge.weight/w);out.controls[j*out.columns+1]={q[0],q[1],q[2],w};}
+        if(c2){
+            const auto r1=homogeneous(reference.controls[j*reference.columns+reference.columns-1]),r2=homogeneous(reference.controls[j*reference.columns+reference.columns-2]);
+            const auto r3=reference.columns>=3?homogeneous(reference.controls[j*reference.columns+reference.columns-3]):r2;
+            const auto q0=r1;const auto m1=out.controls[j*out.columns+1];const std::array<double,4> q1{m1.x*m1.weight,m1.y*m1.weight,m1.z*m1.weight,m1.weight};
+            const auto q2=detail::second_row_control(reference.u,reference.columns,moving.u,r3,r2,r1,q0,q1);
+            if(!(q2[3]>0)||!std::isfinite(q2[3]))return fail<NurbsSource>(e,"C2 attachment produced nonpositive homogeneous weights");
+            out.controls[j*out.columns+2]={q2[0]/q2[3],q2[1]/q2[3],q2[2]/q2[3],q2[3]};
+        }
     }
     if(!validate_nurbs(out,e))return {};return out;
 }
@@ -150,6 +176,31 @@ std::optional<NurbsSource> fillet_nurbs_corner(const NurbsSource& s,double radiu
     if(!validate_nurbs(s,e))return {};if(!s.is_curve()||s.columns!=3||s.u.degree!=1||!tolerance_ok(radius))return fail<NurbsSource>(e,"Corner fillet requires a three-control degree-one curve and positive radius");
     auto b=point(s.controls[1]),a=sub(point(s.controls[0]),b),c=sub(point(s.controls[2]),b);const double la=norm(a),lc=norm(c);if(la<=1e-12||lc<=1e-12)return fail<NurbsSource>(e,"Corner has a degenerate leg");a=mul(a,1/la);c=mul(c,1/lc);const double theta=std::acos(std::clamp(dot(a,c),-1.0,1.0));if(theta<=1e-6||theta>=3.141592653589793-1e-6)return fail<NurbsSource>(e,"Corner is straight or reversing");
     const double distance=radius/std::tan(theta/2);if(distance>=(std::min)(la,lc))return fail<NurbsSource>(e,"Fillet radius consumes an entire leg; reduce radius");auto x=add(b,mul(a,distance)),y=add(b,mul(c,distance));NurbsSource out;out.columns=3;out.u=uniform_axis(3,2);out.controls={{x[0],x[1],x[2],1},{b[0],b[1],b[2],std::sin(theta/2)},{y[0],y[1],y[2],1}};if(!validate_nurbs(out,e))return {};return out;
+}
+std::optional<NurbsCornerBlend> blend_nurbs_corner(const NurbsSource& s,NurbsCornerBlendSize size,double value,std::string* e){
+    if(!validate_nurbs(s,e))return {};
+    if(!s.is_curve()||s.columns!=3||s.u.degree!=1||!tolerance_ok(value))return fail<NurbsCornerBlend>(e,"Corner blend requires a three-control degree-one curve and a positive size");
+    auto b=point(s.controls[1]),a=sub(point(s.controls[0]),b),c=sub(point(s.controls[2]),b);const double la=norm(a),lc=norm(c);
+    if(la<=1e-12||lc<=1e-12)return fail<NurbsCornerBlend>(e,"Corner has a degenerate leg");
+    a=mul(a,1/la);c=mul(c,1/lc);const double theta=std::acos(std::clamp(dot(a,c),-1.0,1.0));
+    if(theta<=1e-6||theta>=3.141592653589793-1e-6)return fail<NurbsCornerBlend>(e,"Corner is straight or reversing");
+    const double half=theta/2;
+    // Midpoint of X,B,B,Y sits at (X+Y)/8 + 3B/4, i.e. setback*cos(half)/4 from the corner. A
+    // circular fillet of radius r has its midpoint r*(1/sin(half)-1) from the corner.
+    double radius=0,setback=0;
+    if(size==NurbsCornerBlendSize::MatchRadius){radius=value;setback=4*radius*(1/std::sin(half)-1)/std::cos(half);}
+    else{setback=value;radius=setback*std::cos(half)/4/(1/std::sin(half)-1);}
+    if(!(setback<(std::min)(la,lc)))return fail<NurbsCornerBlend>(e,size==NurbsCornerBlendSize::MatchRadius?"The matching G2 blend would run past the end of a leg (it reaches 2 to 4 times as far as a circular fillet); reduce the radius":"Blend setback consumes an entire leg; reduce it");
+    const auto x=add(b,mul(a,setback)),y=add(b,mul(c,setback));
+    NurbsCornerBlend out;out.setback=setback;out.arcCurvature=1/radius;
+    out.source.columns=4;out.source.u=uniform_axis(4,3);
+    out.source.controls={{x[0],x[1],x[2],1},{b[0],b[1],b[2],1},{b[0],b[1],b[2],1},{y[0],y[1],y[2],1}};
+    if(!validate_nurbs(out.source,e))return {};
+    // Peak curvature, sampled (it is at t=1/2 by symmetry, but sample to report honestly).
+    for(unsigned i=0;i<=64;++i){const double t=double(i)/64,m=1-t;
+        const V d1=add(mul(sub(b,x),3*m*m),mul(sub(y,b),3*t*t)),d2=add(mul(sub(b,x),-6*m),mul(sub(y,b),6*t));
+        const double speed=norm(d1);if(speed>0)out.peakCurvature=(std::max)(out.peakCurvature,norm(cross(d1,d2))/(speed*speed*speed));}
+    return out;
 }
 std::optional<CookedPolygonAsset> tessellate_nurbs_adaptive(const NurbsSource& s,std::uint64_t id,double tolerance,double angle,std::string* e,std::stop_token stop,NurbsDisplayGrid* grid,const NurbsDisplayGrid* seed){
     if(stop.stop_requested())return fail<CookedPolygonAsset>(e,"NURBS tessellation cancelled");

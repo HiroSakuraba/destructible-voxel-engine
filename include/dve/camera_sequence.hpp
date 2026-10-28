@@ -21,11 +21,22 @@ struct CameraDollyKey {
     [[nodiscard]] bool validate(std::string* error = nullptr) const;
 };
 
+// How a dolly passes through its keys' positions and targets.
+//   CatmullRom: each segment shaped by its neighbours, in a per-segment parameter. Curvature
+//               jumps at every key, and so does speed when keys are unevenly spaced in time;
+//               on a fast move both read as a small jolt.
+//   Smooth:     natural cubic spline in time (C2): velocity and acceleration are continuous
+//               through every key, so the path's curvature is continuous too. Each key
+//               influences the whole path a little (moving one key nudges its neighbours'
+//               segments), and the path starts and ends with zero acceleration.
+enum class CameraDollyInterpolation : std::uint8_t { CatmullRom, Smooth };
+
 struct CameraDollySpline {
     CameraDollyId id{};
     std::string name;
     bool closed{};
     std::uint32_t arcLengthSamplesPerSegment{24U};
+    CameraDollyInterpolation interpolation{CameraDollyInterpolation::CatmullRom};
     std::vector<CameraDollyKey> keys;
     [[nodiscard]] bool validate(std::string* error = nullptr) const;
     [[nodiscard]] CameraDollyKey evaluate(float timeSeconds) const noexcept;

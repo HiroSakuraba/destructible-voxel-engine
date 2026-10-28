@@ -13,6 +13,10 @@ inline constexpr std::string_view kNurbsComponent="dve.nurbs";
 // Compares authored display geometry without traversing texture/image resources.
 [[nodiscard]] bool nurbs_display_geometry_matches(const CookedPolygonAsset&,const CookedPolygonAsset&);
 [[nodiscard]] std::uint64_t nurbs_source_stamp(const NurbsSource&);
+// The object's source with its controls mapped into world space (world pose and axis scale),
+// in double precision; weights are unchanged, so the mapped rational geometry is exact.
+// Use it to compare curvature or continuity between objects, or for world-unit measurements.
+[[nodiscard]] std::optional<NurbsSource> world_editor_nurbs_source(const EditorDocument&,const EditorObject&,std::string* error=nullptr);
 class EditNurbsCommand final:public IEditorCommand {
 public:
     EditNurbsCommand(EditorObjectId,NurbsSource before,NurbsSource after);

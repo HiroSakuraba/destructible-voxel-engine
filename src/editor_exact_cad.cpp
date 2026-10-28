@@ -593,12 +593,12 @@ ExactBooleanResult run_exact_boolean(const std::filesystem::path& projectRoot, c
     const auto brep = temp.path() / "result.brep";
     const auto glb = temp.path() / "result.glb";
     std::filesystem::path pathA = request.brepA, pathB = request.brepB;
-    if (request.primitiveA.kind != ExactPrimitive::Kind::None) {
+    if (request.primitiveA.kind != ExactPrimitive::Kind::Absent) {
         pathA = temp.path() / "operand_a.brep";
         if (auto error = build_exact_primitive(settings, runner, request.primitiveA, pathA, temp.path() / "primitive_a.json"); !error.empty())
             return fail(std::move(error));
     }
-    if (request.primitiveB.kind != ExactPrimitive::Kind::None) {
+    if (request.primitiveB.kind != ExactPrimitive::Kind::Absent) {
         pathB = temp.path() / "operand_b.brep";
         if (auto error = build_exact_primitive(settings, runner, request.primitiveB, pathB, temp.path() / "primitive_b.json"); !error.empty())
             return fail(std::move(error));

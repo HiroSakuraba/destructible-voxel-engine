@@ -109,8 +109,8 @@ struct ExactCadImportResult {
 // tube and its bore, a tube's solid outer body for coping, a large slab for a plane cut. Built in
 // a scratch folder for the one Boolean, so no file of it is stored in the project.
 struct ExactPrimitive {
-    enum class Kind { None, Box, Cylinder };
-    Kind kind{Kind::None};
+    enum class Kind { Absent, Box, Cylinder };
+    Kind kind{Kind::Absent};
     std::array<double, 3> size{};      // Box: edge lengths along X, Y, Z (metres)
     double radius{}, height{};         // Cylinder
     char axis{'y'};                    // Cylinder axis: x, y or z

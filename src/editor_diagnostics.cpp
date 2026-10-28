@@ -5,6 +5,7 @@
 #include <bit>
 #include <cmath>
 #include <limits>
+#include <optional>
 #include <set>
 #include <vector>
 

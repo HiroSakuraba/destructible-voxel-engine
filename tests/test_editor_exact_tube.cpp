@@ -402,6 +402,8 @@ void fake_cope_and_retry() {
               cut.boolean.summary.find("0.02 mm larger across") != std::string::npos, "summary states it: " + cut.boolean.summary);
     check(near(std::stod(opt(stand.seen.calls[stand.seen.calls.size() > 5 ? 4 : 0], "--radius")), 0.03, 1e-4), "(second cutter was built)");
     check(!cut.firstRefusal.empty() && cut.firstRefusal.find("OpenAssembly") != std::string::npos, "the first refusal is kept: " + cut.firstRefusal);
+    // The saved provenance records the automatic clearance, not only the typed gap.
+    check(cut.boolean.source.origin == "cope:Run:gap_mm=0:auto_clearance_mm=0.01", "origin records the automatic clearance: " + cut.boolean.source.origin);
 
     // Retry switched off: a clean refusal, nothing applied.
     ExactCopeOptions strict; strict.retryTangent = false;

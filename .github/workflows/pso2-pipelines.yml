@@ -1,0 +1,64 @@
+name: PSO-2 pipeline preparation and publication
+on:
+  pull_request:
+    paths:
+      - "CMakeLists.txt"
+      - "include/dve/rhi/pipeline_preparation.hpp"
+      - "src/rhi/pipeline_preparation.cpp"
+      - "tests/test_pipeline_preparation.cpp"
+      - "tests/test_vulkan_graphics_device.cpp"
+      - "tests/test_vulkan_compute_device.cpp"
+      - "docs/PSO2_PIPELINE_PREPARATION.md"
+      - ".github/workflows/pso2-pipelines.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  deterministic:
+    name: Generation and publication lifecycle (Null RHI)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure portable validation
+        run: |
+          cmake -S . -B build-pso2 -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DDVE_BUILD_TESTS=ON -DDVE_BUILD_RHI=ON -DDVE_BUILD_PLAYER=OFF \
+            -DDVE_BUILD_EDITOR=OFF -DDVE_BUILD_NATIVE_EDITOR=OFF \
+            -DDVE_BUILD_ASSET_COOKER=OFF -DDVE_BUILD_ASSET_PIPELINE_TESTS=OFF \
+            -DDVE_BUILD_BENCHMARK=OFF -DDVE_ENABLE_SDL3_HOST=OFF \
+            -DDVE_ENABLE_FLUODDITY=OFF -DDVE_ENABLE_SOFT_BODIES=OFF \
+            -DDVE_ENABLE_CPU_HAIR=OFF -DDVE_ENABLE_SIMULATION_ENERGY_COMPILER=OFF
+      - name: Compile queue contract test
+        run: cmake --build build-pso2 --target dve_pso2_preparation_tests --parallel 2
+      - name: Assert lifecycle and stale-work barriers
+        run: ctest --test-dir build-pso2 -R '^dve_pso2_preparation_tests$' -V --output-on-failure
+
+  vulkan:
+    name: Vulkan pipeline preparation before drawing
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install software Vulkan
+        run: sudo apt-get update && sudo apt-get install -y ninja-build libvulkan1 mesa-vulkan-drivers
+      - name: Configure Vulkan
+        run: |
+          cmake -S . -B build-pso2-vk -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DDVE_BUILD_TESTS=ON -DDVE_BUILD_RHI=ON -DDVE_BUILD_PLAYER=OFF \
+            -DDVE_BUILD_EDITOR=OFF -DDVE_BUILD_NATIVE_EDITOR=OFF \
+            -DDVE_BUILD_ASSET_COOKER=OFF -DDVE_BUILD_ASSET_PIPELINE_TESTS=OFF \
+            -DDVE_BUILD_BENCHMARK=OFF -DDVE_ENABLE_SDL3_HOST=OFF \
+            -DDVE_ENABLE_FLUODDITY=OFF -DDVE_ENABLE_SOFT_BODIES=OFF \
+            -DDVE_ENABLE_CPU_HAIR=OFF -DDVE_ENABLE_SIMULATION_ENERGY_COMPILER=OFF
+      - name: Compile Vulkan consumer tests
+        run: cmake --build build-pso2-vk --target dve_vulkan_graphics_tests dve_vulkan_compute_tests --parallel 2
+      - name: Demand actual Vulkan device and compiled pipeline transfer
+        run: |
+          set -euo pipefail
+          icd="$(find /usr/share/vulkan/icd.d -iname '*lvp*.json' -print -quit)"
+          test -n "$icd"
+          export VK_ICD_FILENAMES="$icd"
+          export DVE_REQUIRE_VULKAN=1
+          ./build-pso2-vk/dve_vulkan_graphics_tests
+          ./build-pso2-vk/dve_vulkan_compute_tests

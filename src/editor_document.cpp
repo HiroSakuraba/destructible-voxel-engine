@@ -450,7 +450,10 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
         const bool hasRetiredModeling=std::any_of(objects_.begin(),objects_.end(),[](const auto& entry){return !entry.second.modelingTopology&&entry.second.modelingNextId>1;});
         const bool hasBakes=std::any_of(objects_.begin(),objects_.end(),[](const auto& entry){return entry.second.materialBake.has_value();});
         const bool hasSelectionSets = !selectionSets_.empty() || !selectionLineage_.empty();
-        output << "DVE_EDITOR_SCENE " << (hasBakes ? 14 : hasSelectionSets ? 13 : hasRetiredModeling ? 12 : hasModeling ? 11 : hasSubdivisions ? 10 : hasVoxelPalettes ? 8 : hasPolygons ? 7 : 6) << "\n";
+        const bool hasUvSmoothing=std::any_of(objects_.begin(),objects_.end(),[](const auto& entry){
+            return entry.second.subdivision && entry.second.subdivision->uvMode!=SubdivisionUvMode::Linear;
+        });
+        output << "DVE_EDITOR_SCENE " << (hasUvSmoothing ? 15 : hasBakes ? 14 : hasSelectionSets ? 13 : hasRetiredModeling ? 12 : hasModeling ? 11 : hasSubdivisions ? 10 : hasVoxelPalettes ? 8 : hasPolygons ? 7 : 6) << "\n";
         output << "name " << quote_text(name_) << "\n";
         output << "revision " << newRevision << "\n";
         output << "revision_dir " << quote_text(revisionPath.filename().generic_string()) << "\n";
@@ -545,6 +548,7 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
             for (const auto& [id,object] : objects_) if (object.subdivision) {
                 auto settings=*object.subdivision;freeze_subdivision_topology(*object.polygon,settings);
                 output << "subdivision " << id << ' ' << settings.level << ' ' << settings.preserveSharpEdges << "\n";
+                if(hasUvSmoothing)output << "uv_smoothing " << unsigned(settings.uvMode) << "\n";
                 output << "control_faces " << settings.controlFaces.size() << "\n";
                 for (const auto& face : settings.controlFaces) {
                     output << "control_face " << face.size();
@@ -615,7 +619,7 @@ std::optional<EditorDocument> EditorDocument::load(const std::filesystem::path& 
         std::string magic;
         std::uint32_t version{};
         input >> magic >> version;
-        if (magic != "DVE_EDITOR_SCENE" || (version != 1 && version != 2 && version != 3 && version != 4 && version != 5 && version != 6 && version != 7 && version != 8 && version != 9 && version != 10 && version != 11 && version != 12 && version != 13 && version != 14)) throw std::runtime_error("unsupported editor scene format");
+        if (magic != "DVE_EDITOR_SCENE" || (version != 1 && version != 2 && version != 3 && version != 4 && version != 5 && version != 6 && version != 7 && version != 8 && version != 9 && version != 10 && version != 11 && version != 12 && version != 13 && version != 14 && version != 15)) throw std::runtime_error("unsupported editor scene format");
         std::string key;
         std::string name;
         std::uint64_t revision{};
@@ -803,6 +807,12 @@ std::optional<EditorDocument> EditorDocument::load(const std::filesystem::path& 
                 if (!input || key!="subdivision" || !object || !object->subdivision || settings.level>kMaxSubdivisionLevel ||
                     sharp>1 || !seen.insert(id).second) throw std::runtime_error("invalid subdivision record");
                 settings.preserveSharpEdges=sharp!=0;
+                if (version>=15) {
+                    unsigned mode{};input >> key >> mode;
+                    if(!input||key!="uv_smoothing"||mode>1)
+                        throw std::runtime_error("invalid subdivision UV smoothing mode");
+                    settings.uvMode=static_cast<SubdivisionUvMode>(mode);
+                }
                 if (version>=10) {
                     std::size_t faceCount{},cornersTotal{};input >> key >> faceCount;
                     if (!input || key!="control_faces" || faceCount==0 || faceCount>kMaxSubdivisionControlTriangles)

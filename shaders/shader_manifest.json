@@ -3161,6 +3161,20 @@
       ]
     },
     {
+      "name": "rdv_bbv_trace",
+      "source": "rdv_bbv_trace.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [64, 1, 1],
+      "bindings": [
+        {"name": "BbvConstants", "kind": "constant_buffer", "access": "read", "register": "b0"},
+        {"name": "gBbvBricks", "kind": "byte_address_buffer", "access": "read", "register": "t0"},
+        {"name": "gBbvRays", "kind": "storage_buffer", "access": "read", "register": "t1"},
+        {"name": "gBbvResults", "kind": "storage_buffer", "access": "read_write", "register": "u0"}
+      ]
+    },
+    {
       "name": "rc_build_probes",
       "source": "rc_build_probes.hlsl",
       "stage": "compute",
@@ -3403,6 +3417,58 @@
         },
         {
           "name": "gDielectricResults",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u0"
+        }
+      ]
+    },
+    {
+      "name": "bc5_normal_decode_reference",
+      "source": "bc5_normal_decode_reference.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "vulkan_bindings": [
+        {
+          "name": "gBc5Normals",
+          "kind": "combined_image_sampler",
+          "set": 0,
+          "binding": 0
+        },
+        {
+          "name": "gBc5Sampler",
+          "kind": "combined_image_sampler",
+          "set": 0,
+          "binding": 0
+        },
+        {
+          "name": "gBc5DecodeResults",
+          "kind": "storage_buffer",
+          "set": 0,
+          "binding": 1
+        }
+      ],
+      "threads": [
+        8,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "gBc5Normals",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "gBc5Sampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s0"
+        },
+        {
+          "name": "gBc5DecodeResults",
           "kind": "storage_buffer",
           "access": "read_write",
           "register": "u0"

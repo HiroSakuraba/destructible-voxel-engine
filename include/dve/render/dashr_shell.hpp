@@ -133,6 +133,8 @@ struct DashrShellRendererResources {
     rhi::GraphicsPipelineHandle pipeline;
     rhi::GraphicsPipelineHandle pbrPipeline;
     rhi::GraphicsPipelineHandle shadowPipeline;
+    // PSO-2C: real shader/state variants staged and adopted before publication.
+    std::uint32_t preparedPipelineVariants{};
     std::size_t constantCapacity{};
     std::size_t constantStride{};
     std::vector<DashrShellRetiredBindGroups> retiredBindGroups;

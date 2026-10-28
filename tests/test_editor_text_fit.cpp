@@ -212,8 +212,31 @@ void test_settings() {
 
 } // namespace
 
+void test_wrap_helper() {
+    MeasuringCanvas canvas;
+    const auto joined = [](const std::vector<std::string>& lines) {
+        std::string all;
+        for (const std::string& line : lines) all += line;
+        return all;
+    };
+    check(wrap_text_to_width(canvas, "hello world", 200) == std::vector<std::string>{"hello world"}, "text that fits is one line");
+    const auto words = wrap_text_to_width(canvas, "aaaa bbbb cccc", 63);
+    check(words == (std::vector<std::string>{"aaaa bbbb", "cccc"}), "wraps at spaces, got " + std::to_string(words.size()) + " lines");
+    const auto solid = wrap_text_to_width(canvas, "abcdefghij", 35);
+    check(solid == (std::vector<std::string>{"abcde", "fghij"}), "an unbroken word is split at the width");
+    const auto accents = wrap_text_to_width(canvas, "\u00e9\u00e9\u00e9\u00e9\u00e9\u00fc", 21);
+    check(joined(accents) == "\u00e9\u00e9\u00e9\u00e9\u00e9\u00fc", "UTF-8 text is split only between code points");
+    for (const std::string& line : accents) check(canvas.text_width(line) <= 21, "no wrapped line is wider than the width");
+    const auto capped = wrap_text_to_width(canvas, "one two three four five six seven", 56, 2U);
+    check(capped.size() == 2U && capped.back().ends_with("\u2026"), "text beyond the line limit ends in an ellipsis");
+    for (const std::string& line : capped) check(canvas.text_width(line) <= 56, "capped lines fit");
+    check(wrap_text_to_width(canvas, "anything", 3).size() == 1U, "a width under one glyph gives one line, not an endless loop");
+    check(wrap_text_to_width(canvas, "", 100).size() == 1U, "empty text is one empty line");
+}
+
 int main() {
     test_elide_helper();
+    test_wrap_helper();
     test_synth_pages();
     test_synth_tooltip();
     test_chiptune();

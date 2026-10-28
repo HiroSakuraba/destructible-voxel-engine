@@ -26,6 +26,11 @@ rhi::TextureFormat dxgi(std::uint32_t f) {
     case 77: return rhi::TextureFormat::BC3RGBAUnorm;
     case 78: return rhi::TextureFormat::BC3RGBASrgb;
     case 83: return rhi::TextureFormat::BC5RGUnorm;
+    case 80: return rhi::TextureFormat::BC4RUnorm;
+    case 95: return rhi::TextureFormat::BC6HRGBUfloat;
+    case 96: return rhi::TextureFormat::BC6HRGBSfloat;
+    case 98: return rhi::TextureFormat::BC7RGBAUnorm;
+    case 99: return rhi::TextureFormat::BC7RGBASrgb;
     default: return static_cast<rhi::TextureFormat>(255);
     }
 }
@@ -38,11 +43,28 @@ rhi::TextureFormat vkformat(std::uint32_t f) {
     case 137: return rhi::TextureFormat::BC3RGBAUnorm;
     case 138: return rhi::TextureFormat::BC3RGBASrgb;
     case 141: return rhi::TextureFormat::BC5RGUnorm;
+    case 139: return rhi::TextureFormat::BC4RUnorm;
+    case 143: return rhi::TextureFormat::BC6HRGBUfloat;
+    case 144: return rhi::TextureFormat::BC6HRGBSfloat;
+    case 145: return rhi::TextureFormat::BC7RGBAUnorm;
+    case 146: return rhi::TextureFormat::BC7RGBASrgb;
+    case 147: return rhi::TextureFormat::ETC2RGBUnorm;
+    case 148: return rhi::TextureFormat::ETC2RGBSrgb;
+    case 151: return rhi::TextureFormat::ETC2RGBAUnorm;
+    case 152: return rhi::TextureFormat::ETC2RGBASrgb;
+    case 153: return rhi::TextureFormat::EACR11Unorm;
+    case 155: return rhi::TextureFormat::EACRG11Unorm;
+    case 157: return rhi::TextureFormat::ASTC4x4RGBAUnorm;
+    case 158: return rhi::TextureFormat::ASTC4x4RGBASrgb;
+    case 165: return rhi::TextureFormat::ASTC6x6RGBAUnorm;
+    case 166: return rhi::TextureFormat::ASTC6x6RGBASrgb;
+    case 171: return rhi::TextureFormat::ASTC8x8RGBAUnorm;
+    case 172: return rhi::TextureFormat::ASTC8x8RGBASrgb;
     default: return static_cast<rhi::TextureFormat>(255);
     }
 }
 std::size_t mip_bytes(rhi::TextureFormat f, std::uint32_t w, std::uint32_t h) {
-    return static_cast<std::size_t>((w + 3U) / 4U) * ((h + 3U) / 4U) * rhi::texture_block_bytes(f);
+    return rhi::texture_row_bytes(f,w) * rhi::texture_rows(f,h);
 }
 bool append_mips(std::span<const std::byte> source, std::size_t offset,
                  std::uint32_t width, std::uint32_t height, std::uint32_t levels,
@@ -75,6 +97,7 @@ bool parse_dds(std::span<const std::byte> b, CompressedTextureAsset& out) {
         format=dxgi(u32le(b,128)); offset=148;
     } else if (fourcc==0x31545844U) format=rhi::TextureFormat::BC1RGBAUnorm;
     else if (fourcc==0x35545844U) format=rhi::TextureFormat::BC3RGBAUnorm;
+    else if (fourcc==0x55344342U || fourcc==0x31495441U) format=rhi::TextureFormat::BC4RUnorm;
     else if (fourcc==0x55354342U || fourcc==0x32495441U) format=rhi::TextureFormat::BC5RGUnorm;
     if (rhi::texture_block_bytes(format)==0) return false;
     return append_mips(b,offset,w,h,(flags&kMipCount)?std::max(1U,u32le(b,28)):1U,format,out);
@@ -113,7 +136,7 @@ bool parse_compressed_texture(std::span<const std::byte> bytes, std::string name
     bool ok=false;
     if (bytes.size()>=4 && u32le(bytes,0)==0x20534444U) ok=parse_dds(bytes,output);
     else ok=parse_ktx2(bytes,output);
-    if (!ok) { output={}; fail(error,"unsupported or invalid compressed texture; supported inputs are 2D BC1/BC3/BC5 DDS and un-supercompressed KTX2"); }
+    if (!ok) { output={}; fail(error,"unsupported or invalid compressed texture; supported inputs are BC1/BC3/BC4/BC5/BC6H/BC7 DDS or native BC/ETC2/EAC/ASTC KTX2 (no supercompression)"); }
     return ok;
 }
 

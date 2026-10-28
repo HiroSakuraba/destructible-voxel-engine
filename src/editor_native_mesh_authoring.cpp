@@ -164,6 +164,7 @@ void NativeEditorController::refresh_mesh_authoring_menu_state(){
             enabled(id,exact,pair?"Both operands need an exact CAD source (Polygon > Import Exact CAD)":"Select exactly two visible unlocked polygon meshes");
         enabled("mesh.exact_collision",mesh&&object&&exact_brep_source(*object).has_value(),
                 "Select a visible unlocked polygon object with an exact CAD source");
+        for(auto id:{"mesh.exact_cope","mesh.exact_miter"}){const std::string reason=exact_tube_disabled_reason(id);enabled(id,reason.empty(),reason);}
     }
     for(auto id:{"mesh.hull_fit","mesh.hull_edit"})enabled(id,mesh&&mesh_boolean_available(),"Select an unlocked polygon mesh in a build with Manifold authoring");
     enabled("mesh.hull_remove",mesh&&object&&find_component_by_type(std::span<const Component>(object->components),kCollisionHullComponent),"Select a polygon with an authored collision hull");
@@ -301,6 +302,7 @@ bool NativeEditorController::dispatch_mesh_authoring_action(std::string_view act
     }
 
     if(action=="mesh.exact_collision"){cancel_mesh_authoring_drag();return start_exact_collision(object->id);}
+    if(action=="mesh.exact_cope"||action=="mesh.exact_miter"){cancel_mesh_authoring_drag();return dispatch_exact_tube_action(action);}
     if(action.starts_with("mesh.exact_boolean_")){
         cancel_mesh_authoring_drag();close_previews_for_voxel_edit("exact Boolean");
         if(workspace_.selection_count()!=2){set_status("Select exactly two polygon operands with exact CAD sources; the active object is A",true);return false;}

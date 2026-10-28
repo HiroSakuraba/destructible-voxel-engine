@@ -58,8 +58,8 @@ float SurfaceCellular(SurfaceDetailRecord d,float3 q){
     int3 c=int3(floor(q));float f1=1e9F,f2=1e9F;uint nearest=0;
     for(int z=-1;z<=1;++z)for(int y=-1;y<=1;++y)for(int x=-1;x<=1;++x){
         int3 n=c+int3(x,y,z);uint h=SurfaceCellHash(n,d.seed);
-        float3 point=float3(n)+.1F+.8F*float3(SurfaceUnit(h),SurfaceUnit(SurfaceMix(h+1U)),SurfaceUnit(SurfaceMix(h+2U)));
-        float distance=length(q-point);
+        float3 cellPoint=float3(n)+.1F+.8F*float3(SurfaceUnit(h),SurfaceUnit(SurfaceMix(h+1U)),SurfaceUnit(SurfaceMix(h+2U)));
+        float distance=length(q-cellPoint);
         if(distance<f1){f2=f1;f1=distance;nearest=h;}else if(distance<f2)f2=distance;
     }
     float s=saturate((f2-f1)/SurfaceCellularGap(d)),stone=s*s*(3-2*s);

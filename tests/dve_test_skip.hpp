@@ -8,7 +8,8 @@
 // (cmake/DveTestCoverage.cmake), so CTest reports such a run as "Skipped", never "Passed".
 //
 // DVE_REQUIRE_COMPLETE_TESTS=1 in the environment turns every skip into a failure: a CI job that
-// is meant to run everything cannot pass with parts missing.
+// is meant to run everything cannot pass with parts missing. Which jobs set it (and which groups a
+// job must build at configure time, DVE_REQUIRE_TEST_GROUPS) is in docs/honest-test-coverage-2026-10-27.md.
 
 #include <cstdio>
 #include <cstdlib>
@@ -22,8 +23,16 @@ inline int& skipped_parts() noexcept {
 }
 
 [[nodiscard]] inline bool complete_tests_required() noexcept {
+    // Unset, empty, "0", "false", "off" and "no" mean "not required"; anything else requires it.
     const char* value = std::getenv("DVE_REQUIRE_COMPLETE_TESTS");
-    return value != nullptr && *value != '\0' && *value != '0';
+    if (value == nullptr) return false;
+    const std::string_view text(value);
+    for (const std::string_view off : {std::string_view{}, std::string_view{"0"}, std::string_view{"false"},
+                                       std::string_view{"FALSE"}, std::string_view{"off"},
+                                       std::string_view{"OFF"}, std::string_view{"no"}, std::string_view{"NO"}}) {
+        if (text == off) return false;
+    }
+    return true;
 }
 
 // Records a part of the test that did not run, with the reason (printed as "SKIPPED: ...").

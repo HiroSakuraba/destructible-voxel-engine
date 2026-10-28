@@ -20,6 +20,10 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(DveVersion)
 
 option(DVE_BUILD_TESTS "Build the headless correctness tests" ON)
+option(DVE_BUILD_OPENXR_PROBE "Build the experimental OpenXR runtime discovery probe" OFF)
+option(DVE_BUILD_OPENXR_VULKAN_BRIDGE "Build experimental OpenXR Vulkan interoperability helpers" OFF)
+set(DVE_VULKAN_INCLUDE_DIR "" CACHE PATH "Vulkan-Headers include directory containing vulkan/vulkan.h")
+set(DVE_OPENXR_INCLUDE_DIR "" CACHE PATH "OpenXR SDK include directory containing openxr/openxr.h")
 option(DVE_BUILD_BENCHMARK "Build the headless benchmark" ON)
 option(DVE_BUILD_ASSET_COOKER "Build the offline model-to-voxel asset cooker" ON)
 option(DVE_BUILD_ASSET_PIPELINE_TESTS "Build PNG/JPEG asset-pipeline tests when tests are enabled" ON)
@@ -97,6 +101,7 @@ message(STATUS "DVE geometry profile: ${DVE_GEOMETRY_MODE_NORMALIZED}")
 add_library(dve_core
     src/material_surface_detail.cpp
     src/compressed_texture.cpp
+    src/texture_native_cook.cpp
     src/brick.cpp
     src/voxel_object.cpp
     src/damage.cpp
@@ -151,9 +156,18 @@ add_library(dve_core
     src/racing_game.cpp
     src/water_ocean.cpp
     src/water_hydrodynamics.cpp
+    src/water_volume.cpp
+    src/underwater_optics.cpp
+    src/submarine_dynamics.cpp
+    src/water_wake.cpp
+    src/water_coast.cpp
+    src/water_surf.cpp
     src/water_vessel_dynamics.cpp
     src/water_game.cpp
     src/flying_game.cpp
+    src/mecha_game.cpp
+    src/mecha_leg_ik.cpp
+    src/mecha_navigation.cpp
     src/flight_wind.cpp
     src/flight_aerodynamics.cpp
     src/prototype_game.cpp
@@ -663,7 +677,8 @@ endif()
 if(DVE_BUILD_RHI)
     add_library(dve_rhi
         src/rhi/device.cpp
-        src/rhi/null_device.cpp)
+        src/rhi/null_device.cpp
+        src/rhi/pipeline_preparation.cpp)
     add_library(dve::rhi ALIAS dve_rhi)
     target_include_directories(dve_rhi PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
     target_compile_features(dve_rhi PUBLIC cxx_std_23)
@@ -727,6 +742,8 @@ if(DVE_BUILD_RHI)
         src/render/brick_palette_rhi.cpp
         src/render/brick_palette_gpu_resolve.cpp
         src/render/brickmap_rhi_mirror.cpp
+        src/render/rdv_bbv.cpp
+        src/render/rdv_viewport.cpp
         src/render/mesh_rhi_mirror.cpp
         src/render/dashr_atlas.cpp
         src/render/dashr_shell.cpp
@@ -741,6 +758,8 @@ if(DVE_BUILD_RHI)
         src/render/cpu_fog_cache.cpp
         src/render/sprite_renderer.cpp
         src/render/texture_residency.cpp
+        src/render/material_bake_residency.cpp
+        src/render/normal_bc5_codec.cpp
         src/render/texture_preview.cpp
         src/render/text3d_renderer.cpp
         src/render/gabor_volume_renderer.cpp
@@ -910,6 +929,7 @@ if(DVE_BUILD_EDITOR)
         src/editor_native_real_scale.cpp
         src/editor_native_pivot_edit.cpp
         src/editor_native_cad_detail.cpp
+        src/editor_native_exact_tube.cpp
         src/editor_native_cad_guard.cpp
         src/editor_native_cad_measure.cpp
         src/editor_native_cad_step.cpp
@@ -933,6 +953,7 @@ if(DVE_BUILD_EDITOR)
         src/editor_mesh_boolean.cpp
         src/editor_edge_bevel.cpp
         src/editor_exact_cad.cpp
+        src/editor_exact_tube.cpp
         src/editor_topology.cpp
         src/editor_mesh_displacement.cpp
         src/editor_uv.cpp
@@ -959,7 +980,9 @@ if(DVE_BUILD_EDITOR)
         src/editor_material_presets.cpp
         src/editor_racing.cpp
         src/editor_flying.cpp
+        src/editor_mecha.cpp
         src/editor_water.cpp
+        src/editor_submarine.cpp
         src/editor_prototype.cpp
         src/editor_native_prototype.cpp
         src/editor_material_bake.cpp
@@ -989,8 +1012,12 @@ if(DVE_BUILD_EDITOR)
     add_library(dve::editor ALIAS dve_editor)
     add_executable(dve_create_racing apps/dve_create_racing.cpp)
     target_link_libraries(dve_create_racing PRIVATE dve::editor)
+    add_executable(dve_create_submarine apps/dve_create_submarine.cpp)
+    target_link_libraries(dve_create_submarine PRIVATE dve::editor)
     add_executable(dve_create_water apps/dve_create_water.cpp)
     target_link_libraries(dve_create_water PRIVATE dve::editor)
+    add_executable(dve_create_mecha apps/dve_create_mecha.cpp)
+    target_link_libraries(dve_create_mecha PRIVATE dve::editor)
     add_executable(dve_create_flying apps/dve_create_flying.cpp)
     target_link_libraries(dve_create_flying PRIVATE dve::editor)
     add_executable(dve_create_prototype apps/dve_create_prototype.cpp)
@@ -1093,6 +1120,82 @@ if(DVE_BUILD_EDITOR)
             message(STATUS "DVE X11 editor text: ${DVE_X11_TEXT}")
         else()
             message(STATUS "X11 development files were not found; native editor executable is disabled")
+        endif()
+    endif()
+endif()
+
+if(DVE_BUILD_OPENXR_VULKAN_BRIDGE AND NOT DVE_BUILD_OPENXR_PROBE)
+    message(FATAL_ERROR "DVE_BUILD_OPENXR_VULKAN_BRIDGE requires DVE_BUILD_OPENXR_PROBE=ON")
+endif()
+
+if(DVE_BUILD_OPENXR_PROBE)
+    if(NOT DVE_OPENXR_INCLUDE_DIR)
+        find_path(DVE_OPENXR_DISCOVERED_INCLUDE_DIR openxr/openxr.h)
+        set(DVE_OPENXR_INCLUDE_DIR "${DVE_OPENXR_DISCOVERED_INCLUDE_DIR}")
+    endif()
+    if(NOT EXISTS "${DVE_OPENXR_INCLUDE_DIR}/openxr/openxr.h")
+        message(FATAL_ERROR "DVE_BUILD_OPENXR_PROBE requires OpenXR headers; set DVE_OPENXR_INCLUDE_DIR to the SDK include directory")
+    endif()
+    add_library(dve_xr_session_loop STATIC src/xr/session_loop.cpp src/xr/openxr_driver.cpp
+        src/xr/openxr_events.cpp src/xr/openxr_views.cpp src/xr/openxr_resources.cpp
+        src/xr/openxr_stereo_renderer.cpp src/xr/openxr_configuration.cpp src/xr/projection.cpp)
+    target_compile_features(dve_xr_session_loop PUBLIC cxx_std_17)
+    target_include_directories(dve_xr_session_loop PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include" "${DVE_OPENXR_INCLUDE_DIR}")
+    if(DVE_BUILD_TESTS)
+        add_executable(dve_xr_session_loop_tests tests/xr/test_session_loop.cpp)
+        target_link_libraries(dve_xr_session_loop_tests PRIVATE dve_xr_session_loop)
+        add_test(NAME dve_xr_session_loop_tests COMMAND dve_xr_session_loop_tests)
+        add_executable(dve_openxr_driver_tests tests/xr/test_openxr_driver.cpp)
+        target_link_libraries(dve_openxr_driver_tests PRIVATE dve_xr_session_loop)
+        add_test(NAME dve_openxr_driver_tests COMMAND dve_openxr_driver_tests)
+        add_executable(dve_openxr_events_views_tests tests/xr/test_openxr_events_views.cpp)
+        target_link_libraries(dve_openxr_events_views_tests PRIVATE dve_xr_session_loop)
+        add_test(NAME dve_openxr_events_views_tests COMMAND dve_openxr_events_views_tests)
+        add_executable(dve_openxr_resources_tests tests/xr/test_openxr_resources.cpp)
+        target_link_libraries(dve_openxr_resources_tests PRIVATE dve_xr_session_loop)
+        add_test(NAME dve_openxr_resources_tests COMMAND dve_openxr_resources_tests)
+        add_executable(dve_openxr_projection_tests tests/xr/test_projection.cpp)
+        target_link_libraries(dve_openxr_projection_tests PRIVATE dve_xr_session_loop)
+        add_test(NAME dve_openxr_projection_tests COMMAND dve_openxr_projection_tests)
+        add_executable(dve_openxr_stereo_renderer_tests tests/xr/test_openxr_stereo_renderer.cpp)
+        target_link_libraries(dve_openxr_stereo_renderer_tests PRIVATE dve_xr_session_loop)
+        add_test(NAME dve_openxr_stereo_renderer_tests COMMAND dve_openxr_stereo_renderer_tests)
+        add_executable(dve_openxr_configuration_tests tests/xr/test_openxr_configuration.cpp)
+        target_link_libraries(dve_openxr_configuration_tests PRIVATE dve_xr_session_loop)
+        add_test(NAME dve_openxr_configuration_tests COMMAND dve_openxr_configuration_tests)
+    endif()
+    add_executable(dve_openxr_probe src/xr/openxr_probe.cpp)
+    target_compile_features(dve_openxr_probe PRIVATE cxx_std_17)
+    target_include_directories(dve_openxr_probe PRIVATE "${DVE_OPENXR_INCLUDE_DIR}")
+    target_link_libraries(dve_openxr_probe PRIVATE ${CMAKE_DL_LIBS})
+    if(DVE_BUILD_OPENXR_VULKAN_BRIDGE)
+        if(NOT DVE_VULKAN_INCLUDE_DIR)
+            find_path(DVE_VULKAN_DISCOVERED_INCLUDE_DIR vulkan/vulkan.h)
+            set(DVE_VULKAN_INCLUDE_DIR "${DVE_VULKAN_DISCOVERED_INCLUDE_DIR}")
+        endif()
+        if(NOT EXISTS "${DVE_VULKAN_INCLUDE_DIR}/vulkan/vulkan.h")
+            message(FATAL_ERROR "OpenXR Vulkan bridge requires Vulkan headers; set DVE_VULKAN_INCLUDE_DIR")
+        endif()
+        add_library(dve_openxr_vulkan STATIC src/xr/openxr_vulkan.cpp)
+        target_compile_features(dve_openxr_vulkan PUBLIC cxx_std_17)
+        target_include_directories(dve_openxr_vulkan PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include" "${DVE_OPENXR_INCLUDE_DIR}" "${DVE_VULKAN_INCLUDE_DIR}")
+        if(DVE_BUILD_TESTS)
+            add_executable(dve_openxr_vulkan_tests tests/xr/test_openxr_vulkan.cpp)
+            target_link_libraries(dve_openxr_vulkan_tests PRIVATE dve_openxr_vulkan)
+            add_test(NAME dve_openxr_vulkan_tests COMMAND dve_openxr_vulkan_tests)
+        endif()
+    endif()
+    if(DVE_BUILD_TESTS AND UNIX)
+        find_package(Python3 COMPONENTS Interpreter QUIET)
+        if(Python3_Interpreter_FOUND)
+            add_library(dve_fake_openxr_loader SHARED tests/xr/fake_openxr_loader.cpp)
+            target_compile_features(dve_fake_openxr_loader PRIVATE cxx_std_17)
+            target_include_directories(dve_fake_openxr_loader PRIVATE "${DVE_OPENXR_INCLUDE_DIR}")
+            add_test(NAME dve_openxr_probe_tests COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/xr/test_probe.py"
+                "$<TARGET_FILE:dve_openxr_probe>" "$<TARGET_FILE:dve_fake_openxr_loader>")
+        else()
+            message(STATUS "OpenXR probe tests skipped: Python3 interpreter unavailable")
         endif()
     endif()
 endif()
@@ -1252,6 +1355,13 @@ if(DVE_BUILD_TESTS)
     target_link_libraries(dve_v221_display_presentation_tests PRIVATE dve::core)
     add_test(NAME dve_v221_display_presentation_tests COMMAND dve_v221_display_presentation_tests)
     if(DVE_BUILD_RHI)
+        add_executable(dve_rdv_bbv_tests tests/test_rdv_bbv.cpp)
+        target_link_libraries(dve_rdv_bbv_tests PRIVATE dve::render_bridge dve::rhi)
+        if(TARGET dve_rhi_vulkan)
+            target_link_libraries(dve_rdv_bbv_tests PRIVATE dve::rhi_vulkan)
+            target_compile_definitions(dve_rdv_bbv_tests PRIVATE DVE_RDV_HAS_VULKAN=1)
+        endif()
+        add_test(NAME dve_rdv_bbv_tests COMMAND dve_rdv_bbv_tests)
         add_executable(dve_camera_frame_graph_tests tests/test_camera_frame_graph.cpp)
         target_link_libraries(dve_camera_frame_graph_tests PRIVATE dve::render_bridge dve::rhi)
         add_test(NAME dve_camera_frame_graph_tests COMMAND dve_camera_frame_graph_tests)
@@ -1980,15 +2090,27 @@ if(DVE_BUILD_TESTS)
     endif()
 
     if(DVE_BUILD_RHI)
+        add_executable(dve_pso2_preparation_tests tests/test_pipeline_preparation.cpp)
+        target_link_libraries(dve_pso2_preparation_tests PRIVATE dve::rhi)
+        add_test(NAME dve_pso2_preparation_tests COMMAND dve_pso2_preparation_tests)
         add_executable(dve_rhi_mrt_tests tests/test_rhi_mrt.cpp)
         target_link_libraries(dve_rhi_mrt_tests PRIVATE dve::rhi)
         add_test(NAME dve_rhi_mrt_tests COMMAND dve_rhi_mrt_tests)
         add_executable(dve_compressed_texture_tests tests/test_compressed_texture.cpp)
         target_link_libraries(dve_compressed_texture_tests PRIVATE dve::core dve::rhi)
         add_test(NAME dve_compressed_texture_tests COMMAND dve_compressed_texture_tests)
+        add_executable(dve_texture_native_cook_tests tests/test_texture_native_cook.cpp)
+        target_link_libraries(dve_texture_native_cook_tests PRIVATE dve::core dve::rhi)
+        add_test(NAME dve_texture_native_cook_tests COMMAND dve_texture_native_cook_tests)
+        add_executable(dve_texture_t1_format_tests tests/test_texture_t1_formats.cpp)
+        target_link_libraries(dve_texture_t1_format_tests PRIVATE dve::core dve::rhi)
+        add_test(NAME dve_texture_t1_format_tests COMMAND dve_texture_t1_format_tests)
     endif()
 
     if(TARGET dve_rhi_vulkan)
+        add_executable(dve_pso_cache_file_tests tests/test_pipeline_cache_file.cpp)
+        target_link_libraries(dve_pso_cache_file_tests PRIVATE dve::rhi_vulkan)
+        add_test(NAME dve_pso_cache_file_tests COMMAND dve_pso_cache_file_tests)
         add_executable(dve_vulkan_buffer_tests tests/test_vulkan_buffer_device.cpp)
         target_link_libraries(dve_vulkan_buffer_tests PRIVATE dve::rhi_vulkan dve::render_bridge)
         add_test(NAME dve_vulkan_buffer_tests COMMAND dve_vulkan_buffer_tests)
@@ -2089,8 +2211,38 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_vulkan_main_material_table_tests tests/test_vulkan_main_material_table.cpp)
         target_link_libraries(dve_vulkan_main_material_table_tests PRIVATE dve::rhi_vulkan dve::render_bridge)
         add_test(NAME dve_vulkan_main_material_table_tests COMMAND dve_vulkan_main_material_table_tests)
+        add_executable(dve_vulkan_texture_t1_format_tests tests/test_vulkan_texture_t1_formats.cpp)
+        target_link_libraries(dve_vulkan_texture_t1_format_tests PRIVATE dve::core dve::rhi_vulkan)
+        add_test(NAME dve_vulkan_texture_t1_format_tests COMMAND dve_vulkan_texture_t1_format_tests)
+        add_executable(dve_vulkan_bc5_normal_decode_tests tests/test_vulkan_bc5_normal_decode.cpp)
+        target_link_libraries(dve_vulkan_bc5_normal_decode_tests PRIVATE dve::rhi_vulkan dve::render_bridge)
+        add_test(NAME dve_vulkan_bc5_normal_decode_tests COMMAND dve_vulkan_bc5_normal_decode_tests)
+        # Optional GPU decode parity probe: needs a DXC with SPIR-V codegen (not present in CI images).
+        find_program(DVE_DXC_EXECUTABLE NAMES dxc)
+        if(DVE_DXC_EXECUTABLE)
+            set(_bc5_probe_dir "${CMAKE_CURRENT_BINARY_DIR}/dxc-bc5-probe")
+            file(MAKE_DIRECTORY "${_bc5_probe_dir}")
+            file(WRITE "${_bc5_probe_dir}/probe.hlsl" "float4 main() : SV_Target { return 0; }\n")
+            execute_process(COMMAND "${DVE_DXC_EXECUTABLE}" -spirv -T ps_6_0 -E main
+                    -Fo "${_bc5_probe_dir}/probe.spv" "${_bc5_probe_dir}/probe.hlsl"
+                RESULT_VARIABLE _bc5_probe_result OUTPUT_QUIET ERROR_QUIET)
+            if(_bc5_probe_result EQUAL 0 AND EXISTS "${_bc5_probe_dir}/probe.spv")
+                set(_bc5_shader_dir "${CMAKE_CURRENT_BINARY_DIR}/bc5-shaders")
+                file(GLOB _bc5_shader_headers CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/common/*.hlsli")
+                add_custom_command(OUTPUT "${_bc5_shader_dir}/bc5_normal_decode_reference.spv"
+                    COMMAND ${CMAKE_COMMAND} -E make_directory "${_bc5_shader_dir}"
+                    COMMAND "${DVE_DXC_EXECUTABLE}" -spirv -fspv-target-env=vulkan1.2 -fvk-use-dx-layout
+                        -T cs_6_0 -E main -Fo "${_bc5_shader_dir}/bc5_normal_decode_reference.spv"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/bc5_normal_decode_reference.hlsl"
+                    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/bc5_normal_decode_reference.hlsl" ${_bc5_shader_headers}
+                    VERBATIM)
+                add_custom_target(dve_bc5_test_shaders DEPENDS "${_bc5_shader_dir}/bc5_normal_decode_reference.spv")
+                add_dependencies(dve_vulkan_bc5_normal_decode_tests dve_bc5_test_shaders)
+                target_compile_definitions(dve_vulkan_bc5_normal_decode_tests PRIVATE DVE_BC5_SHADER_DIR="${_bc5_shader_dir}")
+            endif()
+        endif()
         if(EXISTS "/usr/lib/chromium/vk_swiftshader_icd.json")
-            set_tests_properties(dve_vulkan_buffer_tests dve_vulkan_graphics_tests dve_v193_vulkan_sprite_tests dve_depth_only_rhi_tests dve_vulkan_compute_tests dve_vulkan_camera_outputs_tests dve_vulkan_environment_lighting_tests dve_vulkan_live_environment_renderer_tests dve_vulkan_dashr_tests dve_vulkan_shadow_material_table_tests dve_vulkan_main_material_table_tests PROPERTIES
+            set_tests_properties(dve_vulkan_buffer_tests dve_vulkan_graphics_tests dve_v193_vulkan_sprite_tests dve_depth_only_rhi_tests dve_vulkan_compute_tests dve_vulkan_camera_outputs_tests dve_vulkan_environment_lighting_tests dve_vulkan_live_environment_renderer_tests dve_vulkan_dashr_tests dve_vulkan_shadow_material_table_tests dve_vulkan_main_material_table_tests dve_vulkan_texture_t1_format_tests dve_vulkan_bc5_normal_decode_tests PROPERTIES
                 ENVIRONMENT "VK_ICD_FILENAMES=/usr/lib/chromium/vk_swiftshader_icd.json;DVE_REQUIRE_VULKAN=1")
         endif()
     endif()
@@ -2787,6 +2939,12 @@ if(DVE_BUILD_TESTS)
             target_link_libraries(dve_material_texture_bake_tests PRIVATE dve::editor)
             add_dependencies(dve_material_texture_bake_tests dve_bake_material)
             add_test(NAME dve_material_texture_bake_tests COMMAND dve_material_texture_bake_tests $<TARGET_FILE:dve_bake_material>)
+            add_executable(dve_material_bake_bc5_quality_tests tests/test_material_bake_bc5_quality.cpp)
+            target_link_libraries(dve_material_bake_bc5_quality_tests PRIVATE dve::editor dve::render_bridge)
+            add_test(NAME dve_material_bake_bc5_quality_tests COMMAND dve_material_bake_bc5_quality_tests)
+            add_executable(dve_texture_render_diff_t6_tests tests/test_texture_render_diff_t6.cpp)
+            target_link_libraries(dve_texture_render_diff_t6_tests PRIVATE dve::editor dve::render_bridge)
+            add_test(NAME dve_texture_render_diff_t6_tests COMMAND dve_texture_render_diff_t6_tests)
             add_executable(dve_layered_surface_tests tests/test_layered_surface.cpp)
             target_link_libraries(dve_layered_surface_tests PRIVATE dve::editor)
             add_test(NAME dve_layered_surface_tests COMMAND dve_layered_surface_tests)
@@ -2803,6 +2961,24 @@ if(DVE_BUILD_TESTS)
         add_test(NAME dve_editor_tests COMMAND dve_editor_tests)
 
         if(TARGET dve_player_runtime)
+            add_executable(dve_submarine_game_tests tests/test_submarine_game.cpp)
+            target_link_libraries(dve_submarine_game_tests PRIVATE dve::editor dve::player_runtime)
+            add_test(NAME dve_submarine_game_tests COMMAND dve_submarine_game_tests)
+            add_executable(dve_underwater_optics_tests tests/test_underwater_optics.cpp)
+            target_link_libraries(dve_underwater_optics_tests PRIVATE dve::core)
+            add_test(NAME dve_underwater_optics_tests COMMAND dve_underwater_optics_tests)
+            add_executable(dve_underwater_render_tests tests/test_underwater_render.cpp)
+            target_link_libraries(dve_underwater_render_tests PRIVATE dve::editor dve::player_runtime)
+            add_test(NAME dve_underwater_render_tests COMMAND dve_underwater_render_tests)
+            add_executable(dve_submarine_tests tests/test_submarine.cpp)
+            target_link_libraries(dve_submarine_tests PRIVATE dve::core)
+            add_test(NAME dve_submarine_tests COMMAND dve_submarine_tests)
+            add_executable(dve_water_surf_tests tests/test_water_surf.cpp)
+            target_link_libraries(dve_water_surf_tests PRIVATE dve::core)
+            add_test(NAME dve_water_surf_tests COMMAND dve_water_surf_tests)
+            add_executable(dve_water_wake_tests tests/test_water_wake.cpp)
+            target_link_libraries(dve_water_wake_tests PRIVATE dve::core)
+            add_test(NAME dve_water_wake_tests COMMAND dve_water_wake_tests)
             add_executable(dve_water_vessel_tests tests/test_water_vessel_dynamics.cpp)
             target_link_libraries(dve_water_vessel_tests PRIVATE dve::core)
             add_test(NAME dve_water_vessel_tests COMMAND dve_water_vessel_tests)
@@ -2815,6 +2991,24 @@ if(DVE_BUILD_TESTS)
             add_executable(dve_flight_physics_tests tests/test_flight_physics.cpp)
             target_link_libraries(dve_flight_physics_tests PRIVATE dve::core)
             add_test(NAME dve_flight_physics_tests COMMAND dve_flight_physics_tests)
+            add_executable(dve_mecha_m3_m4_tests tests/test_mecha_m3_m4.cpp)
+            target_link_libraries(dve_mecha_m3_m4_tests PRIVATE dve::editor dve::player_runtime)
+            add_test(NAME dve_mecha_m3_m4_tests COMMAND dve_mecha_m3_m4_tests)
+            add_executable(dve_mecha_m8_tests tests/test_mecha_m8.cpp)
+            target_link_libraries(dve_mecha_m8_tests PRIVATE dve::editor dve::player_runtime)
+            add_test(NAME dve_mecha_m8_tests COMMAND dve_mecha_m8_tests)
+            add_executable(dve_mecha_m7_tests tests/test_mecha_m7.cpp)
+            target_link_libraries(dve_mecha_m7_tests PRIVATE dve::editor dve::player_runtime)
+            add_test(NAME dve_mecha_m7_tests COMMAND dve_mecha_m7_tests)
+            add_executable(dve_mecha_m6_tests tests/test_mecha_m6.cpp)
+            target_link_libraries(dve_mecha_m6_tests PRIVATE dve::editor dve::player_runtime)
+            add_test(NAME dve_mecha_m6_tests COMMAND dve_mecha_m6_tests)
+            add_executable(dve_mecha_m5_tests tests/test_mecha_m5.cpp)
+            target_link_libraries(dve_mecha_m5_tests PRIVATE dve::editor dve::player_runtime)
+            add_test(NAME dve_mecha_m5_tests COMMAND dve_mecha_m5_tests)
+            add_executable(dve_mecha_game_tests tests/test_mecha_game.cpp)
+            target_link_libraries(dve_mecha_game_tests PRIVATE dve::editor dve::player_runtime)
+            add_test(NAME dve_mecha_game_tests COMMAND dve_mecha_game_tests)
             add_executable(dve_flying_game_tests tests/test_flying_game.cpp)
             target_link_libraries(dve_flying_game_tests PRIVATE dve::editor dve::player_runtime)
             add_test(NAME dve_flying_game_tests COMMAND dve_flying_game_tests)
@@ -3135,6 +3329,12 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_editor_exact_cad_tests tests/test_editor_exact_cad.cpp)
         target_link_libraries(dve_editor_exact_cad_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_exact_cad_tests COMMAND dve_editor_exact_cad_tests)
+        add_executable(dve_editor_exact_tube_tests tests/test_editor_exact_tube.cpp)
+        target_link_libraries(dve_editor_exact_tube_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_exact_tube_tests COMMAND dve_editor_exact_tube_tests)
+        add_executable(dve_editor_gui_quirks_tests tests/test_editor_gui_quirks.cpp)
+        target_link_libraries(dve_editor_gui_quirks_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_gui_quirks_tests COMMAND dve_editor_gui_quirks_tests)
         add_executable(dve_editor_native_polygon_tests tests/test_editor_native_polygon.cpp)
         target_link_libraries(dve_editor_native_polygon_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_native_polygon_tests COMMAND dve_editor_native_polygon_tests)
@@ -3352,6 +3552,25 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     add_executable(dve_texture_residency_tests tests/test_texture_residency.cpp)
     target_link_libraries(dve_texture_residency_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_texture_residency_tests COMMAND dve_texture_residency_tests)
+    add_executable(dve_texture_bc5_tests tests/test_texture_bc5.cpp)
+    target_link_libraries(dve_texture_bc5_tests PRIVATE dve::render_bridge dve::rhi)
+    add_test(NAME dve_texture_bc5_tests COMMAND dve_texture_bc5_tests)
+    add_executable(dve_bc5_shader_mapping_tests tests/test_bc5_shader_mapping.cpp)
+    target_link_libraries(dve_bc5_shader_mapping_tests PRIVATE dve::render_bridge dve::rhi)
+    add_test(NAME dve_bc5_shader_mapping_tests COMMAND dve_bc5_shader_mapping_tests)
+    add_executable(dve_bc5_main_material_binding_tests tests/test_bc5_main_material_binding.cpp)
+    target_link_libraries(dve_bc5_main_material_binding_tests PRIVATE dve::render_bridge dve::rhi)
+    add_test(NAME dve_bc5_main_material_binding_tests COMMAND dve_bc5_main_material_binding_tests)
+    find_program(DVE_BC5_PYTHON_EXECUTABLE NAMES python3 python)
+    if(DVE_BC5_PYTHON_EXECUTABLE)
+        add_test(NAME dve_bc5_shader_source_contracts
+            COMMAND "${DVE_BC5_PYTHON_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_bc5_shader_contract.py")
+    endif()
+
+    add_executable(dve_texture_bc5_quality_bench apps/dve_texture_bc5_quality_bench.cpp)
+    target_link_libraries(dve_texture_bc5_quality_bench PRIVATE dve::render_bridge)
+
 
     add_executable(dve_hybrid_reference_rendering_tests tests/test_hybrid_reference_rendering.cpp)
     target_link_libraries(dve_hybrid_reference_rendering_tests PRIVATE dve::render_bridge)
@@ -3513,7 +3732,9 @@ endif()
 
 # Packaging plan, Phase 3: install() rules, the exported dve CMake package, runtime-dependency
 # bundling, CPack (TGZ/DEB; ZIP/NSIS stubs for Windows) and the install/consumer/cpack tests.
-# Which optional test groups this configuration builds (dve_test_coverage), and honest skips.
+# Which optional test groups this configuration builds (dve_test_coverage), required groups
+# (DVE_REQUIRE_TEST_GROUPS) and SKIP_RETURN_CODE 77 on every test. The work runs deferred, at the end
+# of this file, so it sees every target and test whatever the include order.
 include(DveTestCoverage)
 include(DveInstall)
 include(DveCPack)
@@ -3531,4 +3752,254 @@ if(WIN32 AND DVE_BUILD_TESTS AND DVE_RUNTIME_DLL_SEARCH_DIRS)
     foreach(_dve_test IN LISTS _dve_all_tests)
         set_property(TEST "${_dve_test}" APPEND PROPERTY ENVIRONMENT_MODIFICATION ${_dve_path_modifications})
     endforeach()
+endif()
+
+# R0/R1: optional region metadata catalog experiment (default OFF).
+# Does not replace FlatBrickMap, modify runtime scene loading or touch save formats.
+option(DVE_EXPERIMENTAL_REGION_INDEX "Build experimental region catalog and baseline probes" OFF)
+if(DVE_EXPERIMENTAL_REGION_INDEX)
+    add_library(dve_region_catalog STATIC src/region_catalog.cpp)
+    target_include_directories(dve_region_catalog PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
+    target_compile_features(dve_region_catalog PUBLIC cxx_std_23)
+    if(MSVC)
+        target_compile_options(dve_region_catalog PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(dve_region_catalog PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    endif()
+    if(DVE_BUILD_TESTS)
+        add_executable(dve_region_catalog_tests tests/test_region_catalog.cpp)
+        target_link_libraries(dve_region_catalog_tests PRIVATE dve_region_catalog)
+        add_test(NAME dve_region_catalog_tests COMMAND dve_region_catalog_tests)
+    endif()
+    if(DVE_BUILD_BENCHMARK)
+        add_executable(dve_region_bench apps/dve_region_bench.cpp)
+        target_link_libraries(dve_region_bench PRIVATE dve_region_catalog dve::core)
+    endif()
+
+    # R2: independent deterministic residency planner and optional bridge to
+    # RuntimeSceneWorld. No default engine behavior changes.
+    add_library(dve_region_streaming_plan STATIC src/region_streaming.cpp)
+    target_include_directories(dve_region_streaming_plan PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
+    target_link_libraries(dve_region_streaming_plan PUBLIC dve_region_catalog)
+    target_compile_features(dve_region_streaming_plan PUBLIC cxx_std_23)
+    add_library(dve_region_streaming_runtime STATIC src/region_streaming_runtime.cpp)
+    target_include_directories(dve_region_streaming_runtime PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
+    target_link_libraries(dve_region_streaming_runtime PUBLIC dve_region_streaming_plan dve::core)
+    target_compile_features(dve_region_streaming_runtime PUBLIC cxx_std_23)
+    if(MSVC)
+        target_compile_options(dve_region_streaming_plan PRIVATE /W4 /permissive-)
+        target_compile_options(dve_region_streaming_runtime PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(dve_region_streaming_plan PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+        target_compile_options(dve_region_streaming_runtime PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    endif()
+    if(DVE_BUILD_TESTS)
+        add_executable(dve_region_streaming_tests tests/test_region_streaming.cpp)
+        target_link_libraries(dve_region_streaming_tests PRIVATE dve_region_streaming_plan)
+        add_test(NAME dve_region_streaming_tests COMMAND dve_region_streaming_tests)
+
+        # Compile the same runtime coordinator against a miniature fake scene
+        # executor to exercise cancellation, duplicate suppression and budgets.
+        # The production target above independently compiles against real DVE.
+        add_executable(dve_region_streaming_runtime_contract_tests
+            src/region_streaming_runtime.cpp tests/test_region_streaming_runtime.cpp)
+        target_include_directories(dve_region_streaming_runtime_contract_tests BEFORE PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/region_streaming_contract_stub)
+        target_link_libraries(dve_region_streaming_runtime_contract_tests PRIVATE dve_region_streaming_plan)
+        add_test(NAME dve_region_streaming_runtime_contract_tests COMMAND dve_region_streaming_runtime_contract_tests)
+
+        # Actual DVE scene package, staging executor, renderer and physics.
+        add_executable(dve_region_streaming_real_tests tests/test_region_streaming_real.cpp)
+        target_link_libraries(dve_region_streaming_real_tests PRIVATE dve_region_streaming_runtime)
+        target_compile_definitions(dve_region_streaming_real_tests PRIVATE
+            DVE_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+        add_test(NAME dve_region_streaming_real_tests COMMAND dve_region_streaming_real_tests)
+    endif()
+endif()
+
+
+# R3: generation-keyed, ordered destruction work queue. Keeps R2 residency,
+# existing voxel authority, the GPU mirrors and save formats unchanged.
+if(DVE_EXPERIMENTAL_REGION_INDEX)
+    add_library(dve_region_dirty_index STATIC src/region_dirty_index.cpp)
+    target_include_directories(dve_region_dirty_index PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
+    target_link_libraries(dve_region_dirty_index PUBLIC dve_region_catalog)
+    target_compile_features(dve_region_dirty_index PUBLIC cxx_std_23)
+    if(MSVC)
+        target_compile_options(dve_region_dirty_index PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(dve_region_dirty_index PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    endif()
+    if(DVE_BUILD_TESTS)
+        add_executable(dve_region_dirty_tests tests/test_region_dirty_index.cpp)
+        target_link_libraries(dve_region_dirty_tests PRIVATE dve_region_dirty_index)
+        add_test(NAME dve_region_dirty_tests COMMAND dve_region_dirty_tests)
+
+        # End-to-end reference publication against real VoxelObject and both GPU mirrors.
+        add_executable(dve_region_dirty_gpu_tests tests/test_region_dirty_gpu_integration.cpp)
+        target_link_libraries(dve_region_dirty_gpu_tests PRIVATE dve_region_dirty_index dve::core)
+        add_test(NAME dve_region_dirty_gpu_tests COMMAND dve_region_dirty_gpu_tests)
+    endif()
+    if(DVE_BUILD_BENCHMARK)
+        add_executable(dve_region_dirty_bench apps/dve_region_dirty_bench.cpp)
+        target_link_libraries(dve_region_dirty_bench PRIVATE dve_region_dirty_index)
+    endif()
+endif()
+
+
+# R3.1: optional damage-ingress and frame-budgeted GPU/navigation dispatcher.
+# Collision and persistence remain separate explicit consumers.
+if(DVE_EXPERIMENTAL_REGION_INDEX)
+    add_library(dve_region_dirty_dispatch STATIC src/region_dirty_dispatch.cpp)
+    target_include_directories(dve_region_dirty_dispatch PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
+    target_link_libraries(dve_region_dirty_dispatch PUBLIC dve_region_dirty_index dve::core)
+    target_compile_features(dve_region_dirty_dispatch PUBLIC cxx_std_23)
+
+    # GameWorld damage events may fragment/rebuild voxel objects. This adapter
+    # snapshots post-damage generations without changing GameWorld's callback ABI.
+    add_library(dve_region_game_damage STATIC src/region_game_damage.cpp)
+    target_include_directories(dve_region_game_damage PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
+    target_link_libraries(dve_region_game_damage PUBLIC dve_region_dirty_dispatch dve::core)
+    target_compile_features(dve_region_game_damage PUBLIC cxx_std_23)
+    if(MSVC)
+        target_compile_options(dve_region_dirty_dispatch PRIVATE /W4 /permissive-)
+        target_compile_options(dve_region_game_damage PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(dve_region_dirty_dispatch PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+        target_compile_options(dve_region_game_damage PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    endif()
+
+    if(DVE_BUILD_TESTS)
+        # Small isolated harness for contract, capacity and stale-ticket tests.
+        # The real DVE-linked test below validates the actual GPU/nav paths.
+        add_executable(dve_region_dirty_dispatch_tests
+            src/region_catalog.cpp src/region_dirty_index.cpp src/region_dirty_dispatch.cpp
+            tests/test_region_dirty_dispatch.cpp)
+        target_include_directories(dve_region_dirty_dispatch_tests BEFORE PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/region_dirty_dispatch_stub)
+        target_include_directories(dve_region_dirty_dispatch_tests PRIVATE ${DVE_PUBLIC_INCLUDE_DIRS})
+        target_compile_features(dve_region_dirty_dispatch_tests PRIVATE cxx_std_23)
+        if(NOT MSVC)
+            target_compile_options(dve_region_dirty_dispatch_tests PRIVATE
+                -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror)
+        endif()
+        add_test(NAME dve_region_dirty_dispatch_tests COMMAND dve_region_dirty_dispatch_tests)
+
+        add_executable(dve_region_dirty_dispatch_real_tests tests/test_region_dirty_dispatch_real.cpp)
+        target_link_libraries(dve_region_dirty_dispatch_real_tests PRIVATE dve_region_dirty_dispatch)
+        add_test(NAME dve_region_dirty_dispatch_real_tests COMMAND dve_region_dirty_dispatch_real_tests)
+
+        # Actual player GameWorld damage listener, post-fragment snapshot, GPU convergence.
+        add_executable(dve_region_game_damage_real_tests tests/test_region_game_damage_real.cpp)
+        target_link_libraries(dve_region_game_damage_real_tests PRIVATE dve_region_game_damage)
+        add_test(NAME dve_region_game_damage_real_tests COMMAND dve_region_game_damage_real_tests)
+
+        add_executable(dve_region_dirty_dispatch_budget_tests tests/test_region_dirty_dispatch_budget.cpp)
+        target_link_libraries(dve_region_dirty_dispatch_budget_tests PRIVATE dve::core)
+        add_test(NAME dve_region_dirty_dispatch_budget_tests COMMAND dve_region_dirty_dispatch_budget_tests)
+    endif()
+endif()
+
+# R3.2: opt-in GameWorld damage callback host with bounded derived-state ingestion.
+if(DVE_EXPERIMENTAL_REGION_INDEX)
+    add_library(dve_region_game_damage_host STATIC src/region_game_damage_host.cpp)
+    target_include_directories(dve_region_game_damage_host PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
+    target_link_libraries(dve_region_game_damage_host PUBLIC dve_region_dirty_dispatch dve_region_game_damage dve::core)
+    target_compile_features(dve_region_game_damage_host PUBLIC cxx_std_23)
+    if(MSVC)
+        target_compile_options(dve_region_game_damage_host PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(dve_region_game_damage_host PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    endif()
+    if(DVE_BUILD_TESTS)
+        add_executable(dve_region_game_damage_host_contract_tests
+            src/region_game_damage_host.cpp tests/test_region_game_damage_host_contract.cpp)
+        target_include_directories(dve_region_game_damage_host_contract_tests BEFORE PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/region_host_stub)
+        target_include_directories(dve_region_game_damage_host_contract_tests PRIVATE ${DVE_PUBLIC_INCLUDE_DIRS})
+        target_compile_features(dve_region_game_damage_host_contract_tests PRIVATE cxx_std_23)
+        add_test(NAME dve_region_game_damage_host_contract_tests COMMAND dve_region_game_damage_host_contract_tests)
+        add_executable(dve_region_game_damage_host_real_tests tests/test_region_game_damage_host_real.cpp)
+        target_link_libraries(dve_region_game_damage_host_real_tests PRIVATE dve_region_game_damage_host)
+        add_test(NAME dve_region_game_damage_host_real_tests COMMAND dve_region_game_damage_host_real_tests)
+    endif()
+endif()
+
+# T1/T2: pinned upstream Basis. Both modes are OFF by default.
+option(DVE_ENABLE_BC7F_POC "Build standalone experimental Basis bc7f encoder benchmark" OFF)
+option(DVE_ENABLE_BC7F_ENCODER "Enable optional BC7 material texture residency encoder" OFF)
+if(DVE_ENABLE_BC7F_ENCODER AND NOT TARGET dve_render_bridge)
+    message(FATAL_ERROR "DVE_ENABLE_BC7F_ENCODER requires DVE_BUILD_RHI and render bridge")
+endif()
+if(DVE_ENABLE_BC7F_POC OR DVE_ENABLE_BC7F_ENCODER)
+    include(FetchContent)
+    # Basis' own CMakeLists changes global compiler options, so it must never be add_subdirectory'd.
+    # SOURCE_SUBDIR points MakeAvailable at a directory with no CMakeLists (same pattern as
+    # cmake/DveLua.cmake): the pinned source is only downloaded, not configured. This also avoids
+    # the CMP0169 deprecation of single-argument FetchContent_Populate on CMake >= 3.30.
+    if(NOT DVE_BASISU_SOURCE_DIR)
+        FetchContent_Declare(dve_basisu_bc7f
+            GIT_REPOSITORY https://github.com/BinomialLLC/basis_universal.git
+            GIT_TAG ee771a7f913a3233a252eb6d281b4446f6a3c9f5
+            GIT_SHALLOW FALSE
+            SOURCE_SUBDIR dve_no_cmake_project)
+        FetchContent_MakeAvailable(dve_basisu_bc7f)
+        set(_dve_bc7f_root "${dve_basisu_bc7f_SOURCE_DIR}")
+    else()
+        set(_dve_bc7f_root "${DVE_BASISU_SOURCE_DIR}")
+    endif()
+    if(NOT EXISTS "${_dve_bc7f_root}/transcoder/basisu_transcoder.cpp")
+        message(FATAL_ERROR "DVE_ENABLE_BC7F_POC requires a full Basis Universal transcoder source tree")
+    endif()
+    add_library(dve_bc7f_transcoder STATIC "${_dve_bc7f_root}/transcoder/basisu_transcoder.cpp")
+    target_include_directories(dve_bc7f_transcoder PUBLIC "${_dve_bc7f_root}/transcoder")
+    target_compile_features(dve_bc7f_transcoder PUBLIC cxx_std_17)
+    target_compile_definitions(dve_bc7f_transcoder PUBLIC
+        BASISD_SUPPORT_KTX2=0 BASISD_SUPPORT_KTX2_ZSTD=0)
+    if(NOT MSVC)
+        target_compile_options(dve_bc7f_transcoder PRIVATE -fno-strict-aliasing)
+    endif()
+    if(DVE_ENABLE_BC7F_POC)
+        add_executable(dve_bc7f_poc apps/dve_bc7f_poc.cpp)
+        target_link_libraries(dve_bc7f_poc PRIVATE dve_bc7f_transcoder)
+        target_compile_features(dve_bc7f_poc PRIVATE cxx_std_23)
+    endif()
+    if(DVE_ENABLE_BC7F_ENCODER)
+        add_library(dve_texture_bc7f STATIC src/render/bc7f_texture_encoder.cpp)
+        target_include_directories(dve_texture_bc7f PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
+        target_link_libraries(dve_texture_bc7f PUBLIC dve::render_bridge PRIVATE dve_bc7f_transcoder)
+        target_compile_features(dve_texture_bc7f PUBLIC cxx_std_23)
+        if(TARGET dve_texture_render_diff_t6_tests)
+            target_link_libraries(dve_texture_render_diff_t6_tests PRIVATE
+                dve_texture_bc7f dve_bc7f_transcoder)
+            target_compile_definitions(dve_texture_render_diff_t6_tests PRIVATE DVE_T6_WITH_BC7=1)
+        endif()
+        if(DVE_BUILD_TESTS)
+            add_executable(dve_texture_bc7f_residency_tests tests/test_texture_bc7f_residency.cpp)
+            target_link_libraries(dve_texture_bc7f_residency_tests PRIVATE dve_texture_bc7f dve::rhi)
+            add_test(NAME dve_texture_bc7f_residency_tests COMMAND dve_texture_bc7f_residency_tests)
+        endif()
+    endif()
+endif()
+ 
+
+# T3: optional standards-compliant native KTX2 export via Khronos libktx.
+# No network fetch / external requirement in default builds.
+option(DVE_ENABLE_KTX2_EXPORT "Enable optional native KTX2 texture exporter through libktx" OFF)
+if(DVE_ENABLE_KTX2_EXPORT)
+    find_path(DVE_KTX_INCLUDE_DIR NAMES ktx.h REQUIRED)
+    find_library(DVE_KTX_LIBRARY NAMES ktx REQUIRED)
+    add_library(dve_texture_ktx2_export STATIC src/texture_ktx2_export.cpp)
+    target_include_directories(dve_texture_ktx2_export PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS}
+        PRIVATE ${DVE_KTX_INCLUDE_DIR})
+    target_link_libraries(dve_texture_ktx2_export PUBLIC dve::core PRIVATE ${DVE_KTX_LIBRARY})
+    target_compile_features(dve_texture_ktx2_export PUBLIC cxx_std_23)
+    if(DVE_BUILD_TESTS)
+        add_executable(dve_texture_ktx2_export_tests tests/test_texture_ktx2_export.cpp)
+        target_link_libraries(dve_texture_ktx2_export_tests PRIVATE
+            dve_texture_ktx2_export dve::rhi)
+        target_include_directories(dve_texture_ktx2_export_tests PRIVATE ${DVE_KTX_INCLUDE_DIR})
+        target_link_libraries(dve_texture_ktx2_export_tests PRIVATE ${DVE_KTX_LIBRARY})
+        add_test(NAME dve_texture_ktx2_export_tests COMMAND dve_texture_ktx2_export_tests)
+    endif()
 endif()

@@ -555,6 +555,34 @@ ExactBooleanRequest prepare_exact_boolean(const std::filesystem::path& projectRo
     return request;
 }
 
+namespace {
+// Builds an analytic solid with `brepkernel primitive` into `output` (empty string on success).
+std::string build_exact_primitive(const ExactCadSettings& settings, const ExactCadRunner& runner, const ExactPrimitive& primitive,
+                                  const std::filesystem::path& output, const std::filesystem::path& report) {
+    std::vector<std::string> args{"primitive", primitive.kind == ExactPrimitive::Kind::Box ? "box" : "cylinder", "-o", utf8(output)};
+    if (primitive.kind == ExactPrimitive::Kind::Box) {
+        args.push_back("--size");
+        for (const double v : primitive.size) args.push_back(format_double(v));
+    } else {
+        args.push_back("--radius");
+        args.push_back(format_double(primitive.radius));
+        args.push_back("--height");
+        args.push_back(format_double(primitive.height));
+        args.push_back("--axis");
+        args.push_back(std::string(1, primitive.axis));
+    }
+    args.push_back("--at");
+    for (const double v : primitive.centre) args.push_back(format_double(v));
+    const auto run = run_tool(settings, runner, std::move(args), report);
+    if (!run.report) return run.error;
+    if (run.exitCode != 0) {
+        const auto message = json_string(*run.report, {"error"});
+        return "brepkernel could not build the analytic solid: " + (message.empty() ? "exit code " + std::to_string(run.exitCode) : message);
+    }
+    return {};
+}
+}  // namespace
+
 ExactBooleanResult run_exact_boolean(const std::filesystem::path& projectRoot, const ExactBooleanRequest& request,
                                      const ExactCadSettings& settings, const ExactCadRunner& runner) {
     ExactBooleanResult result;
@@ -564,13 +592,27 @@ ExactBooleanResult run_exact_boolean(const std::filesystem::path& projectRoot, c
     if (!temp.ok()) return fail("Cannot create a temporary folder");
     const auto brep = temp.path() / "result.brep";
     const auto glb = temp.path() / "result.glb";
+    std::filesystem::path pathA = request.brepA, pathB = request.brepB;
+    if (request.primitiveA.kind != ExactPrimitive::Kind::Absent) {
+        pathA = temp.path() / "operand_a.brep";
+        if (auto error = build_exact_primitive(settings, runner, request.primitiveA, pathA, temp.path() / "primitive_a.json"); !error.empty())
+            return fail(std::move(error));
+    }
+    if (request.primitiveB.kind != ExactPrimitive::Kind::Absent) {
+        pathB = temp.path() / "operand_b.brep";
+        if (auto error = build_exact_primitive(settings, runner, request.primitiveB, pathB, temp.path() / "primitive_b.json"); !error.empty())
+            return fail(std::move(error));
+    }
     std::string matrix;
     for (std::size_t i = 0; i < request.placement.size(); ++i) matrix += (i ? "," : "") + format_double(request.placement[i]);
+    const bool identity = std::all_of(request.placement.begin(), request.placement.end(), [](double v) { return v == 0.0; });
     const bool reverse = request.operation == MeshBoolean::ReverseDifference;
     const char* op = request.operation == MeshBoolean::Union ? "union"
         : request.operation == MeshBoolean::Intersection ? "intersection" : "difference";
-    std::vector<std::string> args{"boolean", utf8(request.brepA), utf8(request.brepB), "--op", op, "-o", utf8(brep),
-                                  "--b-transform", matrix, "--mesh", utf8(glb)};
+    std::vector<std::string> args{"boolean", utf8(pathA), utf8(pathB), "--op", op, "-o", utf8(brep)};
+    if (!identity) { args.push_back("--b-transform"); args.push_back(matrix); }
+    args.push_back("--mesh");
+    args.push_back(utf8(glb));
     if (reverse) args.push_back("--reverse");
     if (settings.advisory) args.push_back("--advisory");
     mesh_options(settings, args);
@@ -620,8 +662,15 @@ ExactBooleanResult run_exact_boolean(const std::filesystem::path& projectRoot, c
     mesh->contentHash = polygon_asset_content_hash(*mesh);
     if (const auto valid = validate_polygon_asset(*mesh); !valid) return fail("Exact Boolean mesh is invalid: " + valid.message);
     auto source = adopt_brep(projectRoot, brep, json_string(report, {"result", "sha256"}), request.nameA,
-                             std::string("boolean:") + (reverse ? "reverse_difference" : op), &error);
+                             request.origin.empty() ? std::string("boolean:") + (reverse ? "reverse_difference" : op) : request.origin,
+                             &error);
     if (!source) return fail(error);
+    result.solids = static_cast<std::uint64_t>(json_number(report, {"result", "solids"}));
+    result.exactVolume = json_number(report, {"result", "volume"});
+    result.volumeA = json_number(report, {"inputs", "a", "volume"});
+    if (const auto* meshReport = report.find("mesh"); meshReport && meshReport->is_object())
+        if (const auto* watertight = meshReport->find("watertight"); watertight && watertight->is_bool())
+            result.meshWatertight = watertight->as_bool();
     result.edit.mesh = std::move(*mesh);
     result.edit.selection = {request.a, PolygonSelectionMode::Face, {}};
     result.source = std::move(*source);
@@ -631,7 +680,7 @@ ExactBooleanResult run_exact_boolean(const std::filesystem::path& projectRoot, c
     std::ostringstream summary;
     summary.imbue(std::locale::classic());
     summary.precision(9);
-    summary << "Certified exact Boolean: volume " << json_number(report, {"result", "volume"}) * request.worldVolumeScale
+    summary << (request.summaryPrefix.empty() ? std::string("Certified exact Boolean") : request.summaryPrefix) << ": volume " << json_number(report, {"result", "volume"}) * request.worldVolumeScale
             << " m3 (exact, world scale), "
             << static_cast<std::uint64_t>(json_number(report, {"mesh", "triangles"})) << " triangles";
     if (!result.collision.note.empty()) summary << "; " << result.collision.note;

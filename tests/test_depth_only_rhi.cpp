@@ -1,3 +1,4 @@
+#include "dve_test_skip.hpp"
 #include "dve/rhi/null_device.hpp"
 #ifndef DVE_DEPTH_ONLY_NULL_ONLY
 #include "dve/rhi/vulkan_device.hpp"
@@ -153,8 +154,11 @@ int main(){
             VulkanDevice vulkan;
             if(vulkan.status()==DeviceStatus::Ready) { verify_region_clear(vulkan); run(vulkan,true); }
             else if(std::getenv("DVE_REQUIRE_VULKAN")) throw std::runtime_error(std::string(vulkan.device_loss_reason()));
+            else dve::testing::note_skip("Vulkan depth-only checks: no Vulkan device");
+        } else {
+            dve::testing::note_skip("Vulkan depth-only checks: DVE_SKIP_VULKAN is set");
         }
 #endif
-        std::cout<<"dve_depth_only_rhi_tests: PASS\n"; return 0;
+        std::cout<<"dve_depth_only_rhi_tests: PASS\n"; return dve::testing::exit_code(false);
     }catch(const std::exception& e){std::cerr<<"dve_depth_only_rhi_tests: FAIL: "<<e.what()<<'\n';return 1;}
 }

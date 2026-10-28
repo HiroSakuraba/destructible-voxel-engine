@@ -299,6 +299,61 @@ void test_render() {
     check(inside > 100 && outside > 100 && exact, "decals project onto voxel surfaces");
 }
 
+// Codex finding on #230 (renderer, voxel_reference_renderer.cpp): an instance whose objectId is left
+// at 0 reports its VoxelObject's id for the pixel, so marks addressed to that id must shade it.
+void test_marks_follow_the_reported_object_id() {
+    const std::vector<SurfaceMark> marks{crater(1U, {0.05F, 0.1F, 0.05F}, 0.5F)};   // the VoxelObject's id
+    Floor floor;
+    floor.instances[0].objectId = 0U;                                                // fall back to object->id()
+    const PolygonRenderTarget plain = draw(floor, down({0.5F, 1.0F, 0.5F}), {}, {});
+    const PolygonRenderTarget marked = draw(floor, down({0.5F, 1.0F, 0.5F}), marks, {});
+    const std::size_t centre = 24U * 48U + 24U;
+    const float darkening = marked.passes.directDiffuse[centre].x / plain.passes.directDiffuse[centre].x;
+    std::printf("marks on an instance without its own objectId: centre light x %.3f\n", darkening);
+    check(marked.objectId[centre] == 1U, "the pixel reports the object's id");
+    check(darkening < 0.3F, "marks addressed to the object's id shade an instance whose objectId is 0");
+    // A mark for some other id still does nothing.
+    const std::vector<SurfaceMark> other{crater(2U, {0.05F, 0.1F, 0.05F}, 0.5F)};
+    const PolygonRenderTarget unmarked = draw(floor, down({0.5F, 1.0F, 0.5F}), other, {});
+    check(unmarked.passes.directDiffuse[centre].x == plain.passes.directDiffuse[centre].x, "other objects' marks do not apply");
+}
+
+// Codex finding on #230 (player_app.cpp): a queued carve lands where it was enqueued in the object's own
+// space, so its mark must too, even when the object has moved by the time the job commits.
+void test_queued_mark_uses_the_enqueue_pose() {
+    GameWorld world(std::make_unique<ReferenceRigidBodyWorld>());
+    GameObjectDesc desc;
+    desc.name = "Falling block";
+    desc.voxelSizeMeters = 0.5F;
+    desc.dynamic = true;
+    desc.voxels = std::make_unique<VoxelObject>(3U);
+    for (int x = 0; x < 8; ++x)
+        for (int y = 0; y < 8; ++y)
+            for (int z = 0; z < 8; ++z) desc.voxels->set_voxel({x, y, z}, 1);
+    desc.transform = make_rigid_transform({0.0F, 40.0F, 0.0F}, {});
+    std::string error;
+    const GameObjectId id = world.create_object(std::move(desc), &error);
+    check(id != kInvalidGameObjectId, "create block: " + error);
+    const RigidTransform enqueued = *world.transform(id);
+    const Float3 local{1.0F, 3.0F, 2.0F};   // a point inside the 4 m block, object metres
+    check(world.queue_damage_sphere(id, transform_point(enqueued, local), 0.6F).has_value(), "queue the carve");
+    world.set_destruction_units_per_tick(8U);   // spread the job over several ticks while the block falls
+    int ticks = 0;
+    for (; ticks < 3000 && world.pending_destruction_count() > 0U; ++ticks) world.tick(1.0F / 60.0F);
+    std::printf("queued carve committed after %d ticks\n", ticks);
+    const RigidTransform committed = *world.transform(id);
+    check(world.pending_destruction_count() == 0U, "the carve committed");
+    check(length(subtract(committed.position, enqueued.position)) > 0.05F, "the block moved before the carve committed");
+    const SurfaceMark* mark = nullptr;
+    for (const SurfaceMark& m : world.surface_marks())
+        if (m.objectId == id) mark = &m;
+    check(mark != nullptr, "the carve left a mark");
+    if (mark) {
+        std::printf("queued mark: %.4f m from the carve in object space\n", length(subtract(mark->centerMeters, local)));
+        check(length(subtract(mark->centerMeters, local)) < 1e-3F, "the mark sits at the carve, not at the impact seen from the new pose");
+    }
+}
+
 // --- Weathering ----------------------------------------------------------------------------------
 
 void test_weathering() {
@@ -354,6 +409,8 @@ int main() {
     test_marks();
     test_world_marks();
     test_render();
+    test_marks_follow_the_reported_object_id();
+    test_queued_mark_uses_the_enqueue_pose();
     test_weathering();
     if (g_failures == 0) std::printf("dve_weathering_damage_tests: PASS\n");
     return g_failures == 0 ? 0 : 1;

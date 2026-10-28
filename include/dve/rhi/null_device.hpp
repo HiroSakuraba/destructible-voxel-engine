@@ -130,6 +130,8 @@ public:
     void wait_idle() noexcept override;
 
     void simulate_device_loss(std::string reason);
+    // Test observability: number of wait_idle() calls (frames are fenced asynchronously on real devices).
+    [[nodiscard]] std::uint64_t wait_idle_calls() const noexcept { return waitIdleCalls_; }
 
 private:
     struct BufferSlot {
@@ -244,6 +246,7 @@ private:
     std::vector<CommandSlot> commandLists_;
     std::uint64_t nextFence_{1};
     std::uint64_t completedFence_{};
+    std::uint64_t waitIdleCalls_{};
     std::uint64_t syntheticTimestamp_{1000};
 };
 

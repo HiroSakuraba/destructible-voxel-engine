@@ -114,8 +114,10 @@ PolygonTextureMipChain generate_semantic_texture_mips(const PolygonImage& image,
     return chain;
 }
 
-TextureResidencyManager::TextureResidencyManager(rhi::IDevice& device, std::size_t budgetBytes)
-    : device_(device) {
+TextureResidencyManager::TextureResidencyManager(rhi::IDevice& device, std::size_t budgetBytes,
+                                                 TextureBc7Encoder encoder,
+                                                 TextureBc5Encoder bc5Encoder)
+    : device_(device), bc7Encoder_(std::move(encoder)), bc5Encoder_(std::move(bc5Encoder)) {
     stats_.budgetBytes = std::max<std::size_t>(budgetBytes, 4U);
 }
 
@@ -151,21 +153,82 @@ bool TextureResidencyManager::enqueue(TextureUploadRequest request, std::string*
     if (pending.mipChain.levels.empty() || pending.bytes == 0U) {
         set_error(error, "texture residency mip generation failed"); return false;
     }
+    // Cheap duplicate/unchanged check BEFORE the expensive encode, so unchanged hot reloads and
+    // rejected duplicates never pay per-block compression or hold the encoder's global mutex.
+    {
+        std::scoped_lock lock(mutex_);
+        const auto early = admit_locked(pending, error);
+        if (early == Admission::Rejected) return false;
+        if (early == Admission::Unchanged) return true;
+    }
+    // Encode on the ingestion thread, never inside pump() on the render thread.
+    // The encoder is an optional host-supplied worker-safe callback, with no RHI access.
+    if (pending.request.compression == TextureCompressionPreference::PreferBc7 && bc7Encoder_) {
+        bool ok = false;
+        try {
+            std::string encodeError;
+            ok = bc7Encoder_(pending.mipChain, pending.bc7Blocks, &encodeError);
+        } catch (...) {
+            ok = false; // fail back to decoded RGBA8, preserving authoritative source
+        }
+        if (ok && pending.bc7Blocks.size() == pending.mipChain.levels.size()) {
+            for (std::size_t level=0U; level<pending.bc7Blocks.size(); ++level) {
+                const auto& mip = pending.mipChain.levels[level];
+                const auto bytes = rhi::texture_row_bytes(rhi::TextureFormat::BC7RGBAUnorm, mip.width) *
+                                   rhi::texture_rows(rhi::TextureFormat::BC7RGBAUnorm, mip.height);
+                if (pending.bc7Blocks[level].size() != bytes ||
+                    bytes > std::numeric_limits<std::size_t>::max() - pending.encodedBytes) {
+                    ok = false; break;
+                }
+                pending.encodedBytes += bytes;
+            }
+        } else ok = false;
+        if (!ok || pending.encodedBytes == 0U) {
+            pending.bc7Blocks.clear();
+            pending.encodedBytes = 0U;
+            pending.encodeFailed = true;
+        }
+    }
+    if (pending.request.compression == TextureCompressionPreference::PreferBc5ForNormals &&
+        pending.request.semantic == TextureSemantic::Normal && bc5Encoder_) {
+        bool ok=false;
+        try {
+            std::string encodeError;
+            ok=bc5Encoder_(pending.mipChain,pending.bc5Blocks,&encodeError);
+        } catch (...) {
+            ok=false;
+        }
+        if (ok && pending.bc5Blocks.size()==pending.mipChain.levels.size()) {
+            for (std::size_t level=0U;level<pending.bc5Blocks.size();++level) {
+                const auto& mip=pending.mipChain.levels[level];
+                const auto bytes=rhi::texture_row_bytes(rhi::TextureFormat::BC5RGUnorm,mip.width)*
+                                 rhi::texture_rows(rhi::TextureFormat::BC5RGUnorm,mip.height);
+                if (pending.bc5Blocks[level].size()!=bytes ||
+                    bytes>std::numeric_limits<std::size_t>::max()-pending.bc5EncodedBytes) {
+                    ok=false; break;
+                }
+                pending.bc5EncodedBytes+=bytes;
+            }
+        } else ok=false;
+        if (!ok || pending.bc5EncodedBytes==0U) {
+            pending.bc5Blocks.clear();
+            pending.bc5EncodedBytes=0U;
+            pending.encodeFailed=true;
+        }
+    }
     std::scoped_lock lock(mutex_);
+    if (pending.encodedBytes != 0U || pending.bc5EncodedBytes != 0U) ++stats_.compressionEncoded;
+    if (pending.encodeFailed) ++stats_.compressionEncodeFailures;
+    // Re-check under the lock: another producer may have queued/published the same asset while
+    // this thread was encoding. (Only one terminal duplicate/unchanged stat is ever counted per
+    // call, because the early check returned before reaching here if it had counted one.)
+    const auto admitted = admit_locked(pending, error);
+    if (admitted == Admission::Rejected) return false;
+    if (admitted == Admission::Unchanged) return true;
     const auto queued = std::find_if(pending_.begin(), pending_.end(), [&](const Pending& item) {
         return item.request.assetId == pending.request.assetId;
     });
     if (queued != pending_.end()) {
-        if (pending.request.mode != TextureUploadMode::ReplaceIfChanged) {
-            ++stats_.duplicateRequests;
-            set_error(error, "texture asset id is already queued");
-            return false;
-        }
-        if (queued->sourceHash == pending.sourceHash &&
-            queued->request.semantic == pending.request.semantic) {
-            ++stats_.unchangedRequests;
-            return true;
-        }
         stats_.pendingBytes -= queued->bytes;
         stats_.pendingBytes += pending.bytes;
         *queued = std::move(pending);
@@ -173,24 +236,75 @@ bool TextureResidencyManager::enqueue(TextureUploadRequest request, std::string*
         ++stats_.pendingRequestsReplaced;
         return true;
     }
-    if (const auto resident = resident_.find(pending.request.assetId); resident != resident_.end()) {
-        if (pending.request.mode != TextureUploadMode::ReplaceIfChanged) {
-            ++stats_.duplicateRequests;
-            set_error(error, "texture asset id is already resident");
-            return false;
-        }
-        if (resident->second.sourceHash == pending.sourceHash &&
-            resident->second.semantic == pending.request.semantic) {
-            ++stats_.unchangedRequests;
-            resident->second.lastUseSerial = serial_++;
-            return true;
-        }
-    }
     stats_.pendingBytes += pending.bytes;
     ++stats_.requestsQueued;
     pending_.push_back(std::move(pending));
     stats_.pendingCount = pending_.size();
     return true;
+}
+
+TextureResidencyManager::Admission TextureResidencyManager::admit_locked(
+    const Pending& pending, std::string* error) {
+    const auto queued = std::find_if(pending_.begin(), pending_.end(), [&](const Pending& item) {
+        return item.request.assetId == pending.request.assetId;
+    });
+    if (queued != pending_.end()) {
+        if (pending.request.mode != TextureUploadMode::ReplaceIfChanged) {
+            ++stats_.duplicateRequests;
+            set_error(error, "texture asset id is already queued");
+            return Admission::Rejected;
+        }
+        if (queued->sourceHash == pending.sourceHash &&
+            queued->request.semantic == pending.request.semantic &&
+            queued->request.compression == pending.request.compression &&
+            queued->request.generateMips == pending.request.generateMips) {
+            ++stats_.unchangedRequests;
+            return Admission::Unchanged;
+        }
+        return Admission::Proceed;
+    }
+    if (const auto resident = resident_.find(pending.request.assetId); resident != resident_.end()) {
+        if (pending.request.mode != TextureUploadMode::ReplaceIfChanged) {
+            ++stats_.duplicateRequests;
+            set_error(error, "texture asset id is already resident");
+            return Admission::Rejected;
+        }
+        if (resident->second.sourceHash == pending.sourceHash &&
+            resident->second.semantic == pending.request.semantic &&
+            resident->second.compression == pending.request.compression &&
+            resident->second.generatedMips == pending.request.generateMips) {
+            ++stats_.unchangedRequests;
+            resident->second.lastUseSerial = serial_++;
+            return Admission::Unchanged;
+        }
+    }
+    return Admission::Proceed;
+}
+
+TextureResidencyManager::UploadChoice TextureResidencyManager::choose_upload(
+    const Pending& pending) const {
+    UploadChoice choice;
+    choice.format=rhi::TextureFormat::RGBA8Unorm;
+    choice.bytes=pending.bytes;
+    if (pending.request.compression==TextureCompressionPreference::PreferBc5ForNormals &&
+        pending.request.semantic==TextureSemantic::Normal &&
+        pending.bc5EncodedBytes!=0U &&
+        device_.texture_format_capabilities(rhi::TextureFormat::BC5RGUnorm).sampled) {
+        choice.useBc5=true;
+        choice.format=rhi::TextureFormat::BC5RGUnorm;
+        choice.bytes=pending.bc5EncodedBytes;
+        return choice;
+    }
+    if (pending.encodedBytes==0U ||
+        pending.request.compression!=TextureCompressionPreference::PreferBc7) return choice;
+    const auto bc7=pending.request.semantic==TextureSemantic::BaseColor ||
+                   pending.request.semantic==TextureSemantic::Emissive
+        ? rhi::TextureFormat::BC7RGBASrgb : rhi::TextureFormat::BC7RGBAUnorm;
+    if (!device_.texture_format_capabilities(bc7).sampled) return choice;
+    choice.useBc7=true;
+    choice.format=bc7;
+    choice.bytes=pending.encodedBytes;
+    return choice;
 }
 
 bool TextureResidencyManager::evict_until_fits(std::size_t incomingBytes,
@@ -223,32 +337,39 @@ std::size_t TextureResidencyManager::pump(std::size_t maximumUploadBytes, std::s
     std::size_t uploaded{};
     for (;;) {
         Pending pending;
+        // Admission uses the size of the format that will actually be uploaded (compressed BC7
+        // bytes when selected, RGBA8 otherwise) so the per-pump budget is consistent with the
+        // `uploaded` accounting below. The first upload is always admitted so an oversized
+        // texture cannot starve the queue.
+        UploadChoice choice;
         {
             std::scoped_lock lock(mutex_);
             if (pending_.empty()) break;
-            if (uploaded != 0U && uploaded + pending_.front().bytes > maximumUploadBytes) break;
+            choice = choose_upload(pending_.front());
+            if (uploaded != 0U && uploaded + choice.bytes > maximumUploadBytes) break;
             pending = std::move(pending_.front());
             pending_.pop_front();
             stats_.pendingBytes -= pending.bytes;
             stats_.pendingCount = pending_.size();
         }
-        if (pending.bytes > maximumUploadBytes && uploaded != 0U) {
-            std::scoped_lock lock(mutex_);
-            stats_.pendingBytes += pending.bytes;
-            pending_.push_front(std::move(pending));
-            stats_.pendingCount = pending_.size();
-            break;
-        }
+        const bool useBc7 = choice.useBc7;
+        const bool useBc5 = choice.useBc5;
+        const std::size_t uploadBytes = choice.bytes;
+        // enqueue() can inspect resident_ on an asset worker. Protect the
+        // publication transaction from that concurrent read; callbacks perform
+        // the expensive encoding before taking this mutex. Follow-up: split
+        // RHI publication into reserve/commit to reduce lock hold time.
+        std::scoped_lock publicationLock(mutex_);
         const bool replacing = resident_.contains(pending.request.assetId);
-        if (!evict_until_fits(pending.bytes, pending.request.assetId, error)) {
+        if (!evict_until_fits(uploadBytes, pending.request.assetId, error)) {
             ++stats_.uploadsFailed;
             if (replacing) ++stats_.failedReplacementsPreserved;
             continue;
         }
-        if (pending.request.compression != TextureCompressionPreference::Uncompressed)
-            ++stats_.compressionFallbacks; // RHI currently exposes only uncompressed RGBA8.
+        if (!useBc7 && !useBc5 && pending.request.compression != TextureCompressionPreference::Uncompressed)
+            ++stats_.compressionFallbacks;
         rhi::TextureDesc desc;
-        desc.format = rhi::TextureFormat::RGBA8Unorm;
+        desc.format = choice.format;
         desc.width = pending.mipChain.levels.front().width;
         desc.height = pending.mipChain.levels.front().height;
         desc.mipLevels = static_cast<std::uint32_t>(pending.mipChain.levels.size());
@@ -262,9 +383,15 @@ std::size_t TextureResidencyManager::pump(std::size_t maximumUploadBytes, std::s
         if (ok) {
             for (std::uint32_t mip = 0U; mip < desc.mipLevels; ++mip) {
                 const auto& level = pending.mipChain.levels[mip];
-                ok = device_.write_texture(texture, mip, 0U,
-                    std::as_bytes(std::span<const std::uint8_t>(level.rgba8)),
-                    static_cast<std::size_t>(level.width) * 4U, &localError);
+                const auto rowBytes = rhi::texture_row_bytes(desc.format, level.width);
+                if (useBc7 || useBc5) {
+                    const auto& blocks=useBc5 ? pending.bc5Blocks[mip] : pending.bc7Blocks[mip];
+                    ok=device_.write_texture(texture,mip,0U,blocks,rowBytes,&localError);
+                } else {
+                    ok = device_.write_texture(texture, mip, 0U,
+                        std::as_bytes(std::span<const std::uint8_t>(level.rgba8)),
+                        rowBytes, &localError);
+                }
                 if (!ok) break;
             }
         }
@@ -293,13 +420,17 @@ std::size_t TextureResidencyManager::pump(std::size_t maximumUploadBytes, std::s
         ResidentTexture record;
         record.texture = texture; record.view = view; record.width = desc.width;
         record.height = desc.height; record.mipLevels = desc.mipLevels;
-        record.residentBytes = pending.bytes; record.sourceHash = pending.sourceHash;
-        record.semantic = pending.request.semantic; record.lastUseSerial = serial_++;
+        record.residentBytes = uploadBytes; record.sourceHash = pending.sourceHash;
+        record.semantic = pending.request.semantic;
+        record.compression = pending.request.compression;
+        record.format = desc.format;
+        record.generatedMips = pending.request.generateMips;
+        record.lastUseSerial = serial_++;
         if (auto existing = resident_.find(pending.request.assetId); existing != resident_.end()) {
             const ResidentTexture old = existing->second;
             record.generation = old.generation + 1U;
             existing->second = record;
-            stats_.residentBytes = stats_.residentBytes - old.residentBytes + pending.bytes;
+            stats_.residentBytes = stats_.residentBytes - old.residentBytes + uploadBytes;
             ++stats_.residentTexturesReplaced;
             std::string cleanupError;
             const bool viewDestroyed = device_.destroy_texture_view(old.view, &cleanupError);
@@ -307,11 +438,11 @@ std::size_t TextureResidencyManager::pump(std::size_t maximumUploadBytes, std::s
             if ((!viewDestroyed || !textureDestroyed) && error) *error = cleanupError;
         } else {
             resident_.emplace(pending.request.assetId, record);
-            stats_.residentBytes += pending.bytes;
+            stats_.residentBytes += uploadBytes;
         }
         stats_.residentCount = resident_.size();
         ++stats_.uploadsCompleted;
-        uploaded += pending.bytes;
+        uploaded += uploadBytes;
         if (uploaded >= maximumUploadBytes) break;
     }
     return uploaded;
@@ -324,6 +455,7 @@ const ResidentTexture* TextureResidencyManager::find(std::uint64_t assetId) cons
 
 std::optional<TextureResidencyReference> TextureResidencyManager::reference(
     std::uint64_t assetId) const noexcept {
+    std::scoped_lock lock(mutex_);
     const auto it = resident_.find(assetId);
     if (it == resident_.end()) return std::nullopt;
     return TextureResidencyReference{assetId, it->second.generation, it->second.sourceHash};
@@ -331,6 +463,7 @@ std::optional<TextureResidencyReference> TextureResidencyManager::reference(
 
 bool TextureResidencyManager::reference_valid(
     const TextureResidencyReference& referenceValue) const noexcept {
+    std::scoped_lock lock(mutex_);
     const auto it = resident_.find(referenceValue.assetId);
     return it != resident_.end() &&
            it->second.generation == referenceValue.generation &&
@@ -338,6 +471,7 @@ bool TextureResidencyManager::reference_valid(
 }
 
 bool TextureResidencyManager::touch(std::uint64_t assetId) noexcept {
+    std::scoped_lock lock(mutex_);
     const auto it = resident_.find(assetId);
     if (it == resident_.end()) return false;
     it->second.lastUseSerial = serial_++;
@@ -345,6 +479,7 @@ bool TextureResidencyManager::touch(std::uint64_t assetId) noexcept {
 }
 
 bool TextureResidencyManager::remove(std::uint64_t assetId, std::string* error) {
+    std::scoped_lock lock(mutex_);
     const auto it = resident_.find(assetId); if (it == resident_.end()) return false;
     if (!device_.destroy_texture_view(it->second.view, error) ||
         !device_.destroy_texture(it->second.texture, error)) return false;
@@ -354,26 +489,27 @@ bool TextureResidencyManager::remove(std::uint64_t assetId, std::string* error) 
 }
 
 void TextureResidencyManager::clear() noexcept {
+    std::scoped_lock lock(mutex_);
     for (auto& [id, texture] : resident_) {
         (void)id;
         (void)device_.destroy_texture_view(texture.view, nullptr);
         (void)device_.destroy_texture(texture.texture, nullptr);
     }
     resident_.clear();
-    std::scoped_lock lock(mutex_);
     pending_.clear();
     stats_.residentBytes = 0U; stats_.pendingBytes = 0U;
     stats_.residentCount = 0U; stats_.pendingCount = 0U;
 }
 
 void TextureResidencyManager::set_budget(std::size_t bytes) noexcept {
+    std::scoped_lock lock(mutex_);
     stats_.budgetBytes = std::max<std::size_t>(bytes, 4U);
 }
 
 TextureResidencyStats TextureResidencyManager::stats() const noexcept {
+    std::scoped_lock lock(mutex_);
     TextureResidencyStats copy = stats_;
     copy.residentCount = resident_.size();
-    std::scoped_lock lock(mutex_);
     copy.pendingCount = pending_.size();
     return copy;
 }

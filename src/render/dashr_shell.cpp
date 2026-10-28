@@ -1,6 +1,8 @@
 #include "dve/render/dashr_shell.hpp"
+#include "dve/rhi/pipeline_preparation.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <span>
@@ -221,7 +223,10 @@ bool create_dashr_shell_renderer(
     }
     DashrShellRendererResources r;
     std::string local;
+    rhi::PipelinePreparationQueue prewarm(device);
+    constexpr std::uint64_t epoch=1U; // local queue only
     auto fail=[&](std::string message) {
+        prewarm.clear(); // retire native pipelines before their bind layouts
         std::string ignored;(void)destroy_dashr_shell_renderer(device,r,&ignored);
         set_error(error,std::move(message));return false;
     };
@@ -315,19 +320,17 @@ bool create_dashr_shell_renderer(
         {1U,rhi::VertexFormat::Float2,
          static_cast<std::uint32_t>(offsetof(GpuDashrShellVertex,uvX))}
     };
-    r.pipeline=device.create_graphics_pipeline(pipeline,&local);
-    if(!r.pipeline)return fail(local);
-
+    if(!prewarm.stage_graphics(epoch,"DASHR live conservative shell",pipeline,&local))
+        return fail(local);
     if(!bytecode.pbrFragment.empty()) {
         rhi::GraphicsPipelineDesc pbr=pipeline;
         pbr.debugName="DASHR live PBR shell";
         pbr.fragmentBytecode=bytecode.pbrFragment;
         pbr.bindGroupLayouts={
             r.constantsLayout,r.surfaceLayout,r.materialLayout,r.environmentLayout,r.shadowLayout};
-        r.pbrPipeline=device.create_graphics_pipeline(pbr,&local);
-        if(!r.pbrPipeline)return fail(local);
+        if(!prewarm.stage_graphics(epoch,"DASHR live PBR shell",std::move(pbr),&local))
+            return fail(local);
     }
-
     if(!bytecode.shadowFragment.empty()) {
         rhi::GraphicsPipelineDesc shadow=pipeline;
         shadow.debugName="DASHR displaced shadow caster";
@@ -340,9 +343,30 @@ bool create_dashr_shell_renderer(
         shadow.depthWrite=true;
         shadow.depthCompare=rhi::CompareOp::LessEqual;
         shadow.cullMode=rhi::CullMode::Disabled;
-        r.shadowPipeline=device.create_graphics_pipeline(shadow,&local);
-        if(!r.shadowPipeline)return fail(local);
+        if(!prewarm.stage_graphics(epoch,"DASHR displaced shadow caster",std::move(shadow),&local))
+            return fail(local);
     }
+
+    const auto prepared=prewarm.pump(4U,std::chrono::hours{1});
+    if(prepared.failed || !prewarm.ready_to_publish(epoch)) {
+        for(const auto* name:{"DASHR live conservative shell","DASHR live PBR shell",
+                               "DASHR displaced shadow caster"}) {
+            if(prewarm.state(epoch,name)==rhi::PipelinePreparationState::Failed)
+                return fail("DASHR prewarm "+std::string(name)+": "+
+                            std::string(prewarm.failure_reason(epoch,name)));
+        }
+        return fail("DASHR required pipelines not prepared");
+    }
+    r.pipeline=prewarm.take_graphics(epoch,"DASHR live conservative shell");
+    if(!bytecode.pbrFragment.empty())
+        r.pbrPipeline=prewarm.take_graphics(epoch,"DASHR live PBR shell");
+    if(!bytecode.shadowFragment.empty())
+        r.shadowPipeline=prewarm.take_graphics(epoch,"DASHR displaced shadow caster");
+    if(!r.pipeline || (!bytecode.pbrFragment.empty() && !r.pbrPipeline) ||
+       (!bytecode.shadowFragment.empty() && !r.shadowPipeline))
+        return fail("DASHR failed to adopt precompiled pipeline");
+    r.preparedPipelineVariants=prepared.compiled;
+    prewarm.discard_epoch(epoch);
 
     if(out.valid()) {
         std::string ignored;(void)destroy_dashr_shell_renderer(device,out,&ignored);

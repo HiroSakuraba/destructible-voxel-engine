@@ -625,7 +625,9 @@ bool apply_voxel_marks_and_decals(const VoxelReferenceInstance& instance, const 
                                   Float3 worldPosition, Float3 mapMeters, float footprintMeters, Float3& normal,
                                   VoxelReferenceRenderStats& stats) noexcept {
     if (!extras.surfaceMarks.empty()) {
-        const SurfaceMarkSample marks = sample_surface_marks(extras.surfaceMarks, instance.objectId, mapMeters, footprintMeters);
+        // The same id the pixel reports (RenderTarget::objectId): the instance's own, else its object's.
+        const std::uint64_t markObjectId = instance.objectId != 0U ? instance.objectId : instance.object->id();
+        const SurfaceMarkSample marks = sample_surface_marks(extras.surfaceMarks, markObjectId, mapMeters, footprintMeters);
         if (marks.any()) { apply_surface_marks(material, marks); ++stats.markedSurfaces; }
     }
     if (extras.decals.empty()) return false;

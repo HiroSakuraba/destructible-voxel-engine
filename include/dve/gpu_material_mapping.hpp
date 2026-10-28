@@ -12,6 +12,10 @@ inline constexpr std::uint32_t kGpuMaterialMappingDoubleSided = 1U << 0U;
 inline constexpr std::uint32_t kGpuMaterialMappingBaseColorSrgb = 1U << 1U;
 inline constexpr std::uint32_t kGpuMaterialMappingEmissiveSrgb = 1U << 2U;
 inline constexpr std::uint32_t kGpuMaterialMappingDetailBaseColorSrgb = 1U << 3U;
+// Sampling contract for the NORMAL channel only: BC5 stores encoded XY, while
+// Z must be reconstructed as the positive hemisphere in the fragment shader.
+// Set this bit from the ACTUALLY BOUND texture format, not a compression request.
+inline constexpr std::uint32_t kGpuMaterialMappingNormalBc5 = 1U << 4U;
 
 // Byte-exact mirror of shaders/common/material_mapping.hlsli. Texture indices refer to the
 // renderer-owned polygon texture table; 0xFFFFFFFF means that the channel is unbound.

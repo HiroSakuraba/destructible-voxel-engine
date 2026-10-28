@@ -58,15 +58,20 @@ float3 SampleLiveMaterialNormal(Texture2D<float4> image,SamplerState samplerStat
     if(m.mappingMode<kMaterialMappingWorldTriplanar){
         const float2 uv=LiveMaterialUv(m,uv0,uv1,m.normalTexcoord);
         return ApplyLiveDerivativeNormal(N,worldPosition,uv,
-            image.SampleGrad(samplerState,uv,ddx(uv),ddy(uv)).xyz,m.normalScale);
+            DecodeMaterialNormalSample(
+                image.SampleGrad(samplerState,uv,ddx(uv),ddy(uv)).xyz,
+                m.mappingFlags),m.normalScale);
     }
     const bool local=m.mappingMode==kMaterialMappingObjectTriplanar;
     const float3 sourceN=local?mul(transpose(objectRotation),N):N;
     const float3 weights=MaterialTriplanarWeights(sourceN,m.triplanarBlendSharpness);
     float2 x,y,z;LiveMaterialProjections(m,local?objectPosition:worldPosition,x,y,z);
-    float3 tx=image.SampleGrad(samplerState,x,ddx(x),ddy(x)).xyz*2-1;
-    float3 ty=image.SampleGrad(samplerState,y,ddx(y),ddy(y)).xyz*2-1;
-    float3 tz=image.SampleGrad(samplerState,z,ddx(z),ddy(z)).xyz*2-1;
+    float3 tx=DecodeMaterialNormalSample(
+        image.SampleGrad(samplerState,x,ddx(x),ddy(x)).xyz,m.mappingFlags)*2-1;
+    float3 ty=DecodeMaterialNormalSample(
+        image.SampleGrad(samplerState,y,ddx(y),ddy(y)).xyz,m.mappingFlags)*2-1;
+    float3 tz=DecodeMaterialNormalSample(
+        image.SampleGrad(samplerState,z,ddx(z),ddy(z)).xyz,m.mappingFlags)*2-1;
     tx.xy*=m.normalScale;ty.xy*=m.normalScale;tz.xy*=m.normalScale;
     // Whiteout triplanar blend (matches dve::triplanar_whiteout_normal in
     // include/dve/triplanar_normal.hpp): a neutral (0,0,1) sample reproduces sn exactly.

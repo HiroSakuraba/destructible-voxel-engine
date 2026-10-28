@@ -3,6 +3,7 @@
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <chrono>
 #include <cstring>
 #include <cstdlib>
 #include <fstream>
@@ -13,6 +14,7 @@
 #include <vector>
 
 #include "dve/rhi/vulkan_device.hpp"
+#include "dve/rhi/pipeline_preparation.hpp"
 
 namespace {
 void require(bool condition, const char* message) {
@@ -217,8 +219,18 @@ int main() {
         pipelineDesc.depthFormat = TextureFormat::D32Float;
         pipelineDesc.cullMode = CullMode::Disabled;
         pipelineDesc.bindGroupLayouts = {sampledLayout};
-        const GraphicsPipelineHandle pipeline = device.create_graphics_pipeline(pipelineDesc, &error);
-        require(static_cast<bool>(pipeline), error.c_str());
+        // PSO-2: prepare the complete Vulkan PSO before frame recording.
+        // take_graphics transfers the already-compiled handle without a new
+        // driver call on the drawing path.
+        PipelinePreparationQueue prepared(device);
+        require(prepared.stage_graphics(1U,"offscreen-triangle",pipelineDesc,&error),error.c_str());
+        const auto prep=prepared.pump(1U,std::chrono::microseconds{1000000});
+        require(prep.compiled==1U && prepared.ready_to_publish(1U),
+                "graphics PSO not ready before offscreen draw");
+        const GraphicsPipelineHandle pipeline=prepared.take_graphics(1U,"offscreen-triangle");
+        require(static_cast<bool>(pipeline), "prepared graphics pipeline handle unavailable");
+        prepared.discard_epoch(1U);
+
 
         const BufferHandle vertices = device.create_buffer({
             16U, BufferUsage::Vertex, MemoryDomain::DeviceLocal,
@@ -327,6 +339,16 @@ int main() {
                 "Vulkan graphics statistics are incorrect");
         require(stats.texturesCreated == stats.texturesDestroyed,
                 "Vulkan texture lifetime is unbalanced");
+        // PSO-1 timing covers driver vkCreate*Pipelines calls, not GPU draw time.
+        const auto cache=device.pipeline_cache_stats();
+        require(cache.graphicsAttempts>=1U,"PSO-1 Vulkan pipeline creation not measured");
+        std::cout<<"PSO-1 graphics cache_available="<<cache.cacheAvailable
+                 <<" pso_seed_accepted="<<cache.diskSeedAccepted
+                 <<" create_calls="<<cache.graphicsAttempts
+                 <<" total_ns="<<cache.graphicsTotalNanoseconds
+                 <<" max_ns="<<cache.graphicsMaxNanoseconds<<"\n";
+        if(const char* path=std::getenv("DVE_PSO_CACHE_FILE");path&&*path)
+            require(device.flush_pipeline_cache(),"PSO-1 failed to persist validated cache");
         std::cout << "Vulkan offscreen indexed graphics tests passed\n";
         return 0;
     } catch (const std::exception& exception) {

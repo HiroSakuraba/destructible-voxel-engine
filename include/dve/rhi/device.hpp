@@ -93,26 +93,63 @@ enum class TextureFormat : std::uint8_t {
     BC5RGUnorm,
     D32Float,
     // RGB is decoded before filtering; alpha remains linear.
-    RGBA8Srgb
+    RGBA8Srgb,
+    // T1: sampled, hardware-native compressed textures. Appended to preserve existing enum values.
+    BC4RUnorm, BC6HRGBUfloat, BC6HRGBSfloat, BC7RGBAUnorm, BC7RGBASrgb,
+    ETC2RGBUnorm, ETC2RGBSrgb, ETC2RGBAUnorm, ETC2RGBASrgb,
+    EACR11Unorm, EACRG11Unorm,
+    ASTC4x4RGBAUnorm, ASTC4x4RGBASrgb,
+    ASTC6x6RGBAUnorm, ASTC6x6RGBASrgb,
+    ASTC8x8RGBAUnorm, ASTC8x8RGBASrgb
 };
 
+// ASTC is variable-block-size; callers must use the format-specific extent.
+[[nodiscard]] constexpr std::uint32_t texture_block_width(TextureFormat format) noexcept {
+    switch (format) {
+    case TextureFormat::ASTC6x6RGBAUnorm: case TextureFormat::ASTC6x6RGBASrgb: return 6U;
+    case TextureFormat::ASTC8x8RGBAUnorm: case TextureFormat::ASTC8x8RGBASrgb: return 8U;
+    default: return 4U;
+    }
+}
+[[nodiscard]] constexpr std::uint32_t texture_block_height(TextureFormat format) noexcept {
+    return texture_block_width(format);
+}
 [[nodiscard]] constexpr bool is_block_compressed(TextureFormat format) noexcept {
-    return format == TextureFormat::BC1RGBAUnorm || format == TextureFormat::BC1RGBASrgb ||
-           format == TextureFormat::BC3RGBAUnorm || format == TextureFormat::BC3RGBASrgb ||
-           format == TextureFormat::BC5RGUnorm;
+    switch (format) {
+    case TextureFormat::BC1RGBAUnorm: case TextureFormat::BC1RGBASrgb:
+    case TextureFormat::BC3RGBAUnorm: case TextureFormat::BC3RGBASrgb:
+    case TextureFormat::BC5RGUnorm: case TextureFormat::BC4RUnorm:
+    case TextureFormat::BC6HRGBUfloat: case TextureFormat::BC6HRGBSfloat:
+    case TextureFormat::BC7RGBAUnorm: case TextureFormat::BC7RGBASrgb:
+    case TextureFormat::ETC2RGBUnorm: case TextureFormat::ETC2RGBSrgb:
+    case TextureFormat::ETC2RGBAUnorm: case TextureFormat::ETC2RGBASrgb:
+    case TextureFormat::EACR11Unorm: case TextureFormat::EACRG11Unorm:
+    case TextureFormat::ASTC4x4RGBAUnorm: case TextureFormat::ASTC4x4RGBASrgb:
+    case TextureFormat::ASTC6x6RGBAUnorm: case TextureFormat::ASTC6x6RGBASrgb:
+    case TextureFormat::ASTC8x8RGBAUnorm: case TextureFormat::ASTC8x8RGBASrgb:
+        return true;
+    default: return false;
+    }
 }
 [[nodiscard]] constexpr std::size_t texture_block_bytes(TextureFormat format) noexcept {
-    return format == TextureFormat::BC1RGBAUnorm || format == TextureFormat::BC1RGBASrgb ? 8U :
-           is_block_compressed(format) ? 16U : 0U;
+    switch (format) {
+    case TextureFormat::BC1RGBAUnorm: case TextureFormat::BC1RGBASrgb:
+    case TextureFormat::BC4RUnorm: case TextureFormat::ETC2RGBUnorm:
+    case TextureFormat::ETC2RGBSrgb: case TextureFormat::EACR11Unorm: return 8U;
+    default: return is_block_compressed(format) ? 16U : 0U;
+    }
 }
 [[nodiscard]] constexpr std::size_t texture_row_bytes(TextureFormat format, std::uint32_t width) noexcept {
     return is_block_compressed(format)
-        ? static_cast<std::size_t>((width + 3U) / 4U) * texture_block_bytes(format)
+        ? (static_cast<std::size_t>(width) + texture_block_width(format) - 1U) /
+              texture_block_width(format) * texture_block_bytes(format)
         : static_cast<std::size_t>(width) * (format == TextureFormat::RGBA32Sint ? 16U :
               format == TextureFormat::RGBA16Float ? 8U : format == TextureFormat::RG16Uint ? 4U : 4U);
 }
 [[nodiscard]] constexpr std::size_t texture_rows(TextureFormat format, std::uint32_t height) noexcept {
-    return is_block_compressed(format) ? (height + 3U) / 4U : height;
+    return is_block_compressed(format)
+        ? (static_cast<std::size_t>(height) + texture_block_height(format) - 1U) /
+              texture_block_height(format) : height;
 }
 enum class IndexFormat : std::uint8_t { Uint16, Uint32 };
 enum class PrimitiveTopology : std::uint8_t { TriangleList };

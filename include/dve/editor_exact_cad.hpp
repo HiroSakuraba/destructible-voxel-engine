@@ -105,12 +105,28 @@ struct ExactCadImportResult {
     const std::filesystem::path& projectRoot, const std::filesystem::path& cadFile, EditorObjectId id,
     const ExactCadSettings& settings = ExactCadSettings::from_environment(), const ExactCadRunner& runner = {});
 
+// An analytic solid (brepkernel `primitive`) that stands in for an operand's .brep file: the stock
+// tube and its bore, a tube's solid outer body for coping, a large slab for a plane cut. Built in
+// a scratch folder for the one Boolean, so no file of it is stored in the project.
+struct ExactPrimitive {
+    enum class Kind { Absent, Box, Cylinder };
+    Kind kind{Kind::Absent};
+    std::array<double, 3> size{};      // Box: edge lengths along X, Y, Z (metres)
+    double radius{}, height{};         // Cylinder
+    char axis{'y'};                    // Cylinder axis: x, y or z
+    std::array<double, 3> centre{};    // metres
+};
+
 struct ExactBooleanResult {
     PolygonEditResult edit;            // mesh in A's mesh-local frame, A's materials
     ExactBrepSource source;            // project-owned .brep of the certified result
     ExactCollisionResult collision;    // convex pieces of the result, when it is an extrusion
     bool refused{};
     bool empty{};                      // certified, but no material left
+    std::uint64_t solids{};            // separate solids in the certified result
+    bool meshWatertight{true};         // brepkernel's check of the re-meshed result (true when not reported)
+    double exactVolume{};              // certified volume, A's mesh frame (before voxelScale)
+    double volumeA{};                  // A's own volume, same frame
     std::string refusalKind;
     std::string advisory;              // one line of uncertified second opinions, when refused
     std::string summary;
@@ -123,7 +139,11 @@ struct ExactBooleanRequest {
     EditorObjectId a{}, b{};
     MeshBoolean operation{MeshBoolean::Union};
     std::filesystem::path brepA, brepB;           // absolute
-    std::array<double, 12> placement{};           // B mesh-local -> A mesh-local
+    std::array<double, 12> placement{};           // B mesh-local -> A mesh-local; all zero = identity
+    // Analytic solids instead of the .brep files (brepA / brepB stay empty for an operand that has one).
+    ExactPrimitive primitiveA, primitiveB;
+    std::string origin;                           // provenance text stored on the result ("" = "boolean:<op>")
+    std::string summaryPrefix;                    // status text before the volume ("" = "Certified exact Boolean")
     std::string nameA;
     CookedPolygonAsset materialsFromA;            // materials/bindings/textures only
     std::uint64_t operandStamp{};

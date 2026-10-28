@@ -5,6 +5,7 @@
 #include "dve/player/player_app.hpp"
 #include "dve/player/player_renderer.hpp"
 #include <cmath>
+#include <array>
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
@@ -14,13 +15,14 @@ void check(bool ok,const std::string& why){if(!ok)throw std::runtime_error(why);
 void scene_validation(){
  auto doc=make_water_starter();std::string error;
  check(validate_editor_prototype(doc,&error),"W1 starter validates: "+error);
- unsigned vessels=0,oceans=0;
+ unsigned vessels=0,oceans=0,coasts=0;
  for(const auto& [id,o]:doc.objects()){
   (void)id;
   if(find_component_by_type(o.components,"dve.prototype.water_vessel"))++vessels;
   if(find_component_by_type(o.components,"dve.prototype.water_ocean"))++oceans;
+  if(find_component_by_type(o.components,"dve.prototype.water_coast"))++coasts;
  }
- check(vessels==5&&oceans==1,"starter contains five specialized hulls and one ocean");
+ check(vessels==6&&oceans==1&&coasts==1,"starter contains six hulls, ocean and coastal breaking zone");
  auto invalid=make_water_starter();
  for(const auto& [id,o]:invalid.objects()){
   (void)o;
@@ -52,8 +54,9 @@ void integration(){
  const auto sailboat=app->world().find_by_name("Sailboat");
  const auto speedboat=app->world().find_by_name("Speedboat");
  const auto waveRunner=app->world().find_by_name("Wave Runner");
- check(bool(dinghy)&&bool(ship)&&bool(sailboat)&&bool(speedboat)&&bool(waveRunner),
-       "all five distinct craft exported and loaded");
+ const auto surfboard=app->world().find_by_name("Surfboard");
+ check(bool(dinghy)&&bool(ship)&&bool(sailboat)&&bool(speedboat)&&bool(waveRunner)&&bool(surfboard),
+       "six distinct craft including beach surfboard exported and loaded");
  const auto before=*app->world().position(*dinghy);
  platform::PlatformEvent input{};input.type=platform::EventType::KeyDown;input.key="w";
  app->handle_event(input);
@@ -93,24 +96,61 @@ void integration(){
  // Restore existing #2 selection for the legacy save-position round trip.
  input.type=platform::EventType::KeyDown;input.key="2";app->handle_event(input);app->tick(1.F/60.F);
  input.type=platform::EventType::KeyUp;app->handle_event(input);
- auto save=app->save_game("water",&error);check(bool(save),"save W1 state: "+error);
+ std::vector<GameRenderObject> objects;
+ const auto beforeSave=app->render_view(objects,16.F/9.F);
+ check(beforeSave.ocean!=nullptr&&!beforeSave.ocean->wakes().empty(),
+       "fast driven boats emit real water disturbances");
+ const auto savedWakeCount=beforeSave.ocean->wakes().size();
+ const auto firstWake=beforeSave.ocean->wakes().front();
+ const auto savedSample=beforeSave.ocean->sample(firstWake.position.x,firstWake.position.y,beforeSave.oceanTime);
+ auto save=app->save_game("water",&error);check(bool(save),"save W3 state: "+error);
  const auto savedPos=*app->world().position(*ship);
  for(unsigned i=0;i<30;++i)app->tick(1.F/60.F);
  check(bool(app->load_game("water",&error)),"restore W1: "+error);
  check(length(subtract(*app->world().position(*ship),savedPos))<.001F,
        "water save retains ship 6-DOF position");
+ const auto afterLoad=app->render_view(objects,16.F/9.F);
+ check(afterLoad.ocean->wakes().size()==savedWakeCount,
+       "W3 save and restore retain exact active physical wake count");
+ const auto restoredSample=afterLoad.ocean->sample(firstWake.position.x,firstWake.position.y,afterLoad.oceanTime);
+ check(std::abs(restoredSample.height-savedSample.height)<.0001F,
+       "wake surface after reload agrees with saved water surface");
  auto renderer=make_cpu_player_renderer(nullptr);
  check(renderer->resize(320,180,&error),error);
- std::vector<GameRenderObject> objects;
  auto waterView=app->render_view(objects,16.F/9.F);
- check(waterView.ocean!=nullptr&&waterView.ocean->waves().size()>0,
-       "player sees authoritative physics ocean waves");
+ check(waterView.ocean!=nullptr&&waterView.ocean->waves().size()>0&&waterView.ocean->has_coast(),
+       "player sees authoritative ocean, waves and coastal bathymetry");
  check(renderer->render(waterView,&error),"render water: "+error);
  const auto pixels=renderer->readback()->pixels;
+ // The W3 spray projection uses the same depth-aware rendering path as the
+ // real spray particles spawned from the ships' fixed-tick bow emitters.
+ WaterSprayEffect spray{};
+ const auto forward=normalize(subtract(waterView.camera.target,waterView.camera.position));
+ spray.position=add(waterView.camera.position,multiply(forward,5.F));
+ spray.radius=.8F;spray.opacity=.95F;spray.lifetime=1;
+ const std::array<WaterSprayEffect,1> effects{spray};
+ waterView.waterSpray=effects;
+ check(renderer->render(waterView,&error),"render injected bow spray: "+error);
+ check(renderer->readback()->pixels!=pixels,
+       "spray is rendered in front of the physical ocean");
+ waterView.waterSpray={};
  waterView.ocean=nullptr;
  check(renderer->render(waterView,&error),"render no water: "+error);
  check(renderer->readback()->pixels!=pixels,
        "analytic ocean renders visibly and depth-composites with ships");
+ input.type=platform::EventType::KeyDown;input.key="6";app->handle_event(input);
+ app->tick(1.F/60.F);
+ input.type=platform::EventType::KeyUp;app->handle_event(input);
+ check(app->prototype_hud()->stats.find("SURFBOARD")!=std::string::npos,
+       "sixth craft selects playable surfboard");
+ const auto startSurf=*app->world().position(*surfboard);
+ input.type=platform::EventType::KeyDown;input.key="w";app->handle_event(input);
+ for(unsigned i=0;i<90;++i)app->tick(1.F/60.F);
+ const auto afterSurf=*app->world().position(*surfboard);
+ check(std::isfinite(afterSurf.x)&&std::isfinite(afterSurf.y)&&std::isfinite(afterSurf.z),
+       "board rider stays in finite physical state");
+ check(length(subtract(startSurf,afterSurf))>.01F,
+       "paddling and surf currents affect rider position");
  std::filesystem::remove_all(root);
 }
 }

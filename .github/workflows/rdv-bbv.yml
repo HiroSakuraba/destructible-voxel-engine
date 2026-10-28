@@ -1,0 +1,95 @@
+name: RDV BBV native Vulkan parity
+
+on:
+  pull_request:
+    paths:
+      - 'src/render/rdv_*.cpp'
+      - 'include/dve/render/rdv_*.hpp'
+      - 'tests/test_rdv_bbv.cpp'
+      - 'shaders/rdv_bbv_trace.hlsl'
+      - 'shaders/shader_manifest.json'
+      - '.github/workflows/rdv-bbv.yml'
+      - 'CMakeLists.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bbv-native:
+    name: bbv-native-vulkan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install CPU Vulkan ICD and shader compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build glslang-tools spirv-tools libvulkan1 mesa-vulkan-drivers vulkan-tools
+      - name: Configure minimal RHI build
+        run: |
+          cmake -S . -B build-rdv -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DDVE_BUILD_RHI=ON -DDVE_BUILD_TESTS=ON \
+            -DDVE_ENABLE_VULKAN_BUFFER_BACKEND=ON \
+            -DDVE_REQUIRE_TEST_GROUPS=Vulkan \
+            -DDVE_BUILD_BENCHMARK=OFF \
+            -DDVE_BUILD_ASSET_COOKER=OFF \
+            -DDVE_BUILD_ASSET_PIPELINE_TESTS=OFF \
+            -DDVE_BUILD_EDITOR=OFF \
+            -DDVE_BUILD_NATIVE_EDITOR=OFF \
+            -DDVE_BUILD_PLATFORM=OFF \
+            -DDVE_BUILD_DEVICE_TEST_RUNNER=OFF \
+            -DDVE_BUILD_AUDIO_SYNTH=OFF \
+            -DDVE_BUILD_LEGACY_X11_HOST=OFF \
+            -DDVE_ENABLE_SDL3_HOST=OFF \
+            -DDVE_ENABLE_FLUODDITY=OFF \
+            -DDVE_ENABLE_SOFT_BODIES=OFF \
+            -DDVE_ENABLE_CPU_HAIR=OFF \
+            -DDVE_ENABLE_VFX_PARTICLES=OFF \
+            -DDVE_ENABLE_PBF_LIQUID=OFF \
+            -DDVE_ENABLE_SIMULATION_ENERGY_COMPILER=OFF \
+            -DDVE_ENABLE_BSPLINE_CLOTH=OFF \
+            -DDVE_ENABLE_GRID_FLUIDS=OFF \
+            -DDVE_ENABLE_FLIP_LIQUIDS=OFF
+      - name: Build focused BBV contract target
+        run: cmake --build build-rdv --target dve_rdv_bbv_tests --parallel 4
+      - name: Compile and validate GPU shader
+        run: |
+          # DVE's Vulkan convention is set 0: b0 -> 0, t# -> 16+#, u# -> 32+#. The shader pins
+          # these with [[vk::binding]] (enabled by RDV_VK_BINDINGS for glslang) because glslang's
+          # --shift-* flags cannot place t-class and u-class structured buffers independently.
+          glslangValidator -D -V --target-env vulkan1.2 -S comp -e main \
+            --hlsl-offsets -DRDV_VK_BINDINGS=1 \
+            -o "$RUNNER_TEMP/rdv_bbv_trace.spv" shaders/rdv_bbv_trace.hlsl
+          spirv-val --target-env vulkan1.2 "$RUNNER_TEMP/rdv_bbv_trace.spv"
+          spirv-dis "$RUNNER_TEMP/rdv_bbv_trace.spv" > "$RUNNER_TEMP/rdv_bbv_trace.spvasm"
+          for want in gBbvBricks_0:16 gBbvRays_0:17 gBbvResults_0:32; do
+            name="${want%%:*}"; binding="${want##*:}"
+            grep -Eq "OpDecorate %${name} Binding ${binding}$" "$RUNNER_TEMP/rdv_bbv_trace.spvasm" || {
+              echo "::error::${name} is not at descriptor binding ${binding}"
+              grep -E "Binding" "$RUNNER_TEMP/rdv_bbv_trace.spvasm"
+              exit 1
+            }
+          done
+      - name: Select software ICD and inspect Vulkan capabilities
+        run: |
+          echo "Installed Vulkan ICD manifests:"
+          ls -la /usr/share/vulkan/icd.d/ || true
+          ICD="$(find /usr/share/vulkan/icd.d -maxdepth 1 -name 'lvp_icd*.json' -print -quit)"
+          if [ -z "$ICD" ]; then
+            echo "::error::Mesa Lavapipe ICD manifest was not installed"
+            exit 1
+          fi
+          echo "VK_ICD_FILENAMES=$ICD" >> "$GITHUB_ENV"
+          echo "VK_DRIVER_FILES=$ICD" >> "$GITHUB_ENV"
+          VK_ICD_FILENAMES="$ICD" vulkaninfo --summary
+      - name: Run native GPU ray query and CPU oracle parity
+        env:
+          DVE_RDV_TRACE_SPV: ${{ runner.temp }}/rdv_bbv_trace.spv
+          # The test fails (instead of silently skipping) when no Vulkan device or shader is found.
+          DVE_REQUIRE_VULKAN: "1"
+          # And no part of the test may be Skipped (dve_test_skip.hpp): this job has a software ICD.
+          DVE_REQUIRE_COMPLETE_TESTS: "1"
+        run: ctest --test-dir build-rdv -R '^dve_rdv_bbv_tests$' --output-on-failure

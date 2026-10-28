@@ -178,6 +178,17 @@ ComponentTypeRegistry ComponentTypeRegistry::make_default() {
          {"origin",std::string{},false,false,"Origin"},
          {"deflection",0.0,false,false,"Mesh accuracy (m, mesh frame)"},
          {"angular",0.0,false,false,"Angular accuracy (rad)"}}}, &ignored);
+    // Hollow exact tube (editor_exact_tube.hpp): what the exact B-rep was built from and the cuts
+    // applied to it. A record for people and for the cope and plane-cut commands; the B-rep is the
+    // truth, so editing these rows does not change the geometry. Authoring-only.
+    (void)registry.register_type({"dve.exact_tube","Exact Tube",false,
+        {{"profile",std::string{"round"},true,false,"Profile: round / square / rect"},
+         {"width",0.0,true,false,"Outer diameter or width (m, mesh frame)"},
+         {"height",0.0,true,false,"Outer height (m, mesh frame)"},
+         {"wall",0.0,true,false,"Wall thickness (m)"},
+         {"length",0.0,true,false,"Length (m)"},
+         {"axis",std::string{"y"},true,false,"Axis: x / y / z"},
+         {"cuts",std::string{},false,false,"Cope and plane cuts applied"}}}, &ignored);
     (void)registry.register_type({
         "dve.script", "Lua Script", true,
         {{"asset", std::string{}, true, true}, {"startup", false, false, false}}}, &ignored);

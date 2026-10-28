@@ -1,0 +1,64 @@
+name: T1 native compressed textures and bc7f proof of concept
+on:
+  pull_request:
+    paths:
+      - "CMakeLists.txt"
+      - "include/dve/rhi/device.hpp"
+      - "src/rhi/vulkan_device.cpp"
+      - "src/rhi/vulkan_loader_api.hpp"
+      - "src/rhi/null_device.cpp"
+      - "src/compressed_texture.cpp"
+      - "tests/test_texture_t1_formats.cpp"
+      - "tests/test_vulkan_texture_t1_formats.cpp"
+      - "apps/dve_device_test_runner.cpp"
+      - "apps/dve_bc7f_poc.cpp"
+      - "docs/COMPRESSED_TEXTURES.md"
+      - ".github/workflows/texture-t1.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-formats:
+    name: T1 native formats (GCC release)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: |
+          cmake -S . -B build-t1 -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DDVE_BUILD_TESTS=ON -DDVE_BUILD_RHI=ON -DDVE_BUILD_BENCHMARK=OFF \
+            -DDVE_BUILD_ASSET_COOKER=OFF -DDVE_BUILD_ASSET_PIPELINE_TESTS=OFF \
+            -DDVE_BUILD_EDITOR=OFF -DDVE_BUILD_NATIVE_EDITOR=OFF \
+            -DDVE_BUILD_PLATFORM=ON -DDVE_BUILD_PLAYER=ON -DDVE_ENABLE_SDL3_HOST=OFF \
+            -DDVE_BUILD_DEVICE_TEST_RUNNER=OFF \
+            -DDVE_ENABLE_FLUODDITY=OFF -DDVE_ENABLE_SIMULATION_ENERGY_COMPILER=OFF \
+            -DDVE_ENABLE_SOFT_BODIES=OFF -DDVE_ENABLE_CPU_HAIR=OFF \
+            -DDVE_REQUIRE_TEST_GROUPS=Vulkan,Player
+      - name: Compile T1 and Vulkan mapping
+        run: cmake --build build-t1 --target dve_compressed_texture_tests dve_texture_t1_format_tests dve_vulkan_texture_t1_format_tests dve_rhi_vulkan --parallel 2
+      - name: Run compressed texture contracts
+        # dve_vulkan_texture_t1_format_tests exits 77 (Skipped, ctest exit 0) on this runner: no GPU.
+        run: ctest --test-dir build-t1 -R '^(dve_compressed_texture_tests|dve_texture_t1_format_tests|dve_vulkan_texture_t1_format_tests)$' --output-on-failure
+
+  bc7f-optin:
+    name: bc7f pinned upstream experiment
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure with bc7f proof of concept enabled
+        run: |
+          cmake -S . -B build-bc7f -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DDVE_ENABLE_BC7F_POC=ON -DDVE_BUILD_TESTS=OFF \
+            -DDVE_BUILD_RHI=OFF -DDVE_BUILD_PLATFORM=OFF \
+            -DDVE_BUILD_ASSET_COOKER=OFF -DDVE_BUILD_EDITOR=OFF \
+            -DDVE_BUILD_BENCHMARK=OFF -DDVE_BUILD_ASSET_PIPELINE_TESTS=OFF \
+            -DDVE_BUILD_NATIVE_EDITOR=OFF -DDVE_ENABLE_SDL3_HOST=OFF \
+            -DDVE_ENABLE_FLUODDITY=OFF
+      - name: Compile pinned bc7f
+        run: cmake --build build-bc7f --target dve_bc7f_poc --parallel 2
+      - name: Run 4096-block encoder comparison
+        run: ./build-bc7f/dve_bc7f_poc

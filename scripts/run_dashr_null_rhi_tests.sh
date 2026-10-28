@@ -14,8 +14,10 @@ common_sources="
     $repo_dir/src/dashr_seam_map.cpp
     $repo_dir/src/rhi/device.cpp
     $repo_dir/src/rhi/null_device.cpp
+    $repo_dir/src/rhi/pipeline_preparation.cpp
     $repo_dir/src/polygon_asset.cpp
     $repo_dir/src/material_surface_detail.cpp
+    $repo_dir/src/material_layer_rules.cpp
     $repo_dir/src/matrix4.cpp
     $repo_dir/src/master_material.cpp
     $repo_dir/src/material_parameter_collection.cpp

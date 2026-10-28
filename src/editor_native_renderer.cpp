@@ -3709,10 +3709,15 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         constexpr std::size_t kMaxDrawnBoxes = 4000;
         std::size_t drawn = 0, skipped = 0;
         const auto draw_object = [&](const EditorObject& object) {
-            if (!object.flags.visible || controller.is_isolated_out(object.id)) return;
+            if (controller.is_isolated_out(object.id) ||
+                (shading != ShadingMode::Collision && !object.flags.visible)) return;
             for (const VoxelBox& box : controller.collision_proxy(object.id)) {
-                if (drawn >= kMaxDrawnBoxes) { ++skipped; continue; }
-                draw_voxel_box(viewportPainter, controller, object, box, rgb(255,140,58));
+                const auto& selected = controller.selected_collision();
+                const bool focused = selected && selected->objectId == object.id && selected->box == box;
+                // Always render the focused collider even when the normal overlay is capped.
+                if (drawn >= kMaxDrawnBoxes && !focused) { ++skipped; continue; }
+                draw_voxel_box(viewportPainter, controller, object, box,
+                               focused ? rgb(255,245,80) : rgb(255,140,58));
                 ++drawn;
             }
         };

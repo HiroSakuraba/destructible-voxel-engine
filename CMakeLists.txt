@@ -946,6 +946,7 @@ if(DVE_BUILD_EDITOR)
         src/editor_mesh_boolean.cpp
         src/editor_edge_bevel.cpp
         src/editor_exact_cad.cpp
+        src/editor_exact_tube.cpp
         src/editor_topology.cpp
         src/editor_mesh_displacement.cpp
         src/editor_uv.cpp
@@ -3242,6 +3243,9 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_editor_exact_cad_tests tests/test_editor_exact_cad.cpp)
         target_link_libraries(dve_editor_exact_cad_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_exact_cad_tests COMMAND dve_editor_exact_cad_tests)
+        add_executable(dve_editor_exact_tube_tests tests/test_editor_exact_tube.cpp)
+        target_link_libraries(dve_editor_exact_tube_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_exact_tube_tests COMMAND dve_editor_exact_tube_tests)
         add_executable(dve_editor_native_polygon_tests tests/test_editor_native_polygon.cpp)
         target_link_libraries(dve_editor_native_polygon_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_native_polygon_tests COMMAND dve_editor_native_polygon_tests)

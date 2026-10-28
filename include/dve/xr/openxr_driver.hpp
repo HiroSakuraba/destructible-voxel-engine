@@ -15,7 +15,8 @@ struct OpenXrFunctions {
 };
 struct OpenXrRenderer {
     virtual ~OpenXrRenderer() = default;
-    // All acquired images must be released even on failure. Returned layer pointers
+    // Release acquired images when possible; report unrecoverable lifecycle failure
+    // so the application can stop and tear down. Returned layer pointers
     // and their nested data must remain valid until the subsequent end_frame call.
     virtual bool render(XrTime time, std::vector<const XrCompositionLayerBaseHeader*>& layers,
                         std::string& error) = 0;

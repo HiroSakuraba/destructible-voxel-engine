@@ -14,7 +14,8 @@ struct Driver {
     virtual bool wait_frame(FrameTiming& timing, std::string& error) = 0;
     virtual bool begin_frame(std::string& error) = 0;
     // The renderer is responsible for view location and swapchain acquire/wait/release.
-    // Returning false must leave no acquired image outstanding.
+    // On failure the renderer must report any unrecoverable acquired-image state
+    // to the application, which must stop rendering and tear down the session.
     virtual bool render_frame(const FrameTiming& timing, std::string& error) = 0;
     // submitLayers=false submits an empty frame. This must still be called after a
     // successful begin_frame if render_frame fails or shouldRender is false.

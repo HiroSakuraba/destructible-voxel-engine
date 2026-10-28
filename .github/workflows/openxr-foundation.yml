@@ -52,9 +52,9 @@ jobs:
         run: >-
           cmake --build build-xr --parallel 3 --target
           dve_xr_session_loop_tests dve_openxr_driver_tests dve_openxr_events_views_tests
-          dve_openxr_resources_tests dve_openxr_projection_tests dve_openxr_vulkan_tests
+          dve_openxr_resources_tests dve_openxr_projection_tests dve_openxr_stereo_renderer_tests dve_openxr_configuration_tests dve_openxr_vulkan_tests
           dve_openxr_probe dve_fake_openxr_loader
       - name: Run fake-runtime contract tests
         run: >-
           ctest --test-dir build-xr --output-on-failure
-          -R '^dve_(xr_session_loop|openxr_driver|openxr_events_views|openxr_resources|openxr_projection|openxr_vulkan|openxr_probe)_tests$'
+          -R '^dve_(xr_session_loop|openxr_driver|openxr_events_views|openxr_resources|openxr_projection|openxr_stereo_renderer|openxr_configuration|openxr_vulkan|openxr_probe)_tests$'

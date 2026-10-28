@@ -64,6 +64,17 @@ before their parent or runtime goes away. The projection helper produces right-h
 negative-Z-forward eye projection with Vulkan depth [0,1] and positive-height viewport;
 it does not convert DVE world-space axes or construct a view matrix.
 
+The stereo-rendering coordinator now locates predicted-time views, acquires and waits
+for two distinct per-eye swapchains, invokes a caller-supplied drawing callback, releases
+the images, and assembles the OpenXR projection layer. The callback must bounds-check
+the enumerated image index, perform Vulkan transitions and complete GPU work before
+returning. A thrown callback or a wait/release failure poisons the coordinator when an
+image may still be acquired; the application must stop and safely resolve the image
+lifetime. Untracked poses produce no projection layer. The configuration helpers query
+runtime-recommended stereo image sizes and pick from explicitly supported formats. The
+fake-runtime tests exercise this end-to-end through the session controller, but no
+production Vulkan drawing callback or real headset connection exists yet.
+
 The dedicated `openxr-foundation.yml` workflow compiles these components and runs fake
 API contract tests, not a native runtime or physical GPU/headset test.
 

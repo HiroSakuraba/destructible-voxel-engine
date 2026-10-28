@@ -234,6 +234,7 @@ bool NativeEditorController::measure_at(int x, int y) {
             if (answer->description && hit.face >= 0 && std::size_t(hit.face) < answer->description->faces.size()) {
                 const auto scale = uniform_scale(*object);
                 p.what = describe_exact_face(answer->description->faces[std::size_t(hit.face)], scale.value_or(1.0));
+                p.what += " [face " + std::to_string(hit.face) + "]";
                 if (!scale && answer->description->faces[std::size_t(hit.face)].type != "plane") p.what += " before stretching";
             }
             set_status(measure_readout(), false, 0.0F);

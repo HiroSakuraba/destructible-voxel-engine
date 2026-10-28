@@ -165,6 +165,35 @@ struct ExactBooleanRequest {
 
 [[nodiscard]] bool is_exact_cad_source(const std::filesystem::path& path);
 
+// An OCCT-generated edge fillet. Endpoints are in mesh-local metres; the first
+// and second radius apply at the corresponding endpoints. Candidate validation
+// uses OpenCASCADE and brepkernel import; it is NOT a certified Boolean result.
+struct ExactEdgeFilletRequest {
+    EditorObjectId object{};
+    std::filesystem::path sourcePath;
+    std::array<double, 3> start{}, end{};
+    double radiusStart{}, radiusEnd{};
+    std::optional<std::array<int,2>> facePair; // optional zero-based indices on current exact source
+    std::uint64_t operandStamp{};
+    std::string error;
+};
+struct ExactEdgeFilletResult {
+    ExactCadImportResult imported;
+    std::string error;
+    [[nodiscard]] explicit operator bool() const noexcept { return error.empty() && bool(imported); }
+};
+[[nodiscard]] ExactEdgeFilletRequest prepare_exact_edge_fillet(
+    const std::filesystem::path& projectRoot, const EditorDocument& document, EditorObjectId object,
+    std::array<double,3> start, std::array<double,3> end, double radiusStart, double radiusEnd);
+// Bounded face fillet: two adjacent faces of the same solid with exactly one
+// unambiguous shared open edge; non-adjacent surface blends are not supported.
+[[nodiscard]] ExactEdgeFilletRequest prepare_exact_face_fillet(
+    const std::filesystem::path& projectRoot, const EditorDocument& document, EditorObjectId object,
+    int faceA, int faceB, double radius);
+[[nodiscard]] ExactEdgeFilletResult run_exact_edge_fillet(
+    const std::filesystem::path& projectRoot, const ExactEdgeFilletRequest& request,
+    const ExactCadSettings& settings = ExactCadSettings::from_environment(), const ExactCadRunner& runner = {});
+
 // Re-mesh an exact source at a chosen accuracy (CAD Detail): brepkernel `mesh` with the given chord
 // deflection (mesh-local metres; 0 = brepkernel's default). The source itself does not change.
 struct ExactCadRemeshResult {

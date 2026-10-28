@@ -5487,7 +5487,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
 
     // Naming a selection set: a small field at the top of the viewport.
     if (controller.text_edit().kind == TextEditKind::SelectionSetName || controller.text_edit().kind == TextEditKind::CadDetail ||
-        controller.text_edit().kind == TextEditKind::ExactTube || controller.text_edit().kind == TextEditKind::ExactTubeResize || controller.text_edit().kind == TextEditKind::ExactCopeGap ||
+        controller.text_edit().kind == TextEditKind::ExactTube || controller.text_edit().kind == TextEditKind::ExactTubeResize || controller.text_edit().kind == TextEditKind::ExactEdgeFillet || controller.text_edit().kind == TextEditKind::ExactVariableFillet || controller.text_edit().kind == TextEditKind::ExactFaceFillet || controller.text_edit().kind == TextEditKind::ExactCopeGap ||
         controller.text_edit().kind == TextEditKind::ExactMiter) {
         const UiRect viewport = controller.layout().viewport;
         const int fieldWidth = std::min(420, std::max(160, viewport.width - 32));
@@ -5497,6 +5497,9 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         const std::string label = controller.text_edit().kind == TextEditKind::CadDetail ? "Mesh accuracy (mm): " :
                                   controller.text_edit().kind == TextEditKind::ExactTube ? "Tube: " :
                                   controller.text_edit().kind == TextEditKind::ExactTubeResize ? "Resize tube: " :
+                                  controller.text_edit().kind == TextEditKind::ExactEdgeFillet ? "Fillet: " :
+                                  controller.text_edit().kind == TextEditKind::ExactVariableFillet ? "Variable fillet: " :
+                                  controller.text_edit().kind == TextEditKind::ExactFaceFillet ? "Face fillet: " :
                                   controller.text_edit().kind == TextEditKind::ExactCopeGap ? "Cope gap (mm): " :
                                   controller.text_edit().kind == TextEditKind::ExactMiter ? "Plane cut (deg): " : "Set name: ";
         painter.text(field.x + 10, field.y + 20, label, muted);

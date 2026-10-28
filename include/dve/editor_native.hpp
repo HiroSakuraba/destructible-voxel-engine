@@ -192,6 +192,9 @@ enum class TextEditKind : std::uint8_t {
     CadDetail,                              // CAD Detail: typed mesh accuracy (mm)
     ExactTube,                              // Create Exact Tube: typed "round 50.8 3 600 y"
     ExactTubeResize,                        // regenerate uncut stock tube with a new spec
+    ExactEdgeFillet,                        // one exact edge, constant radius and endpoints
+    ExactVariableFillet,                    // one exact edge, start/end radius and endpoints
+    ExactFaceFillet,                        // two adjacent CAD face indices and radius
     ExactCopeGap,                           // Cope Tube A to B: typed fit-up gap (mm)
     ExactMiter                              // Plane Cut / Miter: typed "47.5 [high|low] [u|v] [at mm]"
 };
@@ -852,6 +855,7 @@ public:
     // Exact tubes (editor_exact_tube.hpp): create a hollow tube, cope A to B, plane/miter cut. Each
     // runs brepkernel as a background job and makes ONE undo step (a new object; operands unchanged).
     bool start_exact_tube(const TubeSpec& spec, EditorObjectId resizeSource = 0);
+    bool start_exact_edge_fillet(const ExactEdgeFilletRequest& request);
     bool start_exact_cope(EditorObjectId a, EditorObjectId b, const ExactCopeOptions& options);
     bool start_exact_cope_solid(EditorObjectId a, EditorObjectId b);
     bool start_exact_miter(EditorObjectId a, const ExactMiterSpec& spec);

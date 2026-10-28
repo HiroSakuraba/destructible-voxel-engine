@@ -12,6 +12,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
+#include <sstream>
 #include <cmath>
 #include <cstdio>
 #include <memory>
@@ -55,6 +57,12 @@ std::string NativeEditorController::exact_tube_disabled_reason(std::string_view 
     if (action == "polygon.create_exact_tube") return {};
     const auto selected = workspace_.selected_objects();
     const EditorObject* primary = workspace_.selected_object() ? workspace_.document().find_object(*workspace_.selected_object()) : nullptr;
+    if (action == "mesh.exact_edge_fillet" || action == "mesh.exact_variable_fillet" || action == "mesh.exact_face_fillet") {
+        if (selected.size() != 1 || !primary) return "Select one exact CAD object.";
+        if (!tube_target_ok(*primary) || is_isolated_out(primary->id)) return "The exact CAD object must be visible, unlocked and outside a prefab.";
+        if (!exact_brep_source(*primary)) return "The selected object has no exact CAD B-rep source.";
+        return {};
+    }
     if (action == "mesh.exact_miter" || action == "mesh.exact_resize_tube") {
         if (selected.size() != 1 || !primary) return "Select one tube first.";
         if (!tube_target_ok(*primary)) return primary->name + " must be a visible, unlocked polygon object (not a prefab instance).";
@@ -88,6 +96,15 @@ bool NativeEditorController::dispatch_exact_tube_action(std::string_view action)
     if (action == "polygon.create_exact_tube") {
         begin_text_edit(TextEditKind::ExactTube, 0, "round 50.8 3 600 y");
         set_status("Type round OD wall length | square W wall length | rect W x H wall length; optional r <corner radius> for square/rect, then axis x y z. Dimensions are mm. Enter creates it");
+        return true;
+    }
+    if (action == "mesh.exact_edge_fillet" || action == "mesh.exact_variable_fillet" || action == "mesh.exact_face_fillet") {
+        const auto id = *workspace_.selected_object();
+        const bool variable = action == "mesh.exact_variable_fillet";
+        const bool face = action == "mesh.exact_face_fillet";
+        begin_text_edit(face ? TextEditKind::ExactFaceFillet : variable ? TextEditKind::ExactVariableFillet : TextEditKind::ExactEdgeFillet, id, "");
+        set_status(face ? "Type radius in local mm and two zero-based exact face numbers (Measure shows them); only adjacent faces with one shared edge." : variable ? "Type start radius, end radius, then edge endpoints x y z x y z, all mesh-local mm; Enter creates a new OCCT-validated object."
+                            : "Type radius, then edge endpoints x y z x y z, all mesh-local mm; Enter creates a new OCCT-validated object.");
         return true;
     }
     if (action == "mesh.exact_resize_tube") {
@@ -125,6 +142,50 @@ bool NativeEditorController::commit_exact_tube_text() {
         const auto parsed = parse_tube_spec(text);
         if (!parsed.spec) { set_status("Create Exact Tube: " + parsed.error, true, 8.0F); return false; }
         return start_exact_tube(*parsed.spec);
+    }
+    if (kind == TextEditKind::ExactFaceFillet) {
+        std::istringstream input(text);std::string rtext,atext,btext,extra;
+        if (!(input>>rtext>>atext>>btext) || input>>extra) {set_status("Face fillet needs radius in local mm and two zero-based face numbers",true);return false;}
+        double radius{};int a{},b{};
+        const auto [re,rec]=std::from_chars(rtext.data(),rtext.data()+rtext.size(),radius);
+        const auto [ae,aec]=std::from_chars(atext.data(),atext.data()+atext.size(),a);
+        const auto [be,bec]=std::from_chars(btext.data(),btext.data()+btext.size(),b);
+        if (rec!=std::errc{} || re!=rtext.data()+rtext.size() || !std::isfinite(radius) ||
+            aec!=std::errc{} || ae!=atext.data()+atext.size() || bec!=std::errc{} || be!=btext.data()+btext.size()) {
+            set_status("Face fillet needs a finite radius and integer face numbers",true);return false;
+        }
+        if (workspace_.selected_object()!=resizeSource || workspace_.selection_count()!=1) {set_status("Face fillet: select the original exact object again",true);return false;}
+        const auto* object=workspace_.document().find_object(resizeSource);
+        if (!object || !tube_target_ok(*object) || is_isolated_out(resizeSource)) {set_status("Face fillet: source is unavailable",true);return false;}
+        auto request=prepare_exact_face_fillet(projectRoot_,workspace_.document(),resizeSource,a,b,radius*0.001);
+        if (!request.error.empty()) {set_status(request.error,true,8.0F);return false;}
+        return start_exact_edge_fillet(request);
+    }
+    if (kind == TextEditKind::ExactEdgeFillet || kind == TextEditKind::ExactVariableFillet) {
+        const bool variable = kind == TextEditKind::ExactVariableFillet;
+        const std::size_t expected = variable ? 8U : 7U;
+        std::istringstream input(text); std::vector<double> numbers; std::string token;
+        while (input >> token) {
+            double value{}; const auto [end, ec] = std::from_chars(token.data(), token.data()+token.size(), value);
+            if (ec != std::errc{} || end != token.data()+token.size() || !std::isfinite(value)) {
+                set_status("Edge fillet: enter plain finite numbers in mesh-local millimetres", true); return false;
+            }
+            numbers.push_back(value * 0.001);
+        }
+        if (numbers.size()!=expected) {
+            set_status(variable ? "Variable fillet needs two radii and six endpoint coordinates in mm" : "Edge fillet needs one radius and six endpoint coordinates in mm", true); return false;
+        }
+        if (workspace_.selected_object()!=resizeSource || workspace_.selection_count()!=1) {
+            set_status("Edge fillet: select the original exact object again", true);return false;
+        }
+        const auto* object=workspace_.document().find_object(resizeSource);
+        if (!object || !tube_target_ok(*object) || is_isolated_out(resizeSource)) {set_status("Edge fillet: source is unavailable",true);return false;}
+        const std::size_t base=variable?2U:1U;
+        auto request=prepare_exact_edge_fillet(projectRoot_,workspace_.document(),resizeSource,
+            {numbers[base],numbers[base+1],numbers[base+2]}, {numbers[base+3],numbers[base+4],numbers[base+5]},
+            numbers[0],variable?numbers[1]:numbers[0]);
+        if (!request.error.empty()) {set_status(request.error,true,8.0F);return false;}
+        return start_exact_edge_fillet(request);
     }
     if (kind == TextEditKind::ExactTubeResize) {
         const auto parsed = parse_tube_spec(text);
@@ -237,6 +298,43 @@ bool NativeEditorController::start_exact_cope(EditorObjectId a, EditorObjectId b
     auto request = prepare_exact_cope(projectRoot_, workspace_.document(), a, b, options);
     if (!request.error.empty()) { set_status(request.error, true, 8.0F); return false; }
     return start_exact_tube_cut(std::move(request), " (Coped to " + workspace_.document().find_object(b)->name + ")");
+}
+
+bool NativeEditorController::start_exact_edge_fillet(const ExactEdgeFilletRequest& request) {
+    auto output=std::make_shared<std::optional<ExactEdgeFilletResult>>();
+    const auto root=projectRoot_;const auto settings=ExactCadSettings::from_environment();
+    return start_long_job(LongJobKind::ImportModel,"Exact CAD edge fillet",longJobThreshold_+1,
+        [output,request,root,settings](LongJob& job) {
+            if(job.cancelled()) return;
+            job.report(0.1F,"OpenCASCADE is building the edge fillet");
+            auto result=run_exact_edge_fillet(root,request,settings);
+            if(job.cancelled()) return;
+            if(!result) {std::lock_guard lock(job.mutex);job.error=result.error;return;}
+            output->emplace(std::move(result));job.report(1.0F,"Fillet ready");
+        },
+        [this,output,request](LongJob& job) {
+            auto& document=workspace_.document();
+            if(exact_operand_stamp(document,request.object,request.object)!=request.operandStamp) {
+                set_status("Fillet not applied: source changed during the operation",true,8.0F);return false;
+            }
+            const auto* original=document.find_object(request.object);
+            if(!original || !*output) {set_status(job.label+" produced no geometry",true,8.0F);return false;}
+            auto& result=(**output).imported;
+            const auto before=capture_selection_snapshot(); const auto id=document.allocate_object_id();
+            EditorObject object(id,original->name+" (CAD fillet)");
+            object.polygon=std::move(result.mesh);object.polygon->objectId=id;refresh_editor_polygon(*object.polygon);
+            object.transform=original->transform;object.parent=original->parent;object.voxelScale=original->voxelScale;
+            object.voxelSizeMeters=original->voxelSizeMeters;object.flags=original->flags;
+            auto exact=make_exact_brep_component(result.source);exact.id=1;object.components.push_back(std::move(exact));
+            if(result.collision.component) {auto collision=*result.collision.component;collision.id=2;object.components.push_back(std::move(collision));}
+            const auto added=workspace_.commands().execute(document,std::make_unique<AddObjectCommand>(std::move(object),"Create CAD edge fillet"));
+            if(!added.success) {set_status(added.message,true);return false;}
+            if(!viewportSettings_.isolatedObjects.empty())viewportSettings_.isolatedObjects.insert(id);
+            workspace_.select_object(id);selectionDomain_=SelectionDomain::Objects;
+            workspace_.commands().set_last_selection_transition(before,capture_selection_snapshot());
+            frame_selection();refresh_menu_state();
+            set_status("OCCT-validated B-rep fillet created; not Boolean-certified. Original unchanged; reassign materials if needed.",false,14.0F);return true;
+        });
 }
 
 bool NativeEditorController::start_exact_cope_solid(EditorObjectId a, EditorObjectId b) {

@@ -746,6 +746,60 @@ void real_tubes(RealWorld& w) {
     }
 }
 
+// Real exact-edge fillets, with a classifier check independent of the fillet construction.
+void real_edge_fillets(RealWorld& w) {
+    auto args=w.settings.command;
+    const auto input=w.root/"fillet-fixture.brep", report=w.root/"fillet-fixture.json";
+    args.insert(args.end(),{"primitive","box","--size","0.1","0.1","0.1","-o",input.string(),"--report",report.string()});
+    auto generated=run_exact_cad_process(args,std::chrono::seconds(120),1U<<20U);
+    check(generated.launched && generated.exitCode==0 && fs::is_regular_file(input),"construct real fillet fixture: "+generated.output);
+    if(!generated.launched || generated.exitCode!=0 || !fs::is_regular_file(input)) return;
+    auto imported=import_exact_cad(w.root,input,401,w.settings);
+    check(bool(imported),"import exact fillet fixture: "+imported.error);if(!imported) return;
+    EditorDocument scene("CAD fillet");EditorObject object(401,"Box");object.polygon=imported.mesh;
+    auto exact=make_exact_brep_component(imported.source);exact.id=1;object.components.push_back(exact);scene.add_object(std::move(object));
+    const std::array<double,3> start={-.05,-.05,-.05}, end={-.05,.05,-.05};
+    const auto constant=prepare_exact_edge_fillet(w.root,scene,401,start,end,.005,.005);
+    auto c=run_exact_edge_fillet(w.root,constant,w.settings);
+    check(bool(c),"constant exact edge fillet: "+c.error);
+    if(c) {
+        const auto desc=describe_exact_cad(w.root,c.imported.source,w.settings);bool cylinder=false;
+        for(const auto& f:desc.faces) if(f.type=="cylinder" && near(f.radius,.005,1e-10)) cylinder=true;
+        check(bool(desc) && cylinder,"constant fillet produces a genuine 5 mm cylindrical face");
+        check(closed(c.imported.mesh),"constant fillet display mesh is watertight");
+    }
+    auto variable=prepare_exact_edge_fillet(w.root,scene,401,start,end,.005,.010);
+    auto v=run_exact_edge_fillet(w.root,variable,w.settings);
+    check(bool(v),"variable exact edge fillet: "+v.error);
+    if(v) {
+        check(closed(v.imported.mesh),"variable fillet display mesh is watertight");
+        const std::string script=
+            "from OCP.BRepTools import BRepTools\nfrom OCP.TopoDS import TopoDS_Shape\n"
+            "from OCP.BRep import BRep_Builder\nfrom OCP.BRepClass3d import BRepClass3d_SolidClassifier\n"
+            "from OCP.TopAbs import TopAbs_IN,TopAbs_OUT\nfrom OCP.gp import gp_Pnt\nimport sys\n"
+            "s=TopoDS_Shape();assert BRepTools.Read_s(s,sys.argv[1],BRep_Builder())\n"
+            "assert BRepClass3d_SolidClassifier(s,gp_Pnt(-.048,-.049,-.048),1e-8).State()==TopAbs_IN\n"
+            "assert BRepClass3d_SolidClassifier(s,gp_Pnt(-.048,.049,-.048),1e-8).State()==TopAbs_OUT\n";
+#ifdef _WIN32
+        const std::string python="python";
+#else
+        const std::string python="python3";
+#endif
+        const auto classified=run_exact_cad_process({python,"-c",script,(w.root/v.imported.source.relativePath).string()},std::chrono::seconds(90),1U<<20U);
+        check(classified.launched && classified.exitCode==0,"independent classifier confirms radius increases toward second endpoint: "+classified.output);
+    }
+    auto face=run_exact_edge_fillet(w.root,prepare_exact_face_fillet(w.root,scene,401,0,2,.005),w.settings);
+    check(bool(face),"adjacent face fillet: "+face.error);
+    if(face) check(closed(face.imported.mesh),"face fillet display mesh is watertight");
+    auto opposite=run_exact_edge_fillet(w.root,prepare_exact_face_fillet(w.root,scene,401,0,1,.005),w.settings);
+    check(!opposite,"nonadjacent faces are refused");
+    auto bad=prepare_exact_edge_fillet(w.root,scene,401,start,start,.005,.005);
+    check(!bad.error.empty(),"coincident edge endpoints are rejected before spawning");
+    auto missing=prepare_exact_edge_fillet(w.root,scene,401,{0,0,0},{.1,.1,.1},.005,.005);
+    auto refused=run_exact_edge_fillet(w.root,missing,w.settings);
+    check(!refused && refused.error.find("exactly one")!=std::string::npos,"missing exact edge is refused explicitly: "+refused.error);
+}
+
 // Plane cut: the cut face lies on the plane through both walls.
 void real_miter(RealWorld& w) {
     TubeSpec rect; rect.profile = TubeProfile::Rectangular; rect.width = 0.08; rect.height = 0.04; rect.wall = 0.003; rect.length = 0.6; rect.axis = 'y';   // u = x (80), v = z (40)
@@ -1052,7 +1106,7 @@ void type_and_enter(NativeEditorController& c, const std::string& text) {
 void native_always(const fs::path& root) {
     auto owner = make_native(root);
     NativeEditorController& c = *owner;
-    for (const char* id : {"polygon.create_exact_tube", "mesh.exact_cope", "mesh.exact_cope_solid", "mesh.exact_miter", "mesh.exact_resize_tube"}) {
+    for (const char* id : {"polygon.create_exact_tube", "mesh.exact_cope", "mesh.exact_cope_solid", "mesh.exact_miter", "mesh.exact_resize_tube", "mesh.exact_edge_fillet", "mesh.exact_variable_fillet", "mesh.exact_face_fillet"}) {
         const MenuAction* action = menu_action(c, id);
         check(action != nullptr, std::string("menu action exists: ") + id);
         check(action && !action->description.empty(), std::string("menu action is described for the command palette: ") + id);
@@ -1105,6 +1159,21 @@ void native_always(const fs::path& root) {
     check(c.exact_tube_summary(tubeId).find("Round tube") != std::string::npos && c.exact_tube_summary(tubeId).find("1 cut") != std::string::npos,
           "inspector summary: " + c.exact_tube_summary(tubeId));
     check(menu_action(c, "mesh.exact_miter")->enabled, "miter is available for one tube");
+    check(menu_action(c,"mesh.exact_edge_fillet")->enabled && menu_action(c,"mesh.exact_variable_fillet")->enabled,
+          "both exact edge fillet menu actions are available on a CAD object");
+    check(menu_action(c,"mesh.exact_face_fillet")->enabled,"face fillet menu action is available");
+    check(c.dispatch_action("mesh.exact_face_fillet") && c.text_edit().kind==TextEditKind::ExactFaceFillet,"face fillet opens field");
+    type_and_enter(c,"5 0 -1");
+    check(c.status().error && c.workspace().commands().size()==steps,"invalid face index is refused");
+    check(c.dispatch_action("mesh.exact_edge_fillet") && c.text_edit().kind==TextEditKind::ExactEdgeFillet,
+          "constant edge fillet opens field");
+    type_and_enter(c,"1 0 0");
+    check(c.status().error && c.workspace().commands().size()==steps,"incomplete fillet input is refused");
+    check(c.dispatch_action("mesh.exact_variable_fillet") && c.text_edit().kind==TextEditKind::ExactVariableFillet,
+          "variable edge fillet opens field");
+    type_and_enter(c,"1 nan 0 0 0 1 0 0");
+    check(c.status().error && c.workspace().commands().size()==steps,"non-finite fillet input is refused");
+
     check(!menu_action(c, "mesh.exact_resize_tube")->enabled &&
               menu_action(c, "mesh.exact_resize_tube")->disabledReason.find("cuts") != std::string::npos,
           "resize refuses a cut tube whose feature history cannot be replayed");
@@ -1275,6 +1344,43 @@ void native_real(const fs::path& root) {
         check(c.dispatch_action("edit.redo") && document.find_object(resizedId), "redo restores the resized copy");
     }
 
+    // Native exact-edge fillet commands create a separate CAD object in one undo step.
+    {
+        auto settings=ExactCadSettings::from_environment();settings.exactCollision=false;
+        const auto path=root/"native-fillet-box.brep", report=root/"native-fillet-box.json";
+        auto args=settings.command;args.insert(args.end(),{"primitive","box","--size","0.1","0.1","0.1","-o",path.string(),"--report",report.string()});
+        const auto generated=run_exact_cad_process(args,std::chrono::seconds(120),1U<<20U);
+        check(generated.launched && generated.exitCode==0,"native fillet fixture: "+generated.output);
+        if(generated.launched && generated.exitCode==0) {
+            const auto boxId=document.allocate_object_id();auto imported=import_exact_cad(root,path,boxId,settings);
+            check(bool(imported),"native fillet import: "+imported.error);
+            if(imported) {
+                EditorObject box(boxId,"Fillet box");box.polygon=std::move(imported.mesh);
+                auto exact=make_exact_brep_component(imported.source);exact.id=1;box.components.push_back(exact);
+                document.add_object(std::move(box));select_one(boxId);
+                const auto count=document.objects().size();
+                check(c.dispatch_action("mesh.exact_edge_fillet") && c.text_edit().kind==TextEditKind::ExactEdgeFillet,
+                      "native constant fillet opens field");
+                type_and_enter(c,"5 -50 -50 -50 -50 50 -50");
+                check(!c.status().error && document.objects().size()==count+1,"native constant exact fillet: "+c.status().text);
+                const auto resultId=*c.workspace().selected_object();
+                const auto* resultObject=document.find_object(resultId);
+                check(resultId!=boxId && resultObject && exact_brep_source(*resultObject).has_value(),"fillet copy has an exact source");
+                check(c.dispatch_action("edit.undo") && !document.find_object(resultId) && document.find_object(boxId),"fillet undo preserves source");
+                check(c.dispatch_action("edit.redo") && document.find_object(resultId),"fillet redo restores result");
+                select_one(boxId);
+                check(c.dispatch_action("mesh.exact_variable_fillet") && c.text_edit().kind==TextEditKind::ExactVariableFillet,
+                      "native variable fillet opens field");
+                type_and_enter(c,"5 10 -50 -50 -50 -50 50 -50");
+                check(!c.status().error && document.objects().size()==count+2,"native variable exact fillet: "+c.status().text);
+                select_one(boxId);
+                check(c.dispatch_action("mesh.exact_face_fillet") && c.text_edit().kind==TextEditKind::ExactFaceFillet,"native face fillet opens field");
+                type_and_enter(c,"5 0 2");
+                check(!c.status().error && document.objects().size()==count+3,"native adjacent-face fillet: "+c.status().text);
+            }
+        }
+    }
+
     // Save and load: the exact source and the record survive a scene round trip.
     {
         const auto before = exact_tube_record(*document.find_object(mitered));
@@ -1331,6 +1437,7 @@ int main(int argc, char** argv) {
         if (brepkernel_runs(world.settings, dir.path, why)) {
             try {
                 if (wanted("tubes")) real_tubes(world);
+                if (wanted("fillet")) real_edge_fillets(world);
                 if (wanted("miter")) real_miter(world);
                 if (wanted("cope")) real_cope(world);
                 if (wanted("equal")) real_equal_diameter(world);

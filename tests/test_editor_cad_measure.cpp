@@ -143,7 +143,7 @@ void test_native(const fs::path& root) {
     check(c.measure_at(sx, sy) && c.measure_points().size() == 1, "third click starts over");
     check(c.wait_for_long_job(60.0), "exact surface look-up finishes");
     const NativeMeasurePoint& p = c.measure_points().front();
-    check(p.exact && p.what == "Hole \xC3\x98 12.000 mm", "face named: " + p.what + " / " + c.status().text);
+    check(p.exact && p.what.find("Hole \xC3\x98 12.000 mm [face ") == 0, "face named: " + p.what + " / " + c.status().text);
     check(length(subtract(p.world, Float3{0.25F, 1.0F, 0.25F})) < 1.0e-5F, "point moved to the exact closest point");
 
     check(c.measure_at(vx, vy) && has(c.measure_readout(), "Distance 1060.660 mm"), "hole face to corner: " + c.measure_readout());

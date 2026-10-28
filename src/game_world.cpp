@@ -2116,58 +2116,54 @@ std::vector<GameObjectId> GameWorld::fragment_after_damage(GameObjectId id, Obje
         fragmentIds.push_back(fragmentId);
     }
 
-    rebuild_primary_body(object, parentState);
+    // Failure keeps the prior collider alive. Full voxel/fragment transaction
+    // rollback is a separate requirement; never silently turn the body off here.
+    (void)rebuild_primary_body(object, parentState);
     return fragmentIds;
 }
 
-void GameWorld::rebuild_primary_body(Object& object, const std::optional<RigidBodyState>& parentState) {
-    // Even when the carve leaves one connected component, its shape and mass have changed.
-    if (object.hasBody) {
-        physics_->destroy_body(object.bodyHandle);
-        object.hasBody = false;
-    }
-    if (object.voxels->occupied_voxel_count() > 0) {
-        if (object.dynamic) {
-            Float3 localCom{};
-            std::string buildError;
-            std::optional<RigidBodyCreateDesc> primaryDesc = build_dynamic_body_desc(
-                *object.voxels, object.authoredTransform, object.voxelSizeMeters,
-                object.massTable, object.densityQuantumKilogramsPerCubicMeter, object.structural,
-                &localCom, &buildError, object.voxelScale);
-            if (primaryDesc) {
-                if (parentState) {
-                    primaryDesc->linearVelocity = inherited_child_center_of_mass_velocity(
-                        parentState->linearVelocity, parentState->angularVelocity,
-                        parentState->currentTransform.position, primaryDesc->transform.position);
-                    primaryDesc->angularVelocity = parentState->angularVelocity;
-                }
-                const RigidBodyHandle handle = physics_->create_body(*primaryDesc);
-                if (handle != kInvalidRigidBodyHandle) {
-                    object.hasBody = true;
-                    object.bodyHandle = handle;
-                    object.localCenterOfMassMeters = localCom;
-                }
-            }
-        } else {
-            const std::vector<VoxelBox> boxes = build_merged_object_box_proxy(*object.voxels);
-            if (!boxes.empty()) {
-                StaticRigidBodyCreateDesc staticDesc;
-                staticDesc.transform = object.authoredTransform;
-                staticDesc.collisionClass = RigidBodyCollisionClass::Full;
-                staticDesc.boxes.reserve(boxes.size());
-                for (const VoxelBox& box : boxes)
-                    staticDesc.boxes.push_back(voxel_box_to_solver_box(box, object.voxelSizeMeters,object.voxelScale));
-                if (validate_static_rigid_body_desc(staticDesc)) {
-                    const RigidBodyHandle handle = physics_->create_static_body(staticDesc);
-                    if (handle != kInvalidRigidBodyHandle) {
-                        object.hasBody = true;
-                        object.bodyHandle = handle;
-                    }
-                }
-            }
+bool GameWorld::rebuild_primary_body(Object& object, const std::optional<RigidBodyState>& parentState) {
+    // Do not remove the previous body until a replacement has been accepted.
+    // Otherwise a backend allocation/validation failure makes the entire
+    // surviving object fall through the world after one damage operation.
+    if (!object.voxels || object.voxels->occupied_voxel_count() == 0) return false;
+    RigidBodyHandle replacement = kInvalidRigidBodyHandle;
+    Float3 replacementLocalCom = object.localCenterOfMassMeters;
+    if (object.dynamic) {
+        std::string buildError;
+        std::optional<RigidBodyCreateDesc> desc = build_dynamic_body_desc(
+            *object.voxels, object.authoredTransform, object.voxelSizeMeters,
+            object.massTable, object.densityQuantumKilogramsPerCubicMeter,
+            object.structural, &replacementLocalCom, &buildError, object.voxelScale);
+        if (!desc) return false;
+        if (parentState) {
+            desc->linearVelocity = inherited_child_center_of_mass_velocity(
+                parentState->linearVelocity, parentState->angularVelocity,
+                parentState->currentTransform.position, desc->transform.position);
+            desc->angularVelocity = parentState->angularVelocity;
         }
+        replacement = physics_->create_body(*desc);
+    } else {
+        const std::vector<VoxelBox> boxes = build_merged_object_box_proxy(*object.voxels);
+        if (boxes.empty()) return false;
+        StaticRigidBodyCreateDesc desc;
+        desc.transform = object.authoredTransform;
+        desc.collisionClass = RigidBodyCollisionClass::Full;
+        desc.boxes.reserve(boxes.size());
+        for (const VoxelBox& box : boxes)
+            desc.boxes.push_back(voxel_box_to_solver_box(
+                box, object.voxelSizeMeters, object.voxelScale));
+        if (!validate_static_rigid_body_desc(desc)) return false;
+        replacement = physics_->create_static_body(desc);
     }
-
+    if (replacement == kInvalidRigidBodyHandle) return false;
+    const bool hadOld = object.hasBody;
+    const RigidBodyHandle old = object.bodyHandle;
+    object.hasBody = true;
+    object.bodyHandle = replacement;
+    object.localCenterOfMassMeters = replacementLocalCom;
+    if (hadOld) (void)physics_->destroy_body(old);
+    return true;
 }
 
 std::optional<GameRaycastHit> GameWorld::raycast(Float3 worldOrigin, Float3 worldDirection, float maxDistance) const {

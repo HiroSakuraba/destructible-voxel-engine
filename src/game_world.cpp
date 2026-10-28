@@ -2029,6 +2029,9 @@ std::optional<std::uint64_t> GameWorld::damage_sphere(GameObjectId id, Float3 wo
             for (const GameObjectId fragmentId : newFragmentIds)
                 if (const auto placed = objects_.find(fragmentId); placed != objects_.end())
                     copy_marks_to_fragment(id, fragmentId, placed->second);
+            // Spawn callbacks must observe the committed geometry AND crater marks.
+            for (const GameObjectId fragmentId : newFragmentIds)
+                dispatch_lifecycle({GameLifecycleEventKind::Spawn, fragmentId});
         }
     } else if (!destroyed) {
         // Visual-only geometry never allocates a physics body.
@@ -2158,7 +2161,6 @@ std::optional<std::vector<GameObjectId>> GameWorld::fragment_after_damage(GameOb
         fragmentObject.id = fragmentId;
         synchronize_membership_component(fragmentObject);
         objects_.emplace(fragmentId, std::move(fragmentObject));
-        dispatch_lifecycle({GameLifecycleEventKind::Spawn, fragmentId});
         fragmentIds.push_back(fragmentId);
     }
     return fragmentIds;

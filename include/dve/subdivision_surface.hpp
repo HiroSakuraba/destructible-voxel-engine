@@ -7,6 +7,10 @@
 #include <string>
 #include <vector>
 namespace dve::editor {
+enum class SubdivisionUvMode : std::uint8_t {
+    Linear,       // exact piecewise-linear source UV interpolation
+    SmoothInterior // relax only UV chart interiors; preserve seams and island boundaries
+};
 struct SubdivisionSettings {
     std::uint32_t level{2};
     bool preserveSharpEdges{};
@@ -15,6 +19,8 @@ struct SubdivisionSettings {
     std::vector<std::vector<std::uint32_t>> controlFaces;
     // Canonical cage attribute-vertex edge keys; finite semi-sharp strengths in (0,4].
     std::map<std::uint64_t,float> edgeCreases;
+    // Stored after existing fields to keep aggregate {level, sharp} callers valid.
+    SubdivisionUvMode uvMode{SubdivisionUvMode::Linear};
     auto operator<=>(const SubdivisionSettings&) const = default;
 };
 inline constexpr std::uint32_t kMaxSubdivisionLevel = 4;

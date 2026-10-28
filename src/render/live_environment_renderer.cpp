@@ -1,7 +1,9 @@
 #include "dve/render/live_environment_renderer.hpp"
+#include "dve/rhi/pipeline_preparation.hpp"
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstring>
 #include <cmath>
 #include <limits>
@@ -237,7 +239,13 @@ bool create_live_environment_renderer(rhi::IDevice& device,
     }
     LiveEnvironmentRendererResources r;
     std::string local;
+    // Exact variants use the same RHI pipeline cache from PSO-1. Stage every
+    // optional shader/state permutation before the bundle can be published.
+    rhi::PipelinePreparationQueue prewarm(device);
+    constexpr std::uint64_t epoch=1U; // local queue, not a persisted scene ID
     auto fail = [&](std::string message) {
+        // Destroy unadopted PSOs BEFORE their layouts and descriptor resources.
+        prewarm.clear();
         std::string ignored;
         (void)destroy_live_environment_renderer(device, r, &ignored);
         set_error(error, std::move(message));
@@ -344,36 +352,63 @@ bool create_live_environment_renderer(rhi::IDevice& device,
         desc.depthWrite = depthWrite;
         desc.depthCompare = rhi::CompareOp::LessEqual;
         desc.cullMode = cull;
-        return device.create_graphics_pipeline(desc, &local);
+        const std::string key=desc.debugName;
+        return prewarm.stage_graphics(epoch,key,std::move(desc),&local);
     };
-    r.skyboxPipeline = make_pipeline("Live environment skybox", bytecode.skyboxVertex,
+    if (!make_pipeline("Live environment skybox", bytecode.skyboxVertex,
         bytecode.skyboxFragment, {r.frameLayout, lighting.bindGroupLayout}, colorFormat,
-        false, false, rhi::CullMode::Disabled);
-    if (!r.skyboxPipeline) return fail(local);
-    r.materialPipeline = make_pipeline("Live IBL material", bytecode.materialVertex,
+        false, false, rhi::CullMode::Disabled)) return fail(local);
+    if (!make_pipeline("Live IBL material", bytecode.materialVertex,
         bytecode.materialFragment,
         {r.frameLayout, r.objectLayout, lighting.bindGroupLayout, r.mainMaterials->layout()},
-        colorFormat, true, true, rhi::CullMode::Disabled);
-    if (!r.materialPipeline) return fail(local);
+        colorFormat, true, true, rhi::CullMode::Disabled)) return fail(local);
     if(!bytecode.clearGlassFragment.empty()){
         r.opticalScene=std::make_unique<LiveOpticalSceneGpu>(device);
         if(!r.opticalScene->initialize(&local))return fail(local);
-        r.clearGlassPipeline=make_pipeline("Live clear glass transport",bytecode.materialVertex,
+        if(!make_pipeline("Live clear glass transport",bytecode.materialVertex,
             bytecode.clearGlassFragment,{r.frameLayout,r.objectLayout,lighting.bindGroupLayout,
-                r.mainMaterials->layout(),r.opticalScene->layout()},colorFormat,true,true,rhi::CullMode::Disabled);
-        if(!r.clearGlassPipeline)return fail(local);
+                r.mainMaterials->layout(),r.opticalScene->layout()},colorFormat,
+                true,true,rhi::CullMode::Disabled)) return fail(local);
     }
-    r.shadowOpaquePipeline = make_pipeline("Live opaque depth-only shadow caster",
-        bytecode.shadowVertex, {}, {r.frameLayout, r.objectLayout, r.cascadeLayout},
-        std::nullopt, true, true, rhi::CullMode::Disabled);
-    if (!r.shadowOpaquePipeline) return fail(local);
-    if (!bytecode.shadowFragment.empty()) {
-        r.shadowMaskedPipeline = make_pipeline("Live alpha-masked depth-only shadow caster",
-            bytecode.shadowVertex, bytecode.shadowFragment,
-            {r.frameLayout, r.objectLayout, r.cascadeLayout, r.shadowMaterials->layout()},
-            std::nullopt, true, true, rhi::CullMode::Disabled);
-        if (!r.shadowMaskedPipeline) return fail(local);
+    if (!make_pipeline("Live opaque depth-only shadow caster",bytecode.shadowVertex,{},
+        {r.frameLayout,r.objectLayout,r.cascadeLayout},std::nullopt,
+        true,true,rhi::CullMode::Disabled)) return fail(local);
+    if(!bytecode.shadowFragment.empty()){
+        if(!make_pipeline("Live alpha-masked depth-only shadow caster",
+            bytecode.shadowVertex,bytecode.shadowFragment,
+            {r.frameLayout,r.objectLayout,r.cascadeLayout,r.shadowMaterials->layout()},
+            std::nullopt,true,true,rhi::CullMode::Disabled)) return fail(local);
     }
+
+    // The publication barrier is all-or-nothing. Vulkan pipeline creation
+    // occurs on the loading/owner thread, never during frame recording.
+    const auto prepared=prewarm.pump(8U,std::chrono::hours{1});
+    if(prepared.failed || !prewarm.ready_to_publish(epoch)) {
+        for(const auto* name : {"Live environment skybox","Live IBL material",
+            "Live clear glass transport","Live opaque depth-only shadow caster",
+            "Live alpha-masked depth-only shadow caster"}) {
+            if(prewarm.state(epoch,name)==rhi::PipelinePreparationState::Failed)
+                return fail("live pipeline prewarm "+std::string(name)+": "+
+                            std::string(prewarm.failure_reason(epoch,name)));
+        }
+        return fail("live environment pipeline preparation incomplete");
+    }
+    r.skyboxPipeline=prewarm.take_graphics(epoch,"Live environment skybox");
+    r.materialPipeline=prewarm.take_graphics(epoch,"Live IBL material");
+    if(!bytecode.clearGlassFragment.empty())
+        r.clearGlassPipeline=prewarm.take_graphics(epoch,"Live clear glass transport");
+    r.shadowOpaquePipeline=prewarm.take_graphics(epoch,
+        "Live opaque depth-only shadow caster");
+    if(!bytecode.shadowFragment.empty())
+        r.shadowMaskedPipeline=prewarm.take_graphics(epoch,
+            "Live alpha-masked depth-only shadow caster");
+    if(!r.skyboxPipeline || !r.materialPipeline || !r.shadowOpaquePipeline ||
+       (!bytecode.clearGlassFragment.empty() && !r.clearGlassPipeline) ||
+       (!bytecode.shadowFragment.empty() && !r.shadowMaskedPipeline))
+        return fail("live environment failed to adopt precompiled pipeline");
+    r.preparedPipelineVariants=prepared.compiled;
+    prewarm.discard_epoch(epoch);
+
     if (out.valid()) {
         std::string ignored;
         (void)destroy_live_environment_renderer(device, out, &ignored);

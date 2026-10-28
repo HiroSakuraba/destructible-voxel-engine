@@ -1,0 +1,68 @@
+name: PSO-2C live-renderer pipeline inventory
+on:
+  pull_request:
+    paths:
+      - "include/dve/render/live_environment_renderer.hpp"
+      - "include/dve/render/dashr_shell.hpp"
+      - "src/render/live_environment_renderer.cpp"
+      - "src/render/dashr_shell.cpp"
+      - "tests/test_live_environment_renderer.cpp"
+      - "tests/test_vulkan_live_environment_renderer.cpp"
+      - "tests/test_dashr_shell.cpp"
+      - "docs/PSO2C_LIVE_RENDERER_INVENTORY.md"
+      - ".github/workflows/pso2c-render-inventory.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  live-inventory:
+    name: Exact live and DASHR precompiled variants (Null RHI)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure rendering modules
+        run: |
+          cmake -S . -B build-pso2c -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DDVE_BUILD_TESTS=ON -DDVE_BUILD_RHI=ON -DDVE_BUILD_PLATFORM=ON \
+            -DDVE_BUILD_PLAYER=ON -DDVE_BUILD_EDITOR=OFF \
+            -DDVE_BUILD_NATIVE_EDITOR=OFF -DDVE_BUILD_ASSET_COOKER=OFF \
+            -DDVE_BUILD_ASSET_PIPELINE_TESTS=OFF -DDVE_BUILD_BENCHMARK=OFF \
+            -DDVE_ENABLE_SDL3_HOST=OFF -DDVE_ENABLE_FLUODDITY=OFF \
+            -DDVE_ENABLE_SOFT_BODIES=OFF -DDVE_ENABLE_CPU_HAIR=OFF \
+            -DDVE_ENABLE_SIMULATION_ENERGY_COMPILER=OFF
+      - name: Build live renderer and DASHR tests
+        run: cmake --build build-pso2c --target dve_live_environment_renderer_tests dve_dashr_shell_tests --parallel 2
+      - name: Run complete variant inventory before first draw
+        env:
+          DVE_REQUIRE_COMPLETE_TESTS: "1"
+        run: ctest --test-dir build-pso2c -R '^(dve_live_environment_renderer_tests|dve_dashr_shell_tests)$' -V --output-on-failure
+
+  vulkan-live-inventory:
+    name: Native Vulkan Live renderer precompiled variant smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Lavapipe software Vulkan
+        run: sudo apt-get update && sudo apt-get install -y ninja-build mesa-vulkan-drivers libvulkan1
+      - name: Configure actual Vulkan device tests
+        run: |
+          cmake -S . -B build-pso2c-vulkan -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DDVE_BUILD_TESTS=ON -DDVE_BUILD_RHI=ON -DDVE_BUILD_PLATFORM=ON \
+            -DDVE_BUILD_PLAYER=ON -DDVE_BUILD_EDITOR=OFF \
+            -DDVE_BUILD_NATIVE_EDITOR=OFF -DDVE_BUILD_ASSET_COOKER=OFF \
+            -DDVE_BUILD_ASSET_PIPELINE_TESTS=OFF -DDVE_BUILD_BENCHMARK=OFF \
+            -DDVE_ENABLE_SDL3_HOST=OFF -DDVE_ENABLE_FLUODDITY=OFF \
+            -DDVE_ENABLE_SOFT_BODIES=OFF -DDVE_ENABLE_CPU_HAIR=OFF \
+            -DDVE_ENABLE_SIMULATION_ENERGY_COMPILER=OFF
+      - name: Build real live Vulkan renderer
+        run: cmake --build build-pso2c-vulkan --target dve_vulkan_live_environment_renderer_tests --parallel 2
+      - name: Verify prepared native pipelines and rendered output
+        run: |
+          set -euo pipefail
+          icd="$(find /usr/share/vulkan/icd.d -iname '*lvp*.json' -print -quit)"
+          test -n "$icd"
+          export VK_ICD_FILENAMES="$icd"
+          export DVE_REQUIRE_VULKAN=1
+          ./build-pso2c-vulkan/dve_vulkan_live_environment_renderer_tests

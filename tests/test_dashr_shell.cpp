@@ -264,6 +264,10 @@ void test_shell_render_contract(){
     require(create_dashr_shell_renderer(
         device,shellBytecode,rhi::TextureFormat::RGBA8Unorm,4096U,renderer,&error),
         error.c_str());
+    require(renderer.preparedPipelineVariants==2U,
+            "DASHR should inventory diagnostic and shadow pipeline");
+    require(renderer.pipeline && renderer.shadowPipeline && !renderer.pbrPipeline,
+            "DASHR optional pipeline inventory mismatch");
 
     rhi::TextureDesc color;
     color.width=96U;color.height=64U;color.format=rhi::TextureFormat::RGBA8Unorm;

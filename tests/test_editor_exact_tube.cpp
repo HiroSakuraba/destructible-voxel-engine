@@ -199,7 +199,7 @@ void miter_parsing_and_plane() {
 
 void tube_component_round_trip() {
     TempDir dir;
-    TubeSpec spec; spec.profile = TubeProfile::Rectangular; spec.width = 0.08; spec.height = 0.04; spec.wall = 0.003; spec.length = 0.6; spec.axis = 'z';
+    TubeSpec spec; spec.profile = TubeProfile::Rectangular; spec.width = 0.08; spec.height = 0.04; spec.wall = 0.003; spec.length = 0.6; spec.axis = 'z'; spec.outerCornerRadius = 0.006;
     EditorObject tube(1, "Rail");
     tube.polygon = make_editor_polygon_cube(1);
     Component exact = make_exact_brep_component({"sources/exact/rail-0123456789ab.brep", "0123456789abcdef", "tube:rect"});
@@ -220,7 +220,7 @@ void tube_component_round_trip() {
     check(loaded.has_value(), "scene reloads: " + error);
     if (loaded) {
         const auto again = exact_tube_record(*loaded->find_object(1));
-        check(again && again->spec.profile == TubeProfile::Rectangular && near(again->spec.width, 0.08, 1e-15) && near(again->spec.wall, 0.003, 1e-15) &&
+        check(again && again->spec.profile == TubeProfile::Rectangular && near(again->spec.width, 0.08, 1e-15) && near(again->spec.wall, 0.003, 1e-15) && near(again->spec.outerCornerRadius,0.006,1e-15) &&
                   again->cuts == read->cuts, "tube record survives save/load");
         check(exact_brep_source(*loaded->find_object(1)).has_value(), "exact source survives next to it");
         const auto exported = export_editor_scene(*loaded, EditorMaterialLibrary::make_default(), dir.path / "runtime.dvoxscene.json");
@@ -882,6 +882,49 @@ void real_cope(RealWorld& w) {
         for (const auto& f : described.faces) if (f.type == "cylinder") faces += " [r=" + num(f.radius) + " axis=" + num(f.axis[0]) + "," + num(f.axis[1]) + "," + num(f.axis[2]) + " at " + num(f.axisOrigin[0]) + "," + num(f.axisOrigin[1]) + "," + num(f.axisOrigin[2]) + "]";
         check(exactB, "round 90: an exact cylinder face of B's outer radius about B's axis:" + faces);
         check(outerA && innerA, "round 90: A's outer and inner cylinders (wall thickness) preserved");
+    }
+    // A true taper: an externally supplied solid cone with radius changing along its axis.
+    // The independent oracle integrates removed axial length through the branch wall.
+    {
+        const fs::path conePath = w.root / "sources/exact/test-taper-solid.brep";
+        fs::create_directories(conePath.parent_path());
+        const std::string script =
+            "from OCP.BRepPrimAPI import BRepPrimAPI_MakeCone\n"
+            "from OCP.BRepTools import BRepTools\n"
+            "from OCP.gp import gp_Ax2,gp_Dir,gp_Pnt\n"
+            "import sys\n"
+            "s=BRepPrimAPI_MakeCone(gp_Ax2(gp_Pnt(-.2,-.15,0),gp_Dir(1,0,0)),.02,.05,.4).Shape()\n"
+            "BRepTools.Write_s(s,sys.argv[1])\n";
+#ifdef _WIN32
+        const std::string python = "python";
+#else
+        const std::string python = "python3";
+#endif
+        const auto generated = run_exact_cad_process({python,"-c",script,conePath.string()},std::chrono::seconds(90),1U<<20U);
+        check(generated.launched && generated.exitCode==0 && fs::is_regular_file(conePath), "construct real tapered solid: "+generated.output);
+        if (generated.launched && generated.exitCode==0 && fs::is_regular_file(conePath)) {
+            EditorDocument scene("Tapered cope");
+            auto a=make_real_tube(w,1,"Branch",branch,{0,0,0});
+            EditorObject b(2,"Tapered envelope"); b.polygon=make_editor_polygon_cube(2);
+            auto exact=make_exact_brep_component({"sources/exact/test-taper-solid.brep","cone-fixture","taper fixture"});exact.id=1;b.components.push_back(exact);
+            scene.add_object(std::move(a));scene.add_object(std::move(b));
+            auto request=prepare_exact_cope_to_solid(w.root,scene,1,2);
+            auto tapered=run_exact_tube_cut(w.root,request,w.settings);
+            check(bool(tapered),"tapered solid cope: "+tapered.boolean.edit.error);
+            if(tapered) {
+                constexpr int n=800; constexpr double dx=.06/n; double expected=0.0;
+                for(int ix=0;ix<n;++ix) {const double x=-.03+(ix+.5)*dx; const double radius=.02+.03*(x+.2)/.4;
+                    for(int iz=0;iz<n;++iz) {const double z=-.03+(iz+.5)*dx; const double r2=x*x+z*z;
+                        if(r2>=.027*.027 && r2<=.03*.03) expected+=(.3-std::sqrt((std::max)(0.0,radius*radius-z*z)))*dx*dx;
+                    }
+                }
+                check(near_rel(tapered.boolean.exactVolume,expected,0.015), "tapered cope agrees with independent volume integral");
+                check(closed(tapered.boolean.edit.mesh), "tapered cope mesh watertight");
+                const auto desc=describe_exact_cad(w.root,tapered.boolean.source,w.settings);
+                bool cone=false;for(const auto& face:desc.faces) cone=cone || face.type=="cone";
+                check(bool(desc) && cone,"tapered cope keeps an exact cone face");
+            }
+        }
     }
     // 2. other angles between the axes: 60 and 30 degrees (the branch leans in the xy plane)
     for (const double degrees : {60.0, 30.0}) {

@@ -184,6 +184,12 @@ bool NativeEditorController::start_exact_tube(const TubeSpec& spec, EditorObject
             }
             const auto* source = resizeSource ? workspace_.document().find_object(resizeSource) : nullptr;
             if (resizeSource && (!source || !source->polygon)) { set_status("Resize source no longer exists", true); return false; }
+            if (source) {
+                const auto record = exact_tube_record(*source);
+                if (!record || !record->cuts.empty()) {
+                    set_status("Resize was not applied: the source is no longer an uncut tube", true); return false;
+                }
+            }
             if (!*created) { set_status(job.label + " produced no geometry", true, 8.0F); return false; }
             auto& result = **created;
             const auto before = capture_selection_snapshot();

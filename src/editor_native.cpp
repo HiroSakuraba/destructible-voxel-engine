@@ -2245,6 +2245,7 @@ void NativeEditorController::refresh_menu_state() noexcept {
     enabled("camera.pilot_selected", selectedCameraRig_.has_value(), "Select or create a camera rig first.");
     enabled("camera.align_to_view", selectedCameraRig_.has_value(), "Select or create a camera rig first.");
     enabled("camera.keyframe_profile", selectedCameraRig_.has_value(), "Select or create a camera rig first.");
+    enabled("camera.smooth_dolly", !cinematicCameraPanel_.sequencer().sequence().dollies.empty(), "Keyframe the camera first.");
     enabled("camera.paste_profile", cinematicCameraPanel_.can_paste(), "Copy a cinematic profile first.");
     checked("view.grid", viewportSettings_.showGrid);
     checked("view.isolate_selection", !viewportSettings_.isolatedObjects.empty());
@@ -2299,6 +2300,10 @@ void NativeEditorController::refresh_menu_state() noexcept {
     checked("window.camera_sequencer", cinematicCameraPanel_.sequencer_open());
     checked("camera.inspector", cinematicCameraPanel_.is_open());
     checked("camera.sequencer", cinematicCameraPanel_.sequencer_open());
+    {
+        const auto& dollies = cinematicCameraPanel_.sequencer().sequence().dollies;
+        checked("camera.smooth_dolly", !dollies.empty() && dollies.front().interpolation == camera::CameraDollyInterpolation::Smooth);
+    }
     checked("camera.lock_viewport", settingBool("camera.lock_viewport_to_selected", false));
     checked("camera.preview_effects", settingBool("camera.preview_cinematic_effects", true));
     checked("camera.overlay_focus", cinematicCameraPanel_.overlays().focusPlanes);
@@ -7650,6 +7655,23 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
         set_status(cleared ? "Cleared cinematic camera effects" : error, !cleared);
         refresh_menu_state();
         return cleared;
+    }
+    if (actionId == "camera.smooth_dolly") {
+        auto& sequencer = cinematicCameraPanel_.sequencer();
+        if (sequencer.sequence().dollies.empty()) {
+            set_status("Keyframe the camera first; the smooth path applies to the sequence's dolly", true);
+            return false;
+        }
+        const auto& dolly = sequencer.sequence().dollies.front();
+        const bool smooth = dolly.interpolation != camera::CameraDollyInterpolation::Smooth;
+        std::string error;
+        const bool changed = sequencer.set_dolly_interpolation(
+            dolly.id, smooth ? camera::CameraDollyInterpolation::Smooth : camera::CameraDollyInterpolation::CatmullRom, &error);
+        set_status(changed ? (smooth ? "Dolly path smooth: velocity, acceleration and curvature continuous through every key"
+                                     : "Dolly path Catmull-Rom: each segment shaped by its neighbours only")
+                           : error, !changed);
+        refresh_menu_state();
+        return changed;
     }
     if (actionId == "camera.keyframe_profile") {
         const camera::CameraRig* rig = selectedCameraRig_ ? cameraDirector_.find_rig(*selectedCameraRig_) : nullptr;

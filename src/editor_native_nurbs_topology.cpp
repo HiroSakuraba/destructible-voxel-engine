@@ -12,8 +12,8 @@ namespace dve::editor {
 bool NativeEditorController::dispatch_nurbs_topology(std::string_view action){
     if(workspace_.mode()!=EditorMode::Edit||playSession_.active()||longJob_||gizmoDragging_||nurbsBoxActive_)return false;
     if(textEdit_.kind==TextEditKind::NurbsControl)cancel_text_edit();
-    const bool rebuild=action=="nurbs.source_rebuild",adaptive=action=="nurbs.source_adaptive",crop=action=="nurbs.source_crop",fillet=action=="nurbs.source_fillet_corner";
-    const bool attach=action=="nurbs.source_attach_c0"||action=="nurbs.source_attach_c1",project=action=="nurbs.source_project",intersect=action=="nurbs.source_intersect_planes";
+    const bool rebuild=action=="nurbs.source_rebuild",adaptive=action=="nurbs.source_adaptive",crop=action=="nurbs.source_crop",fillet=action=="nurbs.source_fillet_corner"||action=="nurbs.source_blend_corner_radius"||action=="nurbs.source_blend_corner_setback";
+    const bool attach=action=="nurbs.source_attach_c0"||action=="nurbs.source_attach_c1"||action=="nurbs.source_attach_g2",project=action=="nurbs.source_project",intersect=action=="nurbs.source_intersect_planes";
     const bool changesTrimDomain=crop||attach||intersect||action=="nurbs.source_boundaries"||action.starts_with("nurbs.source_reverse_")||action=="nurbs.source_swap_uv"||action.starts_with("nurbs.source_split_");
     if(changesTrimDomain)for(auto id:workspace_.selected_objects()){const auto* o=workspace_.document().find_object(id);if(o&&has_nurbs_source(*o)){auto f=editor_nurbs_surface_features(*o);if(f&&f->trim){set_status("This operation needs untrimmed source boundaries; untrim first or use trim-region editing",true);return false;}}}
     if(rebuild||adaptive||crop||fillet||attach||project||intersect){
@@ -41,11 +41,11 @@ bool NativeEditorController::dispatch_nurbs_topology(std::string_view action){
             else mesh=tessellate_nurbs_adaptive(*source,newId,.01,.15,&error);
             label="Adaptive Polygon";status="Adaptive surface polygon added; sampled local tolerance 0.01, angle 0.15 rad; source retained";}
         else if(attach){
-            auto options=nurbsAttachmentOptions_;options.c1=action=="nurbs.source_attach_c1";
+            auto options=nurbsAttachmentOptions_;options.c1=action!="nurbs.source_attach_c0";options.c2=action=="nurbs.source_attach_g2";
             auto attached=attach_nurbs_boundaries(*source,*other,options,&error);
             if(attached){output=std::move(attached->moving);const bool v=options.movingBoundary==NurbsBoundary::UMin||options.movingBoundary==NurbsBoundary::UMax;
                 status="Boundary matched with compatible degree "+std::to_string(v?output->v.degree:output->u.degree)+
-                    "; "+(options.c1?"C1 in normalized cross-boundary domains":"C0 position")+"; originals retained, separate patches";}
+                    "; "+(options.c2?"C2 in normalized cross-boundary domains (curvature matches: G2)":options.c1?"C1 in normalized cross-boundary domains":"C0 position")+"; originals retained, separate patches";}
             label="Boundary Matched Patch";
         }
         else if(project){output=project_nurbs_curve(*other,*source,nurbsSweepOptions_.sections,&error);label="Projected Sample Guide";status="Projected sample guide added; connecting segments are approximate; originals retained";}
@@ -54,7 +54,17 @@ bool NativeEditorController::dispatch_nurbs_topology(std::string_view action){
         else{
             if(!(nurbsOperationParameter_>0&&nurbsOperationParameter_<1)){set_status("Corner leg fraction must lie strictly between 0 and 1",true);return false;}
             if(!source->is_curve()||source->columns!=3||source->u.degree!=1){set_status("Select a three-control degree-one corner curve",true);return false;}
-            const auto a=source->controls[0],b=source->controls[1],c=source->controls[2];const double la=std::hypot(a.x-b.x,a.y-b.y,a.z-b.z),lc=std::hypot(c.x-b.x,c.y-b.y,c.z-b.z);const double cosine=la>0&&lc>0?((a.x-b.x)*(c.x-b.x)+(a.y-b.y)*(c.y-b.y)+(a.z-b.z)*(c.z-b.z))/(la*lc):1;const double theta=std::acos(std::clamp(cosine,-1.0,1.0));output=fillet_nurbs_corner(*source,nurbsOperationParameter_*(std::min)(la,lc)*std::tan(theta/2),&error);label="Corner Fillet Arc";status="Rational circular corner arc added; trim/join legs separately; original retained";
+            const auto a=source->controls[0],b=source->controls[1],c=source->controls[2];const double la=std::hypot(a.x-b.x,a.y-b.y,a.z-b.z),lc=std::hypot(c.x-b.x,c.y-b.y,c.z-b.z);const double cosine=la>0&&lc>0?((a.x-b.x)*(c.x-b.x)+(a.y-b.y)*(c.y-b.y)+(a.z-b.z)*(c.z-b.z))/(la*lc):1;const double theta=std::acos(std::clamp(cosine,-1.0,1.0));const double setback=nurbsOperationParameter_*(std::min)(la,lc),radius=setback*std::tan(theta/2);
+            if(action=="nurbs.source_fillet_corner"){output=fillet_nurbs_corner(*source,radius,&error);label="Corner Fillet Arc";status="Rational circular corner arc added; trim/join legs separately; original retained";}
+            else{
+                // Radius mode: as round as the circular fillet this fraction makes. Setback mode: starts where that fillet starts.
+                const bool matchRadius=action=="nurbs.source_blend_corner_radius";
+                auto blend=blend_nurbs_corner(*source,matchRadius?NurbsCornerBlendSize::MatchRadius:NurbsCornerBlendSize::Setback,matchRadius?radius:setback,&error);
+                if(blend){output=std::move(blend->source);std::ostringstream text;text.imbue(std::locale::classic());text<<std::setprecision(4)
+                    <<"G2 corner blend added (zero curvature where it meets each leg, so no highlight line); setback "<<blend->setback<<" local units"
+                    <<", peak curvature "<<blend->peakCurvature<<" vs "<<blend->arcCurvature<<" for a circular fillet through the same midpoint; trim/join legs separately; original retained";status=text.str();}
+                label="G2 Corner Blend";
+            }
         }
         if(!mesh&&!output){set_status(error,true);return false;}
         std::optional<EditorObject> made;

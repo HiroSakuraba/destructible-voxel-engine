@@ -556,13 +556,73 @@ ExactBooleanRequest prepare_exact_boolean(const std::filesystem::path& projectRo
 }
 
 namespace {
-// Builds an analytic solid with `brepkernel primitive` into `output` (empty string on success).
+// Build a rounded box using the same OpenCASCADE Python bindings used by brepkernel.
+// It is an input primitive, not a certified result: the subsequent brepkernel Boolean
+// still decides acceptance. No shell or external script file is used.
+constexpr const char* kRoundedBoxScript = R"DVE_PY(
+import argparse, json, sys
+p=argparse.ArgumentParser()
+p.add_argument('command');p.add_argument('kind');p.add_argument('-o',required=True)
+p.add_argument('--size',nargs=3,type=float,required=True);p.add_argument('--radius',type=float,required=True)
+p.add_argument('--axis',choices=['x','y','z'],required=True);p.add_argument('--at',nargs=3,type=float,required=True)
+p.add_argument('--report',required=True);a=p.parse_args()
+try:
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
+    from OCP.BRepFilletAPI import BRepFilletAPI_MakeFillet
+    from OCP.BRepAdaptor import BRepAdaptor_Curve
+    from OCP.BRepCheck import BRepCheck_Analyzer
+    from OCP.TopAbs import TopAbs_EDGE
+    from OCP.TopExp import TopExp_Explorer
+    from OCP.TopoDS import TopoDS
+    from OCP.BRepTools import BRepTools
+    from OCP.gp import gp_Pnt
+    lower=[a.at[i]-a.size[i]/2 for i in range(3)]
+    shape=BRepPrimAPI_MakeBox(gp_Pnt(*lower),*a.size).Shape()
+    fillet=BRepFilletAPI_MakeFillet(shape); explorer=TopExp_Explorer(shape,TopAbs_EDGE)
+    axis='xyz'.index(a.axis); seen=set()
+    while explorer.More():
+        cast=getattr(TopoDS,'Edge_s',None) or getattr(TopoDS,'Edge')
+        edge=cast(explorer.Current()); curve=BRepAdaptor_Curve(edge)
+        u=curve.Value(curve.FirstParameter());v=curve.Value(curve.LastParameter())
+        x=(u.X(),u.Y(),u.Z());y=(v.X(),v.Y(),v.Z())
+        delta=[abs(x[i]-y[i]) for i in range(3)]
+        if abs(delta[axis]-a.size[axis]) < 1e-9*max(1.0,a.size[axis]) and all(delta[i] < 1e-9 for i in range(3) if i!=axis):
+            key=tuple(sorted((x,y)))
+            if key not in seen: fillet.Add(a.radius,edge);seen.add(key)
+        explorer.Next()
+    if len(seen)!=4: raise RuntimeError('expected four longitudinal box edges')
+    fillet.Build()
+    if not fillet.IsDone(): raise RuntimeError('OpenCASCADE rounded box failed')
+    result=fillet.Shape()
+    if not BRepCheck_Analyzer(result).IsValid(): raise RuntimeError('rounded box is invalid')
+    BRepTools.Write_s(result,a.o)
+    with open(a.report,'w',encoding='utf-8') as f: json.dump({'schema':'brepkernel.cli/1','status':'ok'},f)
+except Exception as exc:
+    with open(a.report,'w',encoding='utf-8') as f: json.dump({'schema':'brepkernel.cli/1','status':'error','error':str(exc)},f)
+    sys.exit(2)
+)DVE_PY";
+
+// Builds an analytic solid into `output` (empty string on success).
 std::string build_exact_primitive(const ExactCadSettings& settings, const ExactCadRunner& runner, const ExactPrimitive& primitive,
                                   const std::filesystem::path& output, const std::filesystem::path& report) {
-    std::vector<std::string> args{"primitive", primitive.kind == ExactPrimitive::Kind::Box ? "box" : "cylinder", "-o", utf8(output)};
-    if (primitive.kind == ExactPrimitive::Kind::Box) {
+    const bool rounded = primitive.kind == ExactPrimitive::Kind::RoundedBox;
+    ExactCadSettings helperSettings = settings;
+    if (rounded) {
+        const char* overridePython = std::getenv("DVE_CAD_PYTHON");
+        if (overridePython && *overridePython) helperSettings.command = {overridePython, "-c", kRoundedBoxScript};
+        else if (settings.command.size() >= 3 && settings.command[1] == "-m" && settings.command[2] == "brepkernel")
+            helperSettings.command = {settings.command[0], "-c", kRoundedBoxScript};
+#ifdef _WIN32
+        else helperSettings.command = {"python", "-c", kRoundedBoxScript};
+#else
+        else helperSettings.command = {"python3", "-c", kRoundedBoxScript};
+#endif
+    }
+    std::vector<std::string> args{"primitive", primitive.kind == ExactPrimitive::Kind::Box ? "box" : rounded ? "rounded-box" : "cylinder", "-o", utf8(output)};
+    if (primitive.kind == ExactPrimitive::Kind::Box || rounded) {
         args.push_back("--size");
         for (const double v : primitive.size) args.push_back(format_double(v));
+        if (rounded) { args.push_back("--radius"); args.push_back(format_double(primitive.radius)); args.push_back("--axis"); args.push_back(std::string(1, primitive.axis)); }
     } else {
         args.push_back("--radius");
         args.push_back(format_double(primitive.radius));
@@ -573,7 +633,7 @@ std::string build_exact_primitive(const ExactCadSettings& settings, const ExactC
     }
     args.push_back("--at");
     for (const double v : primitive.centre) args.push_back(format_double(v));
-    const auto run = run_tool(settings, runner, std::move(args), report);
+    const auto run = run_tool(helperSettings, runner, std::move(args), report);
     if (!run.report) return run.error;
     if (run.exitCode != 0) {
         const auto message = json_string(*run.report, {"error"});

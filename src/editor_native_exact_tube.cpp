@@ -55,15 +55,20 @@ std::string NativeEditorController::exact_tube_disabled_reason(std::string_view 
     if (action == "polygon.create_exact_tube") return {};
     const auto selected = workspace_.selected_objects();
     const EditorObject* primary = workspace_.selected_object() ? workspace_.document().find_object(*workspace_.selected_object()) : nullptr;
-    if (action == "mesh.exact_miter") {
+    if (action == "mesh.exact_miter" || action == "mesh.exact_resize_tube") {
         if (selected.size() != 1 || !primary) return "Select one tube first.";
         if (!tube_target_ok(*primary)) return primary->name + " must be a visible, unlocked polygon object (not a prefab instance).";
         if (is_isolated_out(primary->id)) return primary->name + " is isolated out of view.";
         if (!exact_brep_source(*primary)) return primary->name + " has no exact CAD source (make it with Polygon > Create Exact Tube).";
-        if (!exact_tube_record(*primary)) return primary->name + " has no tube record (make it with Polygon > Create Exact Tube).";
+        const auto tube = exact_tube_record(*primary);
+        if (!tube) return primary->name + " has no tube record (make it with Polygon > Create Exact Tube).";
+        if (action == "mesh.exact_resize_tube" && !tube->cuts.empty())
+            return "This tube has cuts that cannot be replayed yet; resize the uncut stock and repeat its cuts.";
         return {};
     }
-    if (selected.size() != 2 || !primary) return "Select two tubes: A (the active one) is coped to B.";
+    if (selected.size() != 2 || !primary) return action == "mesh.exact_cope_solid"
+        ? "Select two exact CAD objects: A (the active one) is cut by the supplied solid B."
+        : "Select two tubes: A (the active one) is coped to B.";
     const EditorObject* other = nullptr;
     for (const EditorObjectId id : selected)
         if (id != primary->id) other = workspace_.document().find_object(id);
@@ -73,6 +78,7 @@ std::string NativeEditorController::exact_tube_disabled_reason(std::string_view 
         if (is_isolated_out(object->id)) return object->name + " is isolated out of view.";
         if (!exact_brep_source(*object)) return object->name + " has no exact CAD source (make it with Polygon > Create Exact Tube).";
     }
+    if (action == "mesh.exact_cope_solid") return {};
     if (!exact_tube_record(*other)) return other->name + " (B) has no tube record: its outer body is what is cut away. Make it with Polygon > Create Exact Tube.";
     return {};
 }
@@ -81,8 +87,21 @@ bool NativeEditorController::dispatch_exact_tube_action(std::string_view action)
     if (const std::string reason = exact_tube_disabled_reason(action); !reason.empty()) { set_status(reason, true); return false; }
     if (action == "polygon.create_exact_tube") {
         begin_text_edit(TextEditKind::ExactTube, 0, "round 50.8 3 600 y");
-        set_status("Type the tube: round OD wall length | square W wall length | rect W x H wall length, in mm (units mm cm m in), then the axis x, y or z. Enter creates it");
+        set_status("Type round OD wall length | square W wall length | rect W x H wall length; optional r <corner radius> for square/rect, then axis x y z. Dimensions are mm. Enter creates it");
         return true;
+    }
+    if (action == "mesh.exact_resize_tube") {
+        const auto id = *workspace_.selected_object();
+        const auto tube = exact_tube_record(*workspace_.document().find_object(id));
+        begin_text_edit(TextEditKind::ExactTubeResize, id, format_tube_spec(tube->spec));
+        set_status("Edit mesh-local tube sizes in mm (before object scale); Enter creates an exact stock copy at the original pose. Original unchanged.");
+        return true;
+    }
+    if (action == "mesh.exact_cope_solid") {
+        const auto primary = *workspace_.selected_object();
+        EditorObjectId other = 0;
+        for (auto id : workspace_.selected_objects()) if (id != primary) other = id;
+        return start_exact_cope_solid(primary, other);
     }
     if (action == "mesh.exact_cope") {
         begin_text_edit(TextEditKind::ExactCopeGap, 0, "0");
@@ -100,11 +119,21 @@ bool NativeEditorController::dispatch_exact_tube_action(std::string_view action)
 bool NativeEditorController::commit_exact_tube_text() {
     const TextEditKind kind = textEdit_.kind;
     const std::string text = textEdit_.buffer;
+    const EditorObjectId resizeSource = textEdit_.objectId;
     textEdit_ = {};
     if (kind == TextEditKind::ExactTube) {
         const auto parsed = parse_tube_spec(text);
         if (!parsed.spec) { set_status("Create Exact Tube: " + parsed.error, true, 8.0F); return false; }
         return start_exact_tube(*parsed.spec);
+    }
+    if (kind == TextEditKind::ExactTubeResize) {
+        const auto parsed = parse_tube_spec(text);
+        if (!parsed.spec) { set_status("Resize Exact Tube: " + parsed.error, true, 8.0F); return false; }
+        if (workspace_.selected_object() != resizeSource || workspace_.selection_count() != 1) {
+            set_status("Resize Exact Tube: select the original stock tube again", true); return false;
+        }
+        if (const auto reason = exact_tube_disabled_reason("mesh.exact_resize_tube"); !reason.empty()) { set_status(reason, true); return false; }
+        return start_exact_tube(*parsed.spec, resizeSource);
     }
     if (kind == TextEditKind::ExactCopeGap) {
         const auto gap = parse_fit_up_gap(text);
@@ -128,12 +157,13 @@ bool NativeEditorController::commit_exact_tube_text() {
     return false;
 }
 
-bool NativeEditorController::start_exact_tube(const TubeSpec& spec) {
+bool NativeEditorController::start_exact_tube(const TubeSpec& spec, EditorObjectId resizeSource) {
     if (const std::string reason = exact_tube_disabled_reason("polygon.create_exact_tube"); !reason.empty()) { set_status(reason, true); return false; }
     auto created = std::make_shared<std::optional<ExactTubeResult>>();
     const auto id = workspace_.document().allocate_object_id();
     const auto root = projectRoot_;
     const auto settings = ExactCadSettings::from_environment();
+    const auto sourceStamp = resizeSource ? exact_operand_stamp(workspace_.document(), resizeSource, resizeSource) : 0;
     return start_long_job(LongJobKind::ImportModel, "Create exact tube (" + format_tube_spec(spec) + ")", longJobThreshold_ + 1,
         [created, spec, id, root, settings](LongJob& job) {
             if (job.cancelled()) return;
@@ -148,7 +178,12 @@ bool NativeEditorController::start_exact_tube(const TubeSpec& spec) {
             created->emplace(std::move(result));
             job.report(1.0F, "Tube ready");
         },
-        [this, created, spec, id](LongJob& job) {
+        [this, created, spec, id, resizeSource, sourceStamp](LongJob& job) {
+            if (resizeSource && exact_operand_stamp(workspace_.document(), resizeSource, resizeSource) != sourceStamp) {
+                set_status("Resize was not applied: the source changed while the tube was built", true, 8.0F); return false;
+            }
+            const auto* source = resizeSource ? workspace_.document().find_object(resizeSource) : nullptr;
+            if (resizeSource && (!source || !source->polygon)) { set_status("Resize source no longer exists", true); return false; }
             if (!*created) { set_status(job.label + " produced no geometry", true, 8.0F); return false; }
             auto& result = **created;
             const auto before = capture_selection_snapshot();
@@ -159,7 +194,12 @@ bool NativeEditorController::start_exact_tube(const TubeSpec& spec) {
             object.polygon = std::move(result.mesh);
             object.polygon->objectId = id;
             refresh_editor_polygon(*object.polygon);
-            object.transform.position = camera_.target;
+            if (source) {
+                object.transform = source->transform; object.parent = source->parent;
+                object.voxelScale = source->voxelScale; object.voxelSizeMeters = source->voxelSizeMeters;
+                object.flags = source->flags;
+                // A new stock mesh cannot safely inherit per-face assignments from a different topology.
+            } else object.transform.position = camera_.target;
             Component exact = make_exact_brep_component(result.source);
             exact.id = 1;
             object.components.push_back(std::move(exact));
@@ -180,7 +220,8 @@ bool NativeEditorController::start_exact_tube(const TubeSpec& spec) {
             workspace_.commands().set_last_selection_transition(before, capture_selection_snapshot());
             frame_selection();
             refresh_menu_state();
-            set_status(result.summary + "; exact source kept at " + result.source.relativePath.generic_string());
+            set_status(result.summary + "; exact source kept at " + result.source.relativePath.generic_string() +
+                       (resizeSource ? "; resized copy created; original unchanged; reassign materials if needed" : ""));
             return true;
         });
 }
@@ -190,6 +231,13 @@ bool NativeEditorController::start_exact_cope(EditorObjectId a, EditorObjectId b
     auto request = prepare_exact_cope(projectRoot_, workspace_.document(), a, b, options);
     if (!request.error.empty()) { set_status(request.error, true, 8.0F); return false; }
     return start_exact_tube_cut(std::move(request), " (Coped to " + workspace_.document().find_object(b)->name + ")");
+}
+
+bool NativeEditorController::start_exact_cope_solid(EditorObjectId a, EditorObjectId b) {
+    if (const std::string reason = exact_tube_disabled_reason("mesh.exact_cope_solid"); !reason.empty()) { set_status(reason, true); return false; }
+    auto request = prepare_exact_cope_to_solid(projectRoot_, workspace_.document(), a, b);
+    if (!request.error.empty()) { set_status(request.error, true, 8.0F); return false; }
+    return start_exact_tube_cut(std::move(request), " (Coped to supplied solid " + workspace_.document().find_object(b)->name + ")");
 }
 
 bool NativeEditorController::start_exact_miter(EditorObjectId a, const ExactMiterSpec& spec) {

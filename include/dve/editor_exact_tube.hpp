@@ -47,6 +47,7 @@ struct TubeSpec {
     double wall{0.003};
     double length{0.6};
     char axis{'y'};
+    double outerCornerRadius{};          // square/rect outer radius, mesh-local metres; 0 = sharp
 };
 
 [[nodiscard]] std::string validate_tube_spec(const TubeSpec& spec);   // "" when valid
@@ -55,7 +56,8 @@ struct TubeSpecParse {
     std::string error;
 };
 // "round 50.8 3 600 y", "square 40 2 500 x", "rect 80x40 3 600 z": outer size(s), wall, length in
-// millimetres (suffix mm, cm, m or in on any number), optional axis letter last (default y).
+// millimetres (suffix mm, cm, m or in on any number), optional "r <outer-radius>" then axis.
+// Example: "rect 80x40 3 600 r 6 y"; radius defaults to zero.
 [[nodiscard]] TubeSpecParse parse_tube_spec(std::string_view text);
 [[nodiscard]] std::string format_tube_spec(const TubeSpec& spec);      // the text above, in mm
 [[nodiscard]] std::string describe_tube_spec(const TubeSpec& spec);    // "Round tube Ø50.8 x 3 mm wall, 600 mm long, along Y"
@@ -91,7 +93,7 @@ struct ExactTubeCutRequest {
     std::string record;                // what is appended to the tube's cut record
     double gapMeters{};                // cope: fit-up gap in B's mesh frame
     bool tangentRetry{};               // cope: repeat once with tangentClearanceMeters when brepkernel refuses a near-tangent pair
-    double tangentClearanceMeters{};
+    double tangentClearanceMeters{};   // retry clearance in B mesh-local metres
     std::optional<ExactTubeRecord> tubeA;   // A's record, carried to the result
     std::optional<TubeSpec> cutterTube;     // cope: B's tube, the cutter is its outer body grown by the gap
     std::string target;                // cope: name of B, for the record
@@ -110,12 +112,17 @@ struct ExactTubeCutResult {
 
 struct ExactCopeOptions {
     double gapWorldMeters{0.0};                  // fit-up gap, world metres (default 0)
-    double tangentClearanceMeters{1.0e-5};       // clearance used once when the zero-gap cut is refused (0.01 mm)
+    double tangentClearanceMeters{1.0e-5};       // world-metre clearance used once after refusal (0.01 mm)
     bool retryTangent{true};
 };
 [[nodiscard]] ExactTubeCutRequest prepare_exact_cope(
     const std::filesystem::path& projectRoot, const EditorDocument& document, EditorObjectId a, EditorObjectId b,
     const ExactCopeOptions& options = {});
+// Cut A by B's actual exact solid rather than a reconstructed tube envelope.
+// Useful for tapered/variable-width solid cutters. No fit-up expansion is implied.
+[[nodiscard]] ExactTubeCutRequest prepare_exact_cope_to_solid(
+    const std::filesystem::path& projectRoot, const EditorDocument& document, EditorObjectId a, EditorObjectId b);
+
 
 // The typed fit-up gap: a length in millimetres by default (units mm, cm, m, in; scientific notation
 // such as 1e-3 is a plain number, so 0.001 mm), never negative.

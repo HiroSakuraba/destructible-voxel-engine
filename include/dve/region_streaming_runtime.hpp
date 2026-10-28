@@ -59,9 +59,9 @@ public:
 private:
     struct Pending {
         std::future<RuntimeDeferredObjectStageResult> future;
-        std::optional<RuntimeDeferredObjectStageResult> readyResult;
         RuntimeSceneCancellationToken cancellation{};
         bool cancelRequested{};
+        std::optional<RuntimeDeferredObjectStageResult> readyResult;
     };
     [[nodiscard]] bool in_retry_backoff(std::uint64_t id, std::uint64_t tick) const;
     const RegionCatalog& catalog_;

@@ -5260,6 +5260,8 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
                         std::abs(y - selectedCollisionY_) <= 3) {
                         const auto it = std::find_if(hits.begin(), hits.end(), [&](const EditorCollisionPick& hit) {
                             return hit.objectId == selectedCollision_->objectId &&
+                                hit.kind == selectedCollision_->kind &&
+                                hit.boxIndex == selectedCollision_->boxIndex &&
                                 hit.box == selectedCollision_->box;
                         });
                         if (it != hits.end())
@@ -5269,7 +5271,12 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
                     selectedCollisionX_ = x; selectedCollisionY_ = y;
                     workspace_.select_object(selectedCollision_->objectId);
                     refresh_menu_state();
-                    set_status("Collision box " + std::to_string(selectedCollision_->boxIndex + 1U) +
+                    const std::string colliderType =
+                        selectedCollision_->kind == EditorColliderKind::VoxelBox ? "box" :
+                        selectedCollision_->kind == EditorColliderKind::ConvexPrism ? "convex piece" :
+                        selectedCollision_->kind == EditorColliderKind::AuthoredHull ? "authored hull" :
+                        "polygon bounds";
+                    set_status("Collision " + colliderType + " " + std::to_string(selectedCollision_->boxIndex + 1U) +
                         " of object " + std::to_string(selectedCollision_->objectId) +
                         " (depth " + std::to_string(chosen + 1U) + "/" + std::to_string(hits.size()) +
                         "; click again to cycle overlapping colliders)");

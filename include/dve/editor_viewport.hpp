@@ -11,6 +11,7 @@
 #include "dve/camera_system.hpp"
 #include "dve/editor_document.hpp"
 #include "dve/editor_materials.hpp"
+#include "dve/fragment.hpp"
 #include "dve/query.hpp"
 
 namespace dve {
@@ -71,6 +72,23 @@ struct EditorPickResult {
     float worldDistance{};
     std::optional<std::uint32_t> polygonFace;
 };
+
+// A selectable collision primitive, distinct from artist mesh/voxel surface picks.
+// Indices follow deterministic merged-box ordering; the UI must re-pick after an edit.
+enum class EditorColliderKind : std::uint8_t { VoxelBox, ConvexPrism, AuthoredHull, PolygonBounds };
+struct EditorCollisionPick {
+    EditorObjectId objectId{};
+    std::size_t boxIndex{}; // box/piece index; 0 for one authored hull or fallback
+    VoxelBox box{};         // valid for voxel boxes only
+    Float3 worldPosition{};
+    float worldDistance{};
+    EditorColliderKind kind{EditorColliderKind::VoxelBox};
+};
+[[nodiscard]] std::vector<EditorCollisionPick> pick_editor_collision_boxes_all(
+    const EditorDocument& document, ViewportRay ray,
+    float maximumWorldDistance = 10000.0F,
+    const std::set<EditorObjectId>* onlyObjects = nullptr,
+    bool includeHidden = true);
 
 struct EditorVoxelDrawItem {
     EditorObjectId objectId{};

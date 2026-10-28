@@ -214,6 +214,7 @@ add_library(dve_core
     src/nurbs_topology.cpp
     src/nurbs_modeling.cpp
     src/nurbs_attachment.cpp
+    src/nurbs_curvature.cpp
     src/nurbs_tessellation.cpp
     src/nurbs_trimming.cpp
     src/nurbs_queries.cpp
@@ -939,6 +940,7 @@ if(DVE_BUILD_EDITOR)
         src/editor_native_nurbs.cpp
         src/editor_native_nurbs_construction.cpp
         src/editor_native_nurbs_topology.cpp
+        src/editor_native_nurbs_curvature.cpp
         src/editor_native_nurbs_transform.cpp
         src/editor_nurbs_tessellation.cpp
         src/editor_nurbs_seam.cpp
@@ -3282,6 +3284,9 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_editor_nurbs_modeling_tests tests/test_editor_nurbs_modeling.cpp)
         target_link_libraries(dve_editor_nurbs_modeling_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_nurbs_modeling_tests COMMAND dve_editor_nurbs_modeling_tests)
+        add_executable(dve_nurbs_curvature_tests tests/test_nurbs_curvature.cpp)
+        target_link_libraries(dve_nurbs_curvature_tests PRIVATE dve::editor)
+        add_test(NAME dve_nurbs_curvature_tests COMMAND dve_nurbs_curvature_tests)
         add_executable(dve_editor_nurbs_length_tests tests/test_editor_nurbs_length.cpp)
         target_link_libraries(dve_editor_nurbs_length_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_nurbs_length_tests COMMAND dve_editor_nurbs_length_tests)

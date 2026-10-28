@@ -1,6 +1,8 @@
 #include "dve/camera_sequence.hpp"
 
 #include <algorithm>
+#include <array>
+#include <optional>
 #include <cmath>
 #include <iomanip>
 #include <sstream>
@@ -19,6 +21,56 @@ Float3 catmull(Float3 p0, Float3 p1, Float3 p2, Float3 p3, float t) noexcept {
                                          add(multiply(p2, 4.0F), multiply(p3, -1.0F))), t2),
                             multiply(add(add(multiply(p0, -1.0F), multiply(p1, 3.0F)),
                                          add(multiply(p2, -3.0F), p3)), t3))), 0.5F);
+}
+
+// Second derivatives (in time) of the natural cubic spline through the keys' positions and
+// targets: M_0 = M_n = 0 and, for interior keys,
+//   h[i-1] M[i-1] + 2 (h[i-1] + h[i]) M[i] + h[i] M[i+1] = 6 ((y[i+1]-y[i])/h[i] - (y[i]-y[i-1])/h[i-1]).
+struct DollyMoments { std::vector<Float3> position, target; };
+DollyMoments natural_moments(const std::vector<CameraDollyKey>& keys) {
+    const std::size_t n = keys.size();
+    DollyMoments m;
+    m.position.assign(n, Float3{});
+    m.target.assign(n, Float3{});
+    if (n < 3U) return m;
+    auto solve = [&](auto value, std::vector<Float3>& out) {
+        // Thomas algorithm on the interior unknowns 1..n-2, all three components at once.
+        std::vector<double> diag(n), upper(n);
+        std::vector<std::array<double, 3>> rhs(n);
+        for (std::size_t i = 1; i + 1 < n; ++i) {
+            const double h0 = double(keys[i].timeSeconds) - keys[i - 1].timeSeconds;
+            const double h1 = double(keys[i + 1].timeSeconds) - keys[i].timeSeconds;
+            const Float3 a = value(keys[i - 1]), b = value(keys[i]), c = value(keys[i + 1]);
+            const double ya[3]{a.x, a.y, a.z}, yb[3]{b.x, b.y, b.z}, yc[3]{c.x, c.y, c.z};
+            diag[i] = 2.0 * (h0 + h1);
+            upper[i] = h1;
+            for (int k = 0; k < 3; ++k) rhs[i][k] = 6.0 * ((yc[k] - yb[k]) / h1 - (yb[k] - ya[k]) / h0);
+            if (i > 1) {
+                const double w = h0 / diag[i - 1];
+                diag[i] -= w * upper[i - 1];
+                for (int k = 0; k < 3; ++k) rhs[i][k] -= w * rhs[i - 1][k];
+            }
+        }
+        std::array<double, 3> next{};
+        for (std::size_t i = n - 2; i >= 1; --i) {
+            for (int k = 0; k < 3; ++k) next[k] = (rhs[i][k] - upper[i] * next[k]) / diag[i];
+            out[i] = {float(next[0]), float(next[1]), float(next[2])};
+            if (i == 1) break;
+        }
+    };
+    solve([](const CameraDollyKey& k) { return k.pose.position; }, m.position);
+    solve([](const CameraDollyKey& k) { return k.pose.target; }, m.target);
+    return m;
+}
+
+Float3 natural(Float3 y0, Float3 y1, Float3 m0, Float3 m1, float h, float s) noexcept {
+    const float r = h - s;
+    const auto component = [&](float a, float b, float ma, float mb) {
+        return ma * r * r * r / (6.0F * h) + mb * s * s * s / (6.0F * h) +
+               (a / h - ma * h / 6.0F) * r + (b / h - mb * h / 6.0F) * s;
+    };
+    return {component(y0.x, y1.x, m0.x, m1.x), component(y0.y, y1.y, m0.y, m1.y),
+            component(y0.z, y1.z, m0.z, m1.z)};
 }
 
 CameraLens blend_lens(CameraLens a, const CameraLens& b, float t) noexcept {
@@ -210,7 +262,9 @@ bool CameraDollySpline::validate(std::string* error) const {
     return true;
 }
 
-CameraDollyKey CameraDollySpline::evaluate(float time) const noexcept {
+namespace {
+CameraDollyKey evaluate_dolly(const CameraDollySpline& dolly, float time, const DollyMoments* moments) noexcept {
+    const auto& keys = dolly.keys;
     if (keys.empty()) return {};
     if (keys.size() == 1U || time <= keys.front().timeSeconds) return keys.front();
     if (time >= keys.back().timeSeconds) return keys.back();
@@ -224,16 +278,43 @@ CameraDollyKey CameraDollySpline::evaluate(float time) const noexcept {
                     (keys[i2].timeSeconds - keys[i1].timeSeconds);
     CameraDollyKey result = keys[i1];
     result.timeSeconds = time;
-    result.pose.position = catmull(keys[i0].pose.position, keys[i1].pose.position,
-                                   keys[i2].pose.position, keys[i3].pose.position, t);
-    result.pose.target = catmull(keys[i0].pose.target, keys[i1].pose.target,
-                                 keys[i2].pose.target, keys[i3].pose.target, t);
+    if (moments) {
+        const float h = keys[i2].timeSeconds - keys[i1].timeSeconds, s = time - keys[i1].timeSeconds;
+        result.pose.position = natural(keys[i1].pose.position, keys[i2].pose.position,
+                                       moments->position[i1], moments->position[i2], h, s);
+        result.pose.target = natural(keys[i1].pose.target, keys[i2].pose.target,
+                                     moments->target[i1], moments->target[i2], h, s);
+    } else {
+        result.pose.position = catmull(keys[i0].pose.position, keys[i1].pose.position,
+                                       keys[i2].pose.position, keys[i3].pose.position, t);
+        result.pose.target = catmull(keys[i0].pose.target, keys[i1].pose.target,
+                                     keys[i2].pose.target, keys[i3].pose.target, t);
+    }
     result.pose.worldUp = normalize(lerp(keys[i1].pose.worldUp, keys[i2].pose.worldUp, t));
     result.pose.lens = blend_lens(keys[i1].pose.lens, keys[i2].pose.lens, t);
     result.pose.postProcessWeight = lerp(keys[i1].pose.postProcessWeight,
                                          keys[i2].pose.postProcessWeight, t);
     result.postProcess = blend_post(keys[i1].postProcess, keys[i2].postProcess, t);
     return result;
+}
+std::optional<DollyMoments> dolly_moments(const CameraDollySpline& dolly) {
+    if (dolly.interpolation != CameraDollyInterpolation::Smooth) return std::nullopt;
+    return natural_moments(dolly.keys);
+}
+} // namespace
+
+CameraDollyKey CameraDollySpline::evaluate(float time) const noexcept {
+    // A single query solves the spline (linear in the key count); the sampling loops below
+    // solve it once and reuse it.
+    if (interpolation == CameraDollyInterpolation::Smooth && keys.size() >= 3U) {
+        try {
+            const auto moments = natural_moments(keys);
+            return evaluate_dolly(*this, time, &moments);
+        } catch (...) {
+            // Allocation failure: fall back to the local interpolation.
+        }
+    }
+    return evaluate_dolly(*this, time, nullptr);
 }
 
 CameraDollyKey CameraDollySpline::evaluate_progress(float normalizedProgress,
@@ -244,6 +325,8 @@ CameraDollyKey CameraDollySpline::evaluate_progress(float normalizedProgress,
     const float end = keys.back().timeSeconds;
     if (!constantSpeed || keys.size() < 3U) return evaluate(lerp(begin, end, normalizedProgress));
 
+    const auto moments = dolly_moments(*this);
+    const auto evaluate = [&](float time) { return evaluate_dolly(*this, time, moments ? &*moments : nullptr); };
     struct Sample { float time{}; float distance{}; };
     std::vector<Sample> samples;
     samples.reserve((keys.size() - 1U) * arcLengthSamplesPerSegment + 1U);
@@ -274,6 +357,8 @@ CameraDollyKey CameraDollySpline::evaluate_progress(float normalizedProgress,
 
 float CameraDollySpline::approximate_length() const noexcept {
     if (keys.size() < 2U) return 0.0F;
+    const auto moments = dolly_moments(*this);
+    const auto evaluate = [&](float time) { return evaluate_dolly(*this, time, moments ? &*moments : nullptr); };
     float result = 0.0F;
     CameraDollyKey previous = evaluate(keys.front().timeSeconds);
     for (std::size_t segment = 0; segment + 1U < keys.size(); ++segment) {
@@ -413,13 +498,14 @@ CameraSequenceSample CameraSequence::evaluate(float time) const noexcept {
 
 std::string CameraSequence::serialize() const {
     std::ostringstream out;
-    out << "DVE_CAMERA_SEQUENCE 3\n" << std::quoted(name) << ' '
+    out << "DVE_CAMERA_SEQUENCE 4\n" << std::quoted(name) << ' '
         << std::setprecision(9) << durationSeconds << '\n';
     out << "dollies " << dollies.size() << '\n';
     for (const auto& dolly : dollies) {
         out << "dolly " << dolly.id << ' ' << std::quoted(dolly.name) << ' '
             << (dolly.closed ? 1 : 0) << ' ' << dolly.arcLengthSamplesPerSegment << ' '
-            << dolly.keys.size() << '\n';
+            << dolly.keys.size() << ' '
+            << (dolly.interpolation == CameraDollyInterpolation::Smooth ? "smooth" : "catmull_rom") << '\n';
         for (const auto& key : dolly.keys) {
             const auto& pose = key.pose;
             const auto& post = key.postProcess;
@@ -466,7 +552,7 @@ std::optional<CameraSequence> CameraSequence::parse(std::string_view text, std::
     int version{};
     CameraSequence result;
     if (!(in >> magic >> version) || magic != "DVE_CAMERA_SEQUENCE" ||
-        (version != 1 && version != 2 && version != 3)) return fail("unsupported camera sequence format");
+        (version < 1 || version > 4)) return fail("unsupported camera sequence format");
     if (!(in >> std::quoted(result.name) >> result.durationSeconds))
         return fail("malformed sequence header");
     std::size_t dollyCount{};
@@ -486,6 +572,12 @@ std::optional<CameraSequence> CameraSequence::parse(std::string_view text, std::
         }
         if ((closed != 0 && closed != 1) || keyCount > 100000U)
             return fail("malformed dolly");
+        if (version >= 4) {
+            std::string interpolation;
+            if (!(in >> interpolation)) return fail("malformed dolly");
+            if (interpolation == "smooth") dolly.interpolation = CameraDollyInterpolation::Smooth;
+            else if (interpolation != "catmull_rom") return fail("unknown dolly interpolation");
+        }
         dolly.closed = closed != 0;
         for (std::size_t ki = 0; ki < keyCount; ++ki) {
             CameraDollyKey dollyKey;

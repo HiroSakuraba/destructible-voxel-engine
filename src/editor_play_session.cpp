@@ -6,6 +6,8 @@
 #include "dve/camera_runtime.hpp"
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <cmath>
 #include <exception>
 #include <map>
@@ -16,6 +18,7 @@
 #include "dve/game_world.hpp"
 #include "dve/physics3d_backend.hpp"
 #include "dve/rigid_body_adapter.hpp"
+#include "dve/physics_contact_sink.hpp"
 #ifdef DVE_HAVE_LUA
 #include "dve/game_script.hpp"
 #endif
@@ -64,6 +67,28 @@ namespace {
 } // namespace
 
 class EditorPlaySession::Runtime {
+    // Bounded, allocation-free callback for Jolt's concurrent contact workers.
+    // The editor reads it only AFTER synchronous physics step completion.
+    struct ContactCapture final : IPhysicsContactSink {
+        static constexpr std::size_t kCapacity = 512U;
+        std::array<PhysicsContactEvent, kCapacity> events{};
+        std::atomic<std::size_t> writes{0U};
+        bool record_contact(const PhysicsContactEvent& event) noexcept override {
+            const std::size_t index = writes.fetch_add(1U, std::memory_order_relaxed);
+            if (index >= kCapacity) return false;
+            events[index] = event;
+            return true;
+        }
+        void reset() noexcept { writes.store(0U, std::memory_order_relaxed); }
+        [[nodiscard]] std::vector<PhysicsContactEvent> snapshot() const {
+            const std::size_t size = std::min(writes.load(std::memory_order_acquire), kCapacity);
+            return {events.begin(), events.begin() + static_cast<std::ptrdiff_t>(size)};
+        }
+        [[nodiscard]] std::uint64_t dropped() const noexcept {
+            const std::size_t count = writes.load(std::memory_order_relaxed);
+            return static_cast<std::uint64_t>(count > kCapacity ? count - kCapacity : 0U);
+        }
+    };
 public:
     explicit Runtime(LogSink sink) : logSink_(std::move(sink)) {}
 
@@ -95,6 +120,7 @@ public:
         telemetry.physicsBackend = resolvedBackend;
         telemetry.productionPhysics = resolvedBackend != Physics3DBackend::Reference;
         world_ = std::make_unique<GameWorld>(std::move(physics));
+        world_->physics().set_contact_sink(&contactCapture_);
         world_->set_frame_presentation(true);
         world_->set_debris_limit(config.debrisLimit);
         cameraCollision_ = std::make_unique<camera::GameWorldCameraCollisionWorld>(*world_);
@@ -263,6 +289,7 @@ public:
             lastInputActions_.clear();lastInputAxes_.clear();
             for (const auto& [name, pressed] : input.actions){world_->set_action_pressed(name, pressed);lastInputActions_.insert(name);}
             for (const auto& [name, value] : input.axes){world_->set_axis(name, value);lastInputAxes_.insert(name);}
+            contactCapture_.reset();
             if(prototype_&&prototype_->active())prototype_->step(fixedDeltaSeconds);else world_->tick(fixedDeltaSeconds);
 
             std::vector<EditorObjectId> removed;
@@ -307,17 +334,25 @@ public:
 #endif
         prototype_.reset();
         cameraCollision_.reset();
+        if (world_) world_->physics().set_contact_sink(nullptr);
         world_.reset();
         editorToRuntime_.clear();
     }
 
 private:
     LogSink logSink_;
+    ContactCapture contactCapture_{};
     std::unique_ptr<GameWorld> world_;
     std::unique_ptr<PrototypeGame> prototype_;
     std::set<std::string> lastInputActions_,lastInputAxes_;
     std::unique_ptr<camera::GameWorldCameraCollisionWorld> cameraCollision_;
 public:
+    [[nodiscard]] std::vector<PhysicsContactEvent> collision_contacts() const {
+        return world_ ? contactCapture_.snapshot() : std::vector<PhysicsContactEvent>{};
+    }
+    [[nodiscard]] std::uint64_t dropped_collision_contacts() const noexcept {
+        return world_ ? contactCapture_.dropped() : 0U;
+    }
     [[nodiscard]] const camera::ICameraCollisionWorld* camera_collision_world() const noexcept {
         return cameraCollision_.get();
     }
@@ -335,6 +370,13 @@ private:
     std::unique_ptr<GameScriptHost> scripts_;
 #endif
 };
+
+std::vector<PhysicsContactEvent> EditorPlaySession::collision_contacts() const {
+    return runtime_ ? runtime_->collision_contacts() : std::vector<PhysicsContactEvent>{};
+}
+std::uint64_t EditorPlaySession::dropped_collision_contacts() const noexcept {
+    return runtime_ ? runtime_->dropped_collision_contacts() : 0U;
+}
 
 void EditorPlaySession::prototype_look(float yaw,float pitch){if(runtime_)runtime_->prototype_look(yaw,pitch);}
 std::optional<PrototypeCamera> EditorPlaySession::prototype_camera()const{return runtime_?runtime_->prototype_camera():std::nullopt;}

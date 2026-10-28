@@ -551,6 +551,225 @@ void test_carved_holes_rebuild_collision() {
     }
 }
 
+class RejectSecondBodyCreation final : public IRigidBodyWorld {
+public:
+    explicit RejectSecondBodyCreation(bool dynamic, bool rejectFragments = false)
+        : dynamic_(dynamic), rejectFragments_(rejectFragments) {}
+    RigidBodyHandle create_body(const RigidBodyCreateDesc& desc) override {
+        if (rejectFragments_) return kInvalidRigidBodyHandle;
+        if (dynamic_ && ++attempts_ == 2U) return kInvalidRigidBodyHandle;
+        return backend_.create_body(desc);
+    }
+    RigidBodyHandle create_static_body(const StaticRigidBodyCreateDesc& desc) override {
+        if (!dynamic_ && ++attempts_ == 2U) return kInvalidRigidBodyHandle;
+        return backend_.create_static_body(desc);
+    }
+    bool destroy_body(RigidBodyHandle h) override { return backend_.destroy_body(h); }
+    std::optional<RigidBodyState> state(RigidBodyHandle h) const override { return backend_.state(h); }
+    bool set_state(RigidBodyHandle h, const RigidBodyState& v) override { return backend_.set_state(h, v); }
+    bool apply_impulse(RigidBodyHandle h, Float3 v) override { return backend_.apply_impulse(h, v); }
+    bool apply_force(RigidBodyHandle h, Float3 v) override { return backend_.apply_force(h, v); }
+    std::vector<RigidBodyQueryHit> ray_cast_all(
+        Float3 origin, Float3 direction, float maximumDistance,
+        const RigidBodyQueryFilter& filter = {}) const override {
+        return backend_.ray_cast_all(origin, direction, maximumDistance, filter);
+    }
+    void step(float dt) override { backend_.step(dt); }
+    [[nodiscard]] std::size_t body_count() const noexcept { return backend_.body_count(); }
+private:
+    bool dynamic_{};
+    bool rejectFragments_{};
+    std::size_t attempts_{};
+    ReferenceRigidBodyWorld backend_;
+};
+
+void test_failed_single_piece_collision_rebuild_rolls_back() {
+    for (const bool dynamic : {false, true}) {
+        auto physics = std::make_unique<RejectSecondBodyCreation>(dynamic);
+        auto* backend = physics.get();
+        GameWorld world(std::move(physics));
+        GameObjectDesc desc;
+        desc.name = "Rollback on rejected replacement";
+        desc.dynamic = dynamic;
+        desc.voxelSizeMeters = 1.0F;
+        desc.voxels = make_solid_cube(dynamic ? 7801 : 7802, 4, 1);
+        const GameObjectId id = world.create_object(std::move(desc));
+        CHECK(id != kInvalidGameObjectId);
+        if (id == kInvalidGameObjectId) continue;
+        std::size_t eventCount = 0U;
+        world.on_damage([&](const GameDamageEvent&) { ++eventCount; });
+        const auto oldCount = world.voxel_count(id);
+        const Float3 ray{1.5F, 1.5F, -2.0F};
+        CHECK(world.raycast(ray, {0, 0, 1}, 6.0F).has_value());
+        CHECK(!world.physics().ray_cast_all(ray, {0, 0, 1}, 6.0F).empty());
+        CHECK(!world.damage_sphere(id, {1.5F, 1.5F, 1.5F}, 0.6F).has_value());
+        CHECK(world.voxel_count(id) == oldCount);
+        CHECK(backend->body_count() == 1U);
+        CHECK(world.raycast(ray, {0, 0, 1}, 6.0F).has_value());
+        CHECK(!world.physics().ray_cast_all(ray, {0, 0, 1}, 6.0F).empty());
+        CHECK(eventCount == 0U);
+    }
+}
+
+void test_failed_split_body_creation_is_atomic() {
+    for (const bool failFragment : {true, false}) {
+        // A static dumbbell: failure either in its dynamic child body or in
+        // its new static primary body must leave the original world intact.
+        auto physics = std::make_unique<RejectSecondBodyCreation>(false,failFragment);
+        auto* backend = physics.get();
+        GameWorld world(std::move(physics));
+        auto voxels = std::make_unique<VoxelObject>(7911U);
+        for (int x = 0; x < 3; ++x)
+            for (int y = 0; y < 2; ++y)
+                for (int z = 0; z < 2; ++z)
+                    (void)voxels->set_voxel({x,y,z},1);
+        (void)voxels->set_voxel({3,0,0},1);
+        for (int x = 4; x < 7; ++x)
+            for (int y = 0; y < 2; ++y)
+                for (int z = 0; z < 2; ++z)
+                    (void)voxels->set_voxel({x,y,z},1);
+        GameObjectDesc desc;
+        desc.name = "Transactional split";
+        desc.dynamic = false;
+        desc.voxelSizeMeters = 1.0F;
+        desc.voxels = std::move(voxels);
+        const GameObjectId id = world.create_object(std::move(desc));
+        CHECK(id != kInvalidGameObjectId);
+        if (id == kInvalidGameObjectId) continue;
+        std::size_t spawned = 0, damaged = 0;
+        world.on_damage([&](const GameDamageEvent&) { ++damaged; });
+        const auto originalCount = world.voxel_count(id);
+        const auto originalHash = world.voxel_brick_snapshot(id,{0,0,0});
+        const Float3 leftRay{0.5F,0.5F,-3.0F}, rightRay{5.5F,0.5F,-3.0F};
+        CHECK(!world.physics().ray_cast_all(leftRay,{0,0,1},10).empty());
+        CHECK(!world.physics().ray_cast_all(rightRay,{0,0,1},10).empty());
+        const auto failed = world.damage_sphere(id,{3.5F,0.5F,0.5F},0.6F);
+        CHECK(!failed.has_value());
+        CHECK(world.object_count() == 1U);
+        CHECK(world.voxel_count(id) == originalCount);
+        CHECK(backend->body_count() == 1U);
+        CHECK(world.raycast(leftRay,{0,0,1},10).has_value());
+        CHECK(world.raycast(rightRay,{0,0,1},10).has_value());
+        CHECK(!world.physics().ray_cast_all(leftRay,{0,0,1},10).empty());
+        CHECK(!world.physics().ray_cast_all(rightRay,{0,0,1},10).empty());
+        const auto restored = world.voxel_brick_snapshot(id,{0,0,0});
+        CHECK(originalHash && restored && originalHash->contentHash == restored->contentHash);
+        CHECK(spawned == 0U && damaged == 0U);
+    }
+}
+
+void test_repaired_moving_collision_preserves_velocity_field() {
+    // An off-centre authoritative brick edit changes COM while the object is rotating.
+    // Physical velocity at each unchanged world-space point must remain continuous.
+    auto physics = std::make_unique<ReferenceRigidBodyWorld>();
+    physics->set_gravity({0, 0, 0});
+    GameWorld world(std::move(physics));
+    GameObjectDesc desc;
+    desc.name = "Rotating repair";
+    desc.voxelSizeMeters = 0.5F;
+    desc.voxelScale = {1.5F, 0.75F, 1.0F};
+    desc.dynamic = true;
+    desc.transform = make_rigid_transform({3.0F, 0.0F, 2.0F}, {});
+    desc.voxels = make_solid_cube(780, 4, 1);
+    const GameObjectId id = world.create_object(std::move(desc));
+    CHECK(id != kInvalidGameObjectId);
+    if (id == kInvalidGameObjectId) return;
+
+    const Float3 rayOrigin{4.7F, 0.3F, 0.0F};
+    const auto initialHits = world.physics().ray_cast_all(rayOrigin, {0, 0, 1}, 6.0F);
+    CHECK(!initialHits.empty());
+    if (initialHits.empty()) return;
+    const RigidBodyHandle oldHandle = initialHits.front().body;
+    auto oldState = world.physics().state(oldHandle);
+    CHECK(oldState.has_value());
+    if (!oldState) return;
+    oldState->linearVelocity = {1.0F, -2.0F, 0.5F};
+    oldState->angularVelocity = {0.0F, 0.0F, 3.0F};
+    CHECK(world.physics().set_state(oldHandle, *oldState));
+    const auto originalPosition = world.position(id);
+
+    auto edit = world.voxel_brick_snapshot(id, {0, 0, 0});
+    CHECK(edit.has_value());
+    if (!edit) return;
+    for (int y = 0; y < 4; ++y)
+        for (int z = 0; z < 4; ++z)
+            edit->materials[voxel_index_unchecked({0, y, z})] = kAirMaterial;
+    ++edit->revision;
+    edit->contentHash = VoxelObject::brick_content_hash(edit->materials);
+
+    std::string error;
+    CHECK(world.replace_voxel_brick(id, *edit, &error));
+    CHECK(!world.physics().state(oldHandle).has_value());
+    CHECK(world.position(id).has_value());
+    if (originalPosition && world.position(id))
+        CHECK(length(subtract(*world.position(id), *originalPosition)) < 1.0e-5F);
+
+    // Compare independent physics and voxel raycasts on the removed and retained strips.
+    const Float3 removedRay{3.2F, 0.3F, 0.0F};
+    CHECK(!world.raycast(removedRay, {0, 0, 1}, 6.0F));
+    CHECK(world.physics().ray_cast_all(removedRay, {0, 0, 1}, 6.0F).empty());
+    CHECK(world.raycast(rayOrigin, {0, 0, 1}, 6.0F).has_value());
+    const auto newHits = world.physics().ray_cast_all(rayOrigin, {0, 0, 1}, 6.0F);
+    CHECK(!newHits.empty());
+    if (newHits.empty()) return;
+    const auto newState = world.physics().state(newHits.front().body);
+    CHECK(newState.has_value());
+    if (!newState) return;
+
+    const Float3 expectedVelocity = inherited_child_center_of_mass_velocity(
+        oldState->linearVelocity, oldState->angularVelocity,
+        oldState->currentTransform.position, newState->currentTransform.position);
+    CHECK(length(subtract(newState->linearVelocity, expectedVelocity)) < 1.0e-5F);
+    CHECK(length(subtract(newState->angularVelocity, oldState->angularVelocity)) < 1.0e-5F);
+    // Confirm the test is sensitive to the old 'copy linear velocity' bug.
+    CHECK(length(subtract(expectedVelocity, oldState->linearVelocity)) > 0.1F);
+}
+
+void test_repeated_same_brick_cuts_update_physics_collision() {
+    // A second cut inside an already modified brick must not leave a welded,
+    // invisible collider. Exercise static and dynamic bodies via the same query API.
+    for (const bool dynamic : {false, true}) {
+        auto physics = std::make_unique<ReferenceRigidBodyWorld>();
+        physics->set_gravity({0, 0, 0});
+        GameWorld world(std::move(physics));
+        GameObjectDesc desc;
+        desc.name = "Two independent cuts";
+        desc.dynamic = dynamic;
+        desc.voxelSizeMeters = 1.0F;
+        desc.voxels = std::make_unique<VoxelObject>(781);
+        for (int x = 0; x < 8; ++x)
+            for (int y = 0; y < 8; ++y)
+                (void)desc.voxels->set_voxel({x, y, 0}, 1);
+        const GameObjectId id = world.create_object(std::move(desc));
+        CHECK(id != kInvalidGameObjectId);
+        if (id == kInvalidGameObjectId) continue;
+
+        const auto cast = [&](float x, float y) {
+            const Float3 ray{x, y, -2.0F};
+            const bool voxelsHit = world.raycast(ray, {0, 0, 1}, 5.0F).has_value();
+            const bool physicsHit = !world.physics().ray_cast_all(ray, {0, 0, 1}, 5.0F).empty();
+            CHECK(voxelsHit == physicsHit);
+            return physicsHit;
+        };
+        CHECK(cast(2.5F, 2.5F));
+        CHECK(cast(5.5F, 5.5F));
+        CHECK(world.damage_sphere(id, {2.5F, 2.5F, 0.5F}, 0.8F).value_or(0) > 0);
+        CHECK(!cast(2.5F, 2.5F));
+        CHECK(cast(5.5F, 5.5F));
+        CHECK(world.damage_sphere(id, {5.5F, 5.5F, 0.5F}, 0.8F).value_or(0) > 0);
+        CHECK(!cast(2.5F, 2.5F));
+        CHECK(!cast(5.5F, 5.5F));
+        CHECK(cast(0.5F, 0.5F)); // unaffected island still collides
+        // All 64 columns are compared with an independent occupancy oracle.
+        // This catches stale physics boxes elsewhere in the same edited brick.
+        for (int x = 0; x < 8; ++x)
+            for (int y = 0; y < 8; ++y) {
+                const bool occupied = !(x == 2 && y == 2) && !(x == 5 && y == 5);
+                CHECK(cast(static_cast<float>(x) + 0.5F, static_cast<float>(y) + 0.5F) == occupied);
+            }
+    }
+}
+
 void test_fragment_cap_keeps_smallest_attached() {
     GameWorld world(std::make_unique<ReferenceRigidBodyWorld>());
     auto voxels = make_solid_cube(101, 4, 1);
@@ -735,6 +954,10 @@ int main() {
     test_debris_limit_recycles_oldest();
     test_fragmentation_of_moved_dynamic_object();
     test_carved_holes_rebuild_collision();
+    test_repaired_moving_collision_preserves_velocity_field();
+    test_failed_single_piece_collision_rebuild_rolls_back();
+    test_failed_split_body_creation_is_atomic();
+    test_repeated_same_brick_cuts_update_physics_collision();
     test_fragment_cap_keeps_smallest_attached();
     test_splitting_debris_at_the_cap_keeps_the_piece_being_split();
     test_queued_damage_on_a_large_wall_commits();

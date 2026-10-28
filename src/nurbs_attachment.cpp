@@ -1,6 +1,8 @@
 #include "dve/nurbs_attachment.hpp"
 #include "dve/nurbs_modeling.hpp"
 #include "dve/nurbs_topology.hpp"
+#include "nurbs_evaluation_internal.hpp"
+#include <array>
 #include <algorithm>
 #include <cmath>
 #include <map>
@@ -75,7 +77,10 @@ std::optional<NurbsAttachment> attach_nurbs_boundaries(const NurbsSource& refere
         while(existing++<count){if(stop.stop_requested())return fail("Cancelled");auto next=insert_nurbs_knot(*source,true,knot,&reason);if(!next)return fail(reason);*source=std::move(*next);}
     }
     // A linear two-column patch needs a free tangent row to keep its far edge.
+    if(options.c2)options.c1=true;
     if(options.c1&&b.columns<3){auto next=elevate_nurbs_degree(b,false,&reason);if(!next)return fail(reason);b=std::move(*next);}
+    // C2 needs a second free row and curvature in the moving patch's U direction.
+    while(options.c2&&(b.columns<4||b.u.degree<2)){if(stop.stop_requested())return fail("Cancelled");auto next=elevate_nurbs_degree(b,false,&reason);if(!next)return fail(reason);b=std::move(*next);}
     if(a.v!=b.v||a.rows!=b.rows)return fail("Boundary knot compatibility could not be represented exactly");
     auto matched=std::optional<NurbsSource>{};
     if(options.preserveWeightGauge){
@@ -86,10 +91,19 @@ std::optional<NurbsAttachment> attach_nurbs_boundaries(const NurbsSource& refere
         for(unsigned j=0;j<out.rows;++j){if(stop.stop_requested())return fail("Cancelled");auto edge=a.controls[j*a.columns+a.columns-1],previous=a.controls[j*a.columns+a.columns-2];edge.weight/=referenceScale;previous.weight/=referenceScale;out.controls[j*out.columns]=edge;
             if(options.c1){const double w=edge.weight+ratio*(edge.weight-previous.weight);if(!(w>0)||!std::isfinite(w))return fail("C1 attachment produced nonpositive homogeneous weights");
                 auto coordinate=[&](double e,double p){return (edge.weight*e+ratio*(edge.weight*e-previous.weight*p))/w;};
-                out.controls[j*out.columns+1]={coordinate(edge.x,previous.x),coordinate(edge.y,previous.y),coordinate(edge.z,previous.z),w};}
+                out.controls[j*out.columns+1]={coordinate(edge.x,previous.x),coordinate(edge.y,previous.y),coordinate(edge.z,previous.z),w};
+                if(options.c2){
+                    auto homogeneous=[&](NurbsPoint p){const double h=p.weight/referenceScale;return std::array<double,4>{p.x*h,p.y*h,p.z*h,h};};
+                    const auto r1=homogeneous(a.controls[j*a.columns+a.columns-1]),r2=homogeneous(a.controls[j*a.columns+a.columns-2]);
+                    const auto r3=a.columns>=3?homogeneous(a.controls[j*a.columns+a.columns-3]):r2;
+                    const auto m1=out.controls[j*out.columns+1];
+                    const auto q2=detail::second_row_control(a.u,a.columns,b.u,r3,r2,r1,r1,{m1.x*m1.weight,m1.y*m1.weight,m1.z*m1.weight,m1.weight});
+                    if(!(q2[3]>0)||!std::isfinite(q2[3]))return fail("C2 attachment produced nonpositive homogeneous weights");
+                    out.controls[j*out.columns+2]={q2[0]/q2[3],q2[1]/q2[3],q2[2]/q2[3],q2[3]};
+                }}
         }
         if(!validate_nurbs(out,&reason))return fail(reason);matched=std::move(out);
-    }else matched=attach_nurbs_u(a,b,options.c1,&reason);
+    }else matched=attach_nurbs_u_continuity(a,b,options.c2?2U:options.c1?1U:0U,&reason);
     if(!matched)return fail(reason);
     auto prepared=restore(std::move(a),reference,options.referenceBoundary,true,false,&reason);
     auto result=restore(std::move(*matched),moving,options.movingBoundary,false,options.reverseBoundary,&reason);

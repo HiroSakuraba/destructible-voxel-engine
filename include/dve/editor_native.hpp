@@ -1323,6 +1323,9 @@ public:
     void capture_nurbs_selection(EditorSelectionSnapshot&) const;
     void restore_nurbs_selection(const EditorSelectionSnapshot&);
     void draw_nurbs(const IEditorCanvas&,UiRect) const;
+    void draw_nurbs_curvature(const IEditorCanvas&,UiRect) const;
+    bool report_nurbs_continuity();
+    bool bridge_nurbs_curves();
     bool dispatch_mesh_authoring_action(std::string_view);
     bool start_exact_boolean(EditorObjectId a, EditorObjectId b, MeshBoolean operation);
     bool start_exact_tube_cut(ExactTubeCutRequest request, std::string nameSuffix);
@@ -1387,6 +1390,14 @@ public:
     // voxel objects and reports the box count. View > Collision Shapes draws these boxes.
     bool rebuild_collision_proxies();
     [[nodiscard]] const std::vector<VoxelBox>& collision_proxy(EditorObjectId id) const;
+    // Collision shading is a dedicated pick domain: art visibility does not
+    // prevent selection of a collidable, hidden voxel proxy.
+    [[nodiscard]] const std::optional<EditorCollisionPick>& selected_collision() const noexcept {
+        return selectedCollision_;
+    }
+    // Human-readable diagnostics for Play/Simulate: never claim scene layer is
+    // a physics mask, or absence of a contact in the reference solver means separation.
+    [[nodiscard]] std::string collision_diagnostic_summary() const;
     // Build > Validate Project: lists problems (missing files, broken references, empty or
     // invalid objects, stale assets) in the Problems panel; returns how many were found.
     std::size_t validate_project();
@@ -1532,6 +1543,10 @@ private:
     double nurbsOperationParameter_{.5};
     NurbsAttachmentOptions nurbsAttachmentOptions_;
     unsigned nurbsDisplaySamples_{8};
+    bool showNurbsCurvature_{};
+    // Corner fillet / blend leg fraction (its own field: the shared parameter defaults to a
+    // midpoint for splits and isocurves, at which "as round as the fillet" never fits).
+    double nurbsCornerFraction_{.3};
     // CV selection parked while the density settings panel is open (only one panel at a time).
     EditorObjectId nurbsParkedObject_{};std::set<std::size_t> nurbsParkedSelection_;std::size_t nurbsParkedControl_{};
     void restore_parked_nurbs_controls();
@@ -1708,6 +1723,8 @@ private:
     std::optional<Float3> followAnchor_;
     struct CachedCollisionProxy { std::uint64_t revision{}; std::uint64_t objectStamp{}; std::vector<VoxelBox> boxes; };
     mutable std::map<EditorObjectId, CachedCollisionProxy> collisionProxyCache_;
+    std::optional<EditorCollisionPick> selectedCollision_;
+    int selectedCollisionX_{-10000}, selectedCollisionY_{-10000};
     bool handle_voxel_join_key(std::string_view normalized, bool control, bool shift, bool alt);
     bool scatterActive_{};
     struct DuplicateSpecialState {

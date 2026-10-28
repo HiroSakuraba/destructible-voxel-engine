@@ -49,6 +49,10 @@ public:
     [[nodiscard]] bool trim_selected_shot(float newDurationSeconds, std::string* error = nullptr);
     [[nodiscard]] bool move_dolly_key(camera::CameraDollyId dollyId, std::size_t keyIndex,
                                       float newTimeSeconds, std::string* error = nullptr);
+    // Catmull-Rom or Smooth (curvature-continuous) path through the dolly's keys; one undo step.
+    [[nodiscard]] bool set_dolly_interpolation(camera::CameraDollyId dollyId,
+                                               camera::CameraDollyInterpolation interpolation,
+                                               std::string* error = nullptr);
     [[nodiscard]] bool set_dolly_key_post_process(
         camera::CameraDollyId dollyId,
         std::size_t keyIndex,

@@ -85,5 +85,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pso1-lavapipe-cold-warm
-          path: |\n            *-graphics.log\n            *-compute.log
+          path: |
+            *-graphics.log
+            *-compute.log
           if-no-files-found: warn

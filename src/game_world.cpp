@@ -1238,7 +1238,13 @@ bool GameWorld::replace_voxel_brick(
             object.densityQuantumKilogramsPerCubicMeter, object.structural,
             &replacementLocalCenterOfMass, &buildError, object.voxelScale);
         if (bodyDesc && previousState) {
-            bodyDesc->linearVelocity = previousState->linearVelocity;
+            // Repair changes the center of mass. Retain the old rigid motion field:
+            // v(new COM) = v(old COM) + omega x (new COM - old COM).
+            // Merely copying the linear velocity makes rotating objects jump in velocity
+            // when network/authoritative edits remove an off-centre voxel.
+            bodyDesc->linearVelocity = inherited_child_center_of_mass_velocity(
+                previousState->linearVelocity, previousState->angularVelocity,
+                previousState->currentTransform.position, bodyDesc->transform.position);
             bodyDesc->angularVelocity = previousState->angularVelocity;
         }
         if (bodyDesc) replacementHandle = physics_->create_body(*bodyDesc);
@@ -1981,16 +1987,56 @@ std::optional<std::uint64_t> GameWorld::damage_sphere(GameObjectId id, Float3 wo
     const Float3 localVoxelUnits = divide_components(localMeters,multiply(object.voxelScale,object.voxelSizeMeters));
     const float radiusVoxelUnits = radius / object.voxelSizeMeters;
 
+    // Keep a complete pre-carve copy so a failed replacement in the common
+    // non-fragmenting case does not publish collision that disagrees with art.
+    std::unique_ptr<VoxelObject> originalVoxels =
+        object.visualOnly ? nullptr : clone_game_voxels(object.voxels.get());
+    const RigidTransform originalAuthoredTransform = object.authoredTransform;
+    const GameObjectId originalNextId = nextId_;
     const SphereDamageCommand command{localVoxelUnits, radiusVoxelUnits, 0,object.voxelScale};
     const DamageApplyReport report = apply_damage_commands(*object.voxels, {command});
     if (report.removedVoxelCount == 0) return 0U;
 
     const bool destroyed = object.voxels->occupied_voxel_count() == 0;
-    // The crater's mark, before fragmenting so the pieces that break off keep it.
-    if (!destroyed) (void)surfaceMarks_.add_crater(id, localMeters, radius);
     std::vector<GameObjectId> newFragmentIds;
-    // Visual-only voxels are carved but never split into (physical) debris.
-    if (!destroyed && !object.visualOnly) newFragmentIds = fragment_after_damage(id, object);
+    if (!destroyed && !object.visualOnly) {
+        const ConnectivitySnapshot connectivity = build_connectivity_snapshot(*object.voxels);
+        if (connectivity.components.size() == 1U) {
+            // Rebuilding a one-piece collider is an all-or-nothing edit. Stage
+            // the body, then publish geometry/mark/event only after success.
+            std::optional<RigidBodyState> oldState;
+            if (object.hasBody && object.dynamic) oldState = physics_->state(object.bodyHandle);
+            if (object.hasBody && object.dynamic) object.authoredTransform = current;
+            if (!rebuild_primary_body(object, oldState)) {
+                object.voxels = std::move(originalVoxels);
+                object.authoredTransform = originalAuthoredTransform;
+                nextId_ = originalNextId;
+                return std::nullopt;
+            }
+            (void)surfaceMarks_.add_crater(id, localMeters, radius);
+        } else {
+            const auto fragments = fragment_after_damage(id, object);
+            if (!fragments) {
+                object.voxels = std::move(originalVoxels);
+                object.authoredTransform = originalAuthoredTransform;
+                nextId_ = originalNextId;
+                return std::nullopt;
+            }
+            newFragmentIds = *fragments;
+            // Only after physics accepts the complete split may marks be
+            // published. Fragment marks are then clipped to each live piece.
+            (void)surfaceMarks_.add_crater(id, localMeters, radius);
+            for (const GameObjectId fragmentId : newFragmentIds)
+                if (const auto placed = objects_.find(fragmentId); placed != objects_.end())
+                    copy_marks_to_fragment(id, fragmentId, placed->second);
+            // Spawn callbacks must observe the committed geometry AND crater marks.
+            for (const GameObjectId fragmentId : newFragmentIds)
+                dispatch_lifecycle({GameLifecycleEventKind::Spawn, fragmentId});
+        }
+    } else if (!destroyed) {
+        // Visual-only geometry never allocates a physics body.
+        (void)surfaceMarks_.add_crater(id, localMeters, radius);
+    }
 
     GameDamageEvent event{id, worldCenter, radius, report.removedVoxelCount, destroyed, std::move(newFragmentIds)};
     for (const DamageListener& listener : damageListeners_) listener(event);
@@ -1999,21 +2045,20 @@ std::optional<std::uint64_t> GameWorld::damage_sphere(GameObjectId id, Float3 wo
     return report.removedVoxelCount;
 }
 
-std::vector<GameObjectId> GameWorld::fragment_after_damage(GameObjectId id, Object& object) {
-    (void)id;
+std::optional<std::vector<GameObjectId>> GameWorld::fragment_after_damage(GameObjectId id, Object& object) {
     std::vector<GameObjectId> fragmentIds;
     if (!object.voxels || object.voxels->occupied_voxel_count() == 0) return fragmentIds;
-
     const ConnectivitySnapshot snapshot = build_connectivity_snapshot(*object.voxels);
-    // The largest component stays with the original object. A safety cap bounds the number
-    // of detached bodies, but never skips the primary collision rebuild after a carve.
+    if (snapshot.components.empty()) return fragmentIds;
+
     std::size_t primaryIndex = 0;
-    for (std::size_t i = 1; i < snapshot.components.size(); ++i) {
-        if (snapshot.components[i].voxelCount > snapshot.components[primaryIndex].voxelCount) primaryIndex = i;
-    }
+    for (std::size_t index = 1; index < snapshot.components.size(); ++index)
+        if (snapshot.components[index].voxelCount > snapshot.components[primaryIndex].voxelCount)
+            primaryIndex = index;
+
     std::vector<std::size_t> detachedComponents;
-    for (std::size_t i = 0; i < snapshot.components.size(); ++i)
-        if (i != primaryIndex) detachedComponents.push_back(i);
+    for (std::size_t index = 0; index < snapshot.components.size(); ++index)
+        if (index != primaryIndex) detachedComponents.push_back(index);
     if (detachedComponents.size() > kMaxFragmentsPerDamageCall) {
         std::sort(detachedComponents.begin(), detachedComponents.end(), [&](std::size_t a, std::size_t b) {
             if (snapshot.components[a].voxelCount != snapshot.components[b].voxelCount)
@@ -2024,60 +2069,71 @@ std::vector<GameObjectId> GameWorld::fragment_after_damage(GameObjectId id, Obje
         std::sort(detachedComponents.begin(), detachedComponents.end());
     }
 
-    // Captured before any body is touched: a static or bodyless parent has no velocity to
-    // inherit, so debris breaking off it simply starts at rest (gravity takes over next
-    // tick), which is physically reasonable.
     std::optional<RigidBodyState> parentState;
     if (object.hasBody && object.dynamic) parentState = physics_->state(object.bodyHandle);
-    // Fragments and the rebuilt primary body are built at authoredTransform, which is only the
-    // spawn pose for a dynamic object: re-base it on where the object is now, or every split
-    // would teleport the pieces back to the spawn point.
     if (object.hasBody && object.dynamic) object.authoredTransform = resolve_transform(object);
 
     std::vector<SplitPlan> plans;
     std::vector<std::uint64_t> detachedIds;
-    for (const std::size_t componentIndex : detachedComponents) {
-        const auto plan = build_split_plan(*object.voxels, snapshot, componentIndex);
-        if (!plan) continue; // stale brick generation or similar transient mismatch: skip defensively
+    for (const std::size_t index : detachedComponents) {
+        const auto plan = build_split_plan(*object.voxels, snapshot, index);
+        if (!plan) return std::nullopt;  // stale geometry: caller restores entire edit
         plans.push_back(*plan);
         detachedIds.push_back(allocate_id());
     }
     auto detachedPieces = commit_split_plans(*object.voxels, plans, detachedIds);
-    for (auto& detached : detachedPieces) {
-        if (!detached) continue;
-        // The batch commit removes these voxels from object.voxels in place and returns a
-        // fresh VoxelObject containing just them, still in the *same* voxel coordinate space
-        // (not re-based to a local origin), so the fragment can keep the parent's exact
-        // authoredTransform unchanged and still be geometrically correct.
+    if (detachedPieces.size() != plans.size()) return std::nullopt;
 
-        // Debris cap: free a slot before building the fragment body. The
-        // detached voxels are already carved out of the parent, so when no
-        // slot can be freed — including a zero cap, which suppresses debris
-        // creation entirely — the fragment is discarded like an
-        // unbuildable sliver.
-        while (debris_count() >= debrisLimit_ && retire_oldest_debris(id)) {
-        }
-        if (debris_count() >= debrisLimit_) continue;
-
-        auto fragmentVoxels = std::make_unique<VoxelObject>(std::move(*detached));
-        Float3 fragmentLocalCom{};
+    struct StagedFragment {
+        std::unique_ptr<VoxelObject> voxels;
+        RigidBodyHandle handle{kInvalidRigidBodyHandle};
+        Float3 localCenter{};
+    };
+    std::vector<StagedFragment> staged;
+    staged.reserve(std::min<std::size_t>(detachedPieces.size(), debrisLimit_));
+    const auto rollbackBodies = [&]() {
+        for (auto& entry : staged)
+            if (entry.handle != kInvalidRigidBodyHandle) (void)physics_->destroy_body(entry.handle);
+    };
+    for (auto& piece : detachedPieces) {
+        if (!piece) { rollbackBodies(); return std::nullopt; }
+        // A zero debris cap deliberately discards disconnected debris, retaining
+        // the same policy as the previous implementation.
+        if (staged.size() >= debrisLimit_) continue;
+        auto voxels = std::make_unique<VoxelObject>(std::move(*piece));
+        Float3 localCenter{};
         std::string buildError;
-        std::optional<RigidBodyCreateDesc> fragmentDesc = build_dynamic_body_desc(
-            *fragmentVoxels, object.authoredTransform, object.voxelSizeMeters,
-            object.massTable, object.densityQuantumKilogramsPerCubicMeter, object.structural,
-            &fragmentLocalCom, &buildError, object.voxelScale);
-        if (!fragmentDesc) continue; // e.g. a sliver too small/odd to form a valid body; those voxels are simply lost
-
+        auto desc = build_dynamic_body_desc(
+            *voxels, object.authoredTransform, object.voxelSizeMeters,
+            object.massTable, object.densityQuantumKilogramsPerCubicMeter,
+            false, &localCenter, &buildError, object.voxelScale);
+        if (!desc) { rollbackBodies(); return std::nullopt; }
         if (parentState) {
-            fragmentDesc->linearVelocity = inherited_child_center_of_mass_velocity(
+            desc->linearVelocity = inherited_child_center_of_mass_velocity(
                 parentState->linearVelocity, parentState->angularVelocity,
-                parentState->currentTransform.position, fragmentDesc->transform.position);
-            fragmentDesc->angularVelocity = parentState->angularVelocity;
+                parentState->currentTransform.position, desc->transform.position);
+            desc->angularVelocity = parentState->angularVelocity;
         }
+        const RigidBodyHandle handle = physics_->create_body(*desc);
+        if (handle == kInvalidRigidBodyHandle) { rollbackBodies(); return std::nullopt; }
+        staged.push_back({std::move(voxels),handle,localCenter});
+    }
 
-        const RigidBodyHandle fragmentHandle = physics_->create_body(*fragmentDesc);
-        if (fragmentHandle == kInvalidRigidBodyHandle) continue;
+    // Publish the primary replacement only after ALL staged fragments exist.
+    // Its helper creates the new body before destroying the old one.
+    if (!rebuild_primary_body(object,parentState)) {
+        rollbackBodies();
+        return std::nullopt;
+    }
 
+    // At this point physics and voxels are committed. Debris retirement can now
+    // occur without compromising failure atomicity on the previous body.
+    for (auto& entry : staged) {
+        while (debris_count() >= debrisLimit_ && retire_oldest_debris(id)) {}
+        if (debris_count() >= debrisLimit_) {
+            (void)physics_->destroy_body(entry.handle);
+            continue;
+        }
         Object fragmentObject;
         fragmentObject.name = object.name + "_fragment";
         fragmentObject.tags = object.tags;
@@ -2087,81 +2143,71 @@ std::vector<GameObjectId> GameWorld::fragment_after_damage(GameObjectId id, Obje
         fragmentObject.authoredTransform = object.authoredTransform;
         fragmentObject.voxelSizeMeters = object.voxelSizeMeters;
         fragmentObject.voxelScale = object.voxelScale;
-        fragmentObject.voxels = std::move(fragmentVoxels);
-        fragmentObject.dynamic = true; // debris always falls, even when split from a static parent
-        fragmentObject.structural = false; // detached debris is not structural by definition
+        fragmentObject.voxels = std::move(entry.voxels);
+        fragmentObject.dynamic = true;
+        fragmentObject.structural = false;
         fragmentObject.debris = true;
         fragmentObject.debrisSequence = nextDebrisSequence_++;
         fragmentObject.densityQuantumKilogramsPerCubicMeter = object.densityQuantumKilogramsPerCubicMeter;
         fragmentObject.massTable = object.massTable;
         fragmentObject.materials = object.materials;
         fragmentObject.hasBody = true;
-        fragmentObject.bodyHandle = fragmentHandle;
-        fragmentObject.localCenterOfMassMeters = fragmentLocalCom;
+        fragmentObject.bodyHandle = entry.handle;
+        fragmentObject.localCenterOfMassMeters = entry.localCenter;
         fragmentObject.source = object.source;
         if (fragmentObject.source) fragmentObject.source->derived = true;
 
         const GameObjectId fragmentId = allocate_id();
         fragmentObject.id = fragmentId;
         synchronize_membership_component(fragmentObject);
-        const auto placed = objects_.emplace(fragmentId, std::move(fragmentObject)).first;
-        copy_marks_to_fragment(object.id, fragmentId, placed->second);
-        dispatch_lifecycle({GameLifecycleEventKind::Spawn, fragmentId});
+        objects_.emplace(fragmentId, std::move(fragmentObject));
         fragmentIds.push_back(fragmentId);
     }
-
-    rebuild_primary_body(object, parentState);
     return fragmentIds;
 }
 
-void GameWorld::rebuild_primary_body(Object& object, const std::optional<RigidBodyState>& parentState) {
-    // Even when the carve leaves one connected component, its shape and mass have changed.
-    if (object.hasBody) {
-        physics_->destroy_body(object.bodyHandle);
-        object.hasBody = false;
-    }
-    if (object.voxels->occupied_voxel_count() > 0) {
-        if (object.dynamic) {
-            Float3 localCom{};
-            std::string buildError;
-            std::optional<RigidBodyCreateDesc> primaryDesc = build_dynamic_body_desc(
-                *object.voxels, object.authoredTransform, object.voxelSizeMeters,
-                object.massTable, object.densityQuantumKilogramsPerCubicMeter, object.structural,
-                &localCom, &buildError, object.voxelScale);
-            if (primaryDesc) {
-                if (parentState) {
-                    primaryDesc->linearVelocity = inherited_child_center_of_mass_velocity(
-                        parentState->linearVelocity, parentState->angularVelocity,
-                        parentState->currentTransform.position, primaryDesc->transform.position);
-                    primaryDesc->angularVelocity = parentState->angularVelocity;
-                }
-                const RigidBodyHandle handle = physics_->create_body(*primaryDesc);
-                if (handle != kInvalidRigidBodyHandle) {
-                    object.hasBody = true;
-                    object.bodyHandle = handle;
-                    object.localCenterOfMassMeters = localCom;
-                }
-            }
-        } else {
-            const std::vector<VoxelBox> boxes = build_merged_object_box_proxy(*object.voxels);
-            if (!boxes.empty()) {
-                StaticRigidBodyCreateDesc staticDesc;
-                staticDesc.transform = object.authoredTransform;
-                staticDesc.collisionClass = RigidBodyCollisionClass::Full;
-                staticDesc.boxes.reserve(boxes.size());
-                for (const VoxelBox& box : boxes)
-                    staticDesc.boxes.push_back(voxel_box_to_solver_box(box, object.voxelSizeMeters,object.voxelScale));
-                if (validate_static_rigid_body_desc(staticDesc)) {
-                    const RigidBodyHandle handle = physics_->create_static_body(staticDesc);
-                    if (handle != kInvalidRigidBodyHandle) {
-                        object.hasBody = true;
-                        object.bodyHandle = handle;
-                    }
-                }
-            }
+bool GameWorld::rebuild_primary_body(Object& object, const std::optional<RigidBodyState>& parentState) {
+    // Do not remove the previous body until a replacement has been accepted.
+    // Otherwise a backend allocation/validation failure makes the entire
+    // surviving object fall through the world after one damage operation.
+    if (!object.voxels || object.voxels->occupied_voxel_count() == 0) return false;
+    RigidBodyHandle replacement = kInvalidRigidBodyHandle;
+    Float3 replacementLocalCom = object.localCenterOfMassMeters;
+    if (object.dynamic) {
+        std::string buildError;
+        std::optional<RigidBodyCreateDesc> desc = build_dynamic_body_desc(
+            *object.voxels, object.authoredTransform, object.voxelSizeMeters,
+            object.massTable, object.densityQuantumKilogramsPerCubicMeter,
+            object.structural, &replacementLocalCom, &buildError, object.voxelScale);
+        if (!desc) return false;
+        if (parentState) {
+            desc->linearVelocity = inherited_child_center_of_mass_velocity(
+                parentState->linearVelocity, parentState->angularVelocity,
+                parentState->currentTransform.position, desc->transform.position);
+            desc->angularVelocity = parentState->angularVelocity;
         }
+        replacement = physics_->create_body(*desc);
+    } else {
+        const std::vector<VoxelBox> boxes = build_merged_object_box_proxy(*object.voxels);
+        if (boxes.empty()) return false;
+        StaticRigidBodyCreateDesc desc;
+        desc.transform = object.authoredTransform;
+        desc.collisionClass = RigidBodyCollisionClass::Full;
+        desc.boxes.reserve(boxes.size());
+        for (const VoxelBox& box : boxes)
+            desc.boxes.push_back(voxel_box_to_solver_box(
+                box, object.voxelSizeMeters, object.voxelScale));
+        if (!validate_static_rigid_body_desc(desc)) return false;
+        replacement = physics_->create_static_body(desc);
     }
-
+    if (replacement == kInvalidRigidBodyHandle) return false;
+    const bool hadOld = object.hasBody;
+    const RigidBodyHandle old = object.bodyHandle;
+    object.hasBody = true;
+    object.bodyHandle = replacement;
+    object.localCenterOfMassMeters = replacementLocalCom;
+    if (hadOld) (void)physics_->destroy_body(old);
+    return true;
 }
 
 std::optional<GameRaycastHit> GameWorld::raycast(Float3 worldOrigin, Float3 worldDirection, float maxDistance) const {

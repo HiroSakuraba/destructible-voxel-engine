@@ -8,7 +8,7 @@
 #include <sstream>
 namespace dve::editor {
 namespace {
-UiRect construction_panel(UiRect v){return {v.x+8,v.y+8,(std::min)(430,(std::max)(1,v.width-16)),(std::min)(404,(std::max)(1,v.height-16))};}
+UiRect construction_panel(UiRect v){return {v.x+8,v.y+8,(std::min)(430,(std::max)(1,v.width-16)),(std::min)(436,(std::max)(1,v.height-16))};}
 UiRect construction_field(UiRect v,int i){auto r=construction_panel(v);return {r.x+8,r.y+125+32*i,r.width-16,28};}
 std::string number(double x){std::ostringstream out;out.imbue(std::locale::classic());out<<std::setprecision(10)<<x;return out.str();}
 }
@@ -70,20 +70,21 @@ void NativeEditorController::commit_nurbs_construction_field(){
     std::istringstream in(textEdit_.buffer);in.imbue(std::locale::classic());double value;
     if(!(in>>value)||!std::isfinite(value)){textEdit_.error="Enter a finite number";set_status(textEdit_.error,true);return;}in>>std::ws;if(!in.eof()){textEdit_.error="Enter one number";set_status(textEdit_.error,true);return;}
     const int axis=textEdit_.axis;
-    if((axis==4&&(value<2||value>64||value!=std::floor(value)))||(axis==5&&std::abs(value)>23040)||(axis==6&&(value<1e-6||value>1e6))||(axis==7&&(value<0||value>1))||(axis==8&&(value<1||value>64||value!=std::floor(value)))){textEdit_.error="Sections 2..64 integer; twist +/-23040 degrees; scale 0.000001..1000000; parameter 0..1; density 1..64 integer";set_status(textEdit_.error,true);return;}
+    if((axis==4&&(value<2||value>64||value!=std::floor(value)))||(axis==5&&std::abs(value)>23040)||(axis==6&&(value<1e-6||value>1e6))||(axis==7&&(value<0||value>1))||(axis==8&&(value<1||value>64||value!=std::floor(value)))||(axis==9&&!(value>0&&value<1))){textEdit_.error="Sections 2..64 integer; twist +/-23040 degrees; scale 0.000001..1000000; parameter 0..1; density 1..64 integer; corner leg fraction strictly between 0 and 1";set_status(textEdit_.error,true);return;}
     if(axis==4)nurbsSweepOptions_.sections=unsigned(value);
     else if(axis==5)nurbsSweepOptions_.twistRadians=value*3.141592653589793/180;
     else if(axis==6)nurbsSweepOptions_.endScale=value;
     else if(axis==7)nurbsOperationParameter_=value;
     else if(axis==8)nurbsDisplaySamples_=unsigned(value);
+    else if(axis==9)nurbsCornerFraction_=value;
     textEdit_={};set_status("NURBS settings updated; run the intended menu operation to apply");
 }
 bool NativeEditorController::nurbs_construction_pointer(PointerButton button,int x,int y){
     if(!nurbsConstructionPanel_||workspace_.mode()!=EditorMode::Edit||playSession_.active()||button!=PointerButton::Primary)return false;
     const auto v=layout_.viewport,r=construction_panel(v);if(!r.contains(x,y))return false;
     focusRegion_=EditorFocusRegion::Viewport;
-    const double values[]={double(nurbsSweepOptions_.sections),nurbsSweepOptions_.twistRadians*180/3.141592653589793,nurbsSweepOptions_.endScale,nurbsOperationParameter_,double(nurbsDisplaySamples_)};
-    for(int i=0;i<5;++i)if(construction_field(v,i).contains(x,y)){begin_text_edit(TextEditKind::NurbsControl,0,number(values[i]));textEdit_.axis=i+4;return true;}
+    const double values[]={double(nurbsSweepOptions_.sections),nurbsSweepOptions_.twistRadians*180/3.141592653589793,nurbsSweepOptions_.endScale,nurbsOperationParameter_,double(nurbsDisplaySamples_),nurbsCornerFraction_};
+    for(int i=0;i<6;++i)if(construction_field(v,i).contains(x,y)){begin_text_edit(TextEditKind::NurbsControl,0,number(values[i]));textEdit_.axis=i+4;return true;}
     return true;
 }
 void NativeEditorController::draw_nurbs_construction(const IEditorCanvas& canvas,UiRect viewport) const{
@@ -92,16 +93,16 @@ void NativeEditorController::draw_nurbs_construction(const IEditorCanvas& canvas
     p.text(r.x+8,r.y+20,"NURBS construction and source operations",white);
     p.text(r.x+8,r.y+40,"Inputs: "+std::to_string(nurbsConstructionInputs_.size())+" (append order; sweep: profile, rail)",white);
     for(std::size_t i=0;i<std::min<std::size_t>(3,nurbsConstructionInputs_.size());++i){auto index=nurbsConstructionInputs_.size()>3?nurbsConstructionInputs_.size()-3+i:i;p.text(r.x+8,r.y+62+int(i)*19,elide_text_to_width(p,std::to_string(index+1)+": "+nurbsConstructionInputs_[index].name,r.width-16),white);}
-    const char* names[]={"Sections / rebuild CVs / projection samples","Sweep twist (degrees)","Sweep end scale","Parameter / length fraction (0..1)","Fixed display samples per span (1..64)"};
-    double values[]={double(nurbsSweepOptions_.sections),nurbsSweepOptions_.twistRadians*180/3.141592653589793,nurbsSweepOptions_.endScale,nurbsOperationParameter_,double(nurbsDisplaySamples_)};
-    for(int i=0;i<5;++i){auto f=construction_field(viewport,i);p.outline(f,cyan);auto value=textEdit_.kind==TextEditKind::NurbsControl&&textEdit_.axis==i+4?textEdit_.buffer:number(values[i]);p.text(f.x+5,f.y+18,elide_text_to_width(p,std::string(names[i])+": "+value,f.width-10),white);}
-    p.text(r.x+8,r.y+308,"Enter applies; Esc cancels. Build from NURBS menu.",white);
-    p.text(r.x+8,r.y+329,"Loft: ruled V; equal degrees, explicit direction/seams.",white);
+    const char* names[]={"Sections / rebuild CVs / projection samples","Sweep twist (degrees)","Sweep end scale","Parameter / length fraction (0..1)","Fixed display samples per span (1..64)","Corner fillet / blend leg fraction (0..1)"};
+    double values[]={double(nurbsSweepOptions_.sections),nurbsSweepOptions_.twistRadians*180/3.141592653589793,nurbsSweepOptions_.endScale,nurbsOperationParameter_,double(nurbsDisplaySamples_),nurbsCornerFraction_};
+    for(int i=0;i<6;++i){auto f=construction_field(viewport,i);p.outline(f,cyan);auto value=textEdit_.kind==TextEditKind::NurbsControl&&textEdit_.axis==i+4?textEdit_.buffer:number(values[i]);p.text(f.x+5,f.y+18,elide_text_to_width(p,std::string(names[i])+": "+value,f.width-10),white);}
+    p.text(r.x+8,r.y+340,"Enter applies; Esc cancels. Build from NURBS menu.",white);
+    p.text(r.x+8,r.y+361,"Loft: ruled V; equal degrees, explicit direction/seams.",white);
     constexpr const char* edges[]={"U-min","U-max","V-min","V-max"};
     auto attachment=std::string("Match: active ")+edges[static_cast<unsigned>(nurbsAttachmentOptions_.referenceBoundary)]+" / other "+edges[static_cast<unsigned>(nurbsAttachmentOptions_.movingBoundary)]+
         (nurbsAttachmentOptions_.reverseBoundary?"; reversed":"; same direction");
-    p.text(r.x+8,r.y+350,elide_text_to_width(p,attachment,r.width-16),white);
-    p.text(r.x+8,r.y+371,"Boundary choices and Match C0/C1: NURBS menu.",white);
-    p.text(r.x+8,r.y+392,"NURBS > Close Construction Settings hides this panel.",white);
+    p.text(r.x+8,r.y+382,elide_text_to_width(p,attachment,r.width-16),white);
+    p.text(r.x+8,r.y+403,"Boundary choices and Match C0/C1/G2: NURBS menu.",white);
+    p.text(r.x+8,r.y+424,"NURBS > Close Construction Settings hides this panel.",white);
 }
 }

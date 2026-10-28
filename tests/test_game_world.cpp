@@ -551,6 +551,63 @@ void test_carved_holes_rebuild_collision() {
     }
 }
 
+class RejectSecondBodyCreation final : public IRigidBodyWorld {
+public:
+    explicit RejectSecondBodyCreation(bool dynamic) : dynamic_(dynamic) {}
+    RigidBodyHandle create_body(const RigidBodyCreateDesc& desc) override {
+        if (dynamic_ && ++attempts_ == 2U) return kInvalidRigidBodyHandle;
+        return backend_.create_body(desc);
+    }
+    RigidBodyHandle create_static_body(const StaticRigidBodyCreateDesc& desc) override {
+        if (!dynamic_ && ++attempts_ == 2U) return kInvalidRigidBodyHandle;
+        return backend_.create_static_body(desc);
+    }
+    bool destroy_body(RigidBodyHandle h) override { return backend_.destroy_body(h); }
+    std::optional<RigidBodyState> state(RigidBodyHandle h) const override { return backend_.state(h); }
+    bool set_state(RigidBodyHandle h, const RigidBodyState& v) override { return backend_.set_state(h, v); }
+    bool apply_impulse(RigidBodyHandle h, Float3 v) override { return backend_.apply_impulse(h, v); }
+    bool apply_force(RigidBodyHandle h, Float3 v) override { return backend_.apply_force(h, v); }
+    std::vector<RigidBodyQueryHit> ray_cast_all(
+        Float3 origin, Float3 direction, float maximumDistance,
+        const RigidBodyQueryFilter& filter = {}) const override {
+        return backend_.ray_cast_all(origin, direction, maximumDistance, filter);
+    }
+    void step(float dt) override { backend_.step(dt); }
+    [[nodiscard]] std::size_t body_count() const noexcept { return backend_.body_count(); }
+private:
+    bool dynamic_{};
+    std::size_t attempts_{};
+    ReferenceRigidBodyWorld backend_;
+};
+
+void test_failed_single_piece_collision_rebuild_rolls_back() {
+    for (const bool dynamic : {false, true}) {
+        auto physics = std::make_unique<RejectSecondBodyCreation>(dynamic);
+        auto* backend = physics.get();
+        GameWorld world(std::move(physics));
+        GameObjectDesc desc;
+        desc.name = "Rollback on rejected replacement";
+        desc.dynamic = dynamic;
+        desc.voxelSizeMeters = 1.0F;
+        desc.voxels = make_solid_cube(dynamic ? 7801 : 7802, 4, 1);
+        const GameObjectId id = world.create_object(std::move(desc));
+        CHECK(id != kInvalidGameObjectId);
+        if (id == kInvalidGameObjectId) continue;
+        std::size_t eventCount = 0U;
+        world.on_damage([&](const GameDamageEvent&) { ++eventCount; });
+        const auto oldCount = world.voxel_count(id);
+        const Float3 ray{1.5F, 1.5F, -2.0F};
+        CHECK(world.raycast(ray, {0, 0, 1}, 6.0F).has_value());
+        CHECK(!world.physics().ray_cast_all(ray, {0, 0, 1}, 6.0F).empty());
+        CHECK(!world.damage_sphere(id, {1.5F, 1.5F, 1.5F}, 0.6F).has_value());
+        CHECK(world.voxel_count(id) == oldCount);
+        CHECK(backend->body_count() == 1U);
+        CHECK(world.raycast(ray, {0, 0, 1}, 6.0F).has_value());
+        CHECK(!world.physics().ray_cast_all(ray, {0, 0, 1}, 6.0F).empty());
+        CHECK(eventCount == 0U);
+    }
+}
+
 void test_repaired_moving_collision_preserves_velocity_field() {
     // An off-centre authoritative brick edit changes COM while the object is rotating.
     // Physical velocity at each unchanged world-space point must remain continuous.
@@ -848,6 +905,7 @@ int main() {
     test_fragmentation_of_moved_dynamic_object();
     test_carved_holes_rebuild_collision();
     test_repaired_moving_collision_preserves_velocity_field();
+    test_failed_single_piece_collision_rebuild_rolls_back();
     test_repeated_same_brick_cuts_update_physics_collision();
     test_fragment_cap_keeps_smallest_attached();
     test_splitting_debris_at_the_cap_keeps_the_piece_being_split();

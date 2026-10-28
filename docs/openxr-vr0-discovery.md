@@ -33,13 +33,17 @@ instance destruction. It is not a runtime, Vulkan, session, graphics or hardware
 The optional `dve_xr_session_loop` library contains a session-state controller and an
 OpenXR driver around caller-provided function pointers and an existing session. It begins
 and ends a session on state events, honors `shouldRender`, passes predicted display time
-to a renderer, and submits an empty frame when rendering fails. The calling application
-must poll OpenXR events and map session states, provide a valid session and graphics
-binding, manage image acquisition/release, and keep submitted layer data alive through
-end-frame. Neither the probe nor the existing player connects this controller yet.
+to a renderer, and submits an empty frame when rendering fails. An event pump handles session changes, instance loss, lost-event counts and reference-space
+change records with their effective times and poses. It filters session-specific events
+and uses a budget so the caller can drain remaining events before rendering. A stereo view
+locator uses the predicted display time and rejects missing or invalid tracking.
+The calling application must provide a valid instance, session, space and graphics binding,
+invoke the pump and locator, manage image acquisition/release, and keep submitted layer
+data alive through end-frame. Neither the probe nor the existing player connects them yet.
 
 Release-build tests use fake callbacks and a fake OpenXR function table; they exercise
-ordering, skipped rendering, errors, focus, stopping, restart and loss. They do not
+ordering, skipped rendering, errors, focus, stopping, restart, loss, event filtering,
+recenter records and valid/invalid stereo view results. They do not
 execute an OpenXR runtime or verify Vulkan synchronization.
 
 ## Remaining VR-0 work
@@ -47,7 +51,7 @@ execute an OpenXR runtime or verify Vulkan synchronization.
 - Test the CMake option and build on Windows and additional supported configurations.
   A Linux XR-enabled configure/build and fake-loader CTest passed; XR-disabled configure also passed.
 - Audit the active game-rendering path and design Vulkan ownership and required-device selection.
-- Connect runtime event polling, a real created session and renderer to the controller;
+- Connect the event pump, a real created session and renderer to the controller;
   implement runtime-owned swapchain image interop,
   predicted-time stereo views, coordinate conversions and synchronization.
 - Build an actual stereo diagnostic scene and validate it with an executing OpenXR

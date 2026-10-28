@@ -1,0 +1,84 @@
+name: Exact tubes, copes and plane cuts (real brepkernel)
+# The tube, cope and plane-cut tests check certified geometry from brepkernel (volumes against the
+# analytic ones, plane distance, wall thickness, closed meshes, the equal-diameter case). No other
+# job has brepkernel, so there those parts exit 77 ("Skipped"). This job installs a pinned
+# brepkernel and fails on any skip: DVE_REQUIRE_BREPKERNEL=1, DVE_REQUIRE_COMPLETE_TESTS=1 and the
+# configure-time group check DVE_REQUIRE_TEST_GROUPS=Editor,Brepkernel (cmake/DveTestCoverage.cmake).
+on:
+  pull_request:
+    paths:
+      - "CMakeLists.txt"
+      - "cmake/DveTestCoverage.cmake"
+      - "include/dve/editor_exact_cad.hpp"
+      - "include/dve/editor_exact_tube.hpp"
+      - "src/editor_exact_cad.cpp"
+      - "src/editor_exact_tube.cpp"
+      - "src/editor_native_exact_tube.cpp"
+      - "tests/test_editor_exact_tube.cpp"
+      - "tests/test_editor_exact_cad.cpp"
+      - "docs/exact-tube-coping-2026-10-27.md"
+      - ".github/workflows/exact-tube.yml"
+  push:
+    branches: [main]
+    paths:
+      - "src/editor_exact_tube.cpp"
+      - "tests/test_editor_exact_tube.cpp"
+      - ".github/workflows/exact-tube.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # The brepkernel the tests were written against (HiroSakuraba/robust-brep-booleans) and the
+  # versions of its dependencies they were run with.
+  BREPKERNEL_REF: 430ca953a69bcbc312ea52172b5034edca21404d
+  CADQUERY_OCP: 8.0.1.1.0
+  NUMPY: 2.5.4
+  MANIFOLD3D: 3.5.4
+  # brepkernel's collision extra: certified convex pieces (the exact CAD native tests check them).
+  SCIPY: 1.18.1
+  SHAPELY: 2.2.0
+
+jobs:
+  exact-tube:
+    name: Exact tube tests with brepkernel
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install system packages
+        run: sudo apt-get update && sudo apt-get install -y ninja-build libgl1 libglu1-mesa libxrender1 libpng-dev libjpeg-dev
+      - name: Install brepkernel (pinned)
+        run: |
+          python -m venv "$RUNNER_TEMP/brep-venv"
+          "$RUNNER_TEMP/brep-venv/bin/pip" install --upgrade pip
+          "$RUNNER_TEMP/brep-venv/bin/pip" install "cadquery-ocp==$CADQUERY_OCP" "numpy==$NUMPY" "manifold3d==$MANIFOLD3D" \
+            "scipy==$SCIPY" "shapely==$SHAPELY" \
+            "git+https://github.com/HiroSakuraba/robust-brep-booleans@$BREPKERNEL_REF"
+          echo "$RUNNER_TEMP/brep-venv/bin" >> "$GITHUB_PATH"
+      - name: Check brepkernel runs
+        run: |
+          brepkernel --help
+          brepkernel primitive box -o "$RUNNER_TEMP/probe.brep" --report "$RUNNER_TEMP/probe.json"
+      - name: Configure editor
+        run: |
+          cmake -S . -B build-tube -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DDVE_BUILD_TESTS=ON -DDVE_BUILD_RHI=ON -DDVE_BUILD_PLATFORM=ON \
+            -DDVE_BUILD_PLAYER=ON -DDVE_BUILD_EDITOR=ON -DDVE_BUILD_NATIVE_EDITOR=OFF \
+            -DDVE_BUILD_ASSET_COOKER=OFF -DDVE_BUILD_ASSET_PIPELINE_TESTS=OFF \
+            -DDVE_BUILD_BENCHMARK=OFF -DDVE_ENABLE_SDL3_HOST=OFF \
+            -DDVE_ENABLE_FLUODDITY=OFF -DDVE_ENABLE_SOFT_BODIES=OFF \
+            -DDVE_ENABLE_CPU_HAIR=OFF -DDVE_ENABLE_SIMULATION_ENERGY_COMPILER=OFF \
+            -DDVE_ENABLE_BC7F_ENCODER=OFF -DDVE_ENABLE_KTX2_EXPORT=OFF \
+            -DDVE_REQUIRE_TEST_GROUPS=Editor,Brepkernel
+      - name: Build
+        run: cmake --build build-tube --target dve_editor_exact_tube_tests dve_editor_exact_cad_tests --parallel 3
+      - name: Run (nothing may skip)
+        env:
+          DVE_REQUIRE_COMPLETE_TESTS: "1"
+          DVE_REQUIRE_BREPKERNEL: "1"
+        run: ctest --test-dir build-tube -R '^dve_editor_exact_(tube|cad)_tests$' -V --output-on-failure

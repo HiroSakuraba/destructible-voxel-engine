@@ -73,6 +73,11 @@ Imports and exact Booleans of extruded parts also get certified convex
 collision pieces (`dve.collision_convex_set`), so holes stay holes in physics.
 See [Exact convex collision](exact-convex-collision-2026-10-19.md).
 
+## Exact tubes, copes and plane cuts
+
+Hollow tubes, "cope A to B" and plane (miter) cuts are built on these Booleans:
+[Exact tubes, coping and plane cuts](exact-tube-coping-2026-10-27.md).
+
 ## Limits
 
 - The result uses A's material palette and the whole result is in A's first

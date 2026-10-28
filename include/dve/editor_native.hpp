@@ -25,6 +25,7 @@
 #include "dve/editor_asset_browser.hpp"
 #include "dve/ai/live_editor_mcp.hpp"
 #include "dve/camera_system.hpp"
+#include "dve/editor_exact_tube.hpp"
 #include "dve/editor_diagnostics.hpp"
 #include "dve/editor_component_inspector.hpp"
 #include "dve/editor_control_rig.hpp"
@@ -188,7 +189,10 @@ enum class TextEditKind : std::uint8_t {
     NurbsControl,                           // NURBS control point field
     SelectionSetName,                       // naming a selection set; objectId holds the set index
     Scale,                                  // inspector Scale X/Y/Z (axis in TextEditState::axis)
-    CadDetail                               // CAD Detail: typed mesh accuracy (mm)
+    CadDetail,                              // CAD Detail: typed mesh accuracy (mm)
+    ExactTube,                              // Create Exact Tube: typed "round 50.8 3 600 y"
+    ExactCopeGap,                           // Cope Tube A to B: typed fit-up gap (mm)
+    ExactMiter                              // Plane Cut / Miter: typed "47.5 [high|low] [u|v] [at mm]"
 };
 
 struct TextEditState {
@@ -844,6 +848,15 @@ public:
     bool export_exact_step(bool millimetres, bool zUp);
     [[nodiscard]] const std::filesystem::path& last_step_export() const noexcept { return lastStepExport_; }
     [[nodiscard]] std::string cad_detail_disabled_reason() const;
+    // Exact tubes (editor_exact_tube.hpp): create a hollow tube, cope A to B, plane/miter cut. Each
+    // runs brepkernel as a background job and makes ONE undo step (a new object; operands unchanged).
+    bool start_exact_tube(const TubeSpec& spec);
+    bool start_exact_cope(EditorObjectId a, EditorObjectId b, const ExactCopeOptions& options);
+    bool start_exact_miter(EditorObjectId a, const ExactMiterSpec& spec);
+    // "Round tube Ø50.8 x 3 mm wall, 600 mm long, along Y; 2 cuts" for a tube object, empty otherwise.
+    [[nodiscard]] std::string exact_tube_summary(EditorObjectId id) const;
+    // Why `polygon.create_exact_tube` / `mesh.exact_cope` / `mesh.exact_miter` cannot run now ("" = they can).
+    [[nodiscard]] std::string exact_tube_disabled_reason(std::string_view action) const;
     [[nodiscard]] std::string resample_to_scale_disabled_reason() const;
     // While a transform drag has a typed value: "Move X: 25cm = 0.25 m" (empty otherwise).
     [[nodiscard]] std::string transform_numeric_label() const;
@@ -1286,6 +1299,9 @@ public:
     void draw_nurbs(const IEditorCanvas&,UiRect) const;
     bool dispatch_mesh_authoring_action(std::string_view);
     bool start_exact_boolean(EditorObjectId a, EditorObjectId b, MeshBoolean operation);
+    bool start_exact_tube_cut(ExactTubeCutRequest request, std::string nameSuffix);
+    bool dispatch_exact_tube_action(std::string_view action);
+    bool commit_exact_tube_text();
     bool start_exact_collision(EditorObjectId object);
     bool open_mesh_boolean_preview(EditorObjectId a, EditorObjectId b, MeshBoolean operation);
     bool mesh_authoring_key(std::string_view,bool control,bool shift,bool alt);

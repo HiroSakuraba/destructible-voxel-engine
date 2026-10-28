@@ -3501,6 +3501,10 @@ void NativeEditorController::commit_text_edit() {
         (void)commit_cad_detail_text();
         return;
     }
+    if (kind == TextEditKind::ExactTube || kind == TextEditKind::ExactCopeGap || kind == TextEditKind::ExactMiter) {
+        (void)commit_exact_tube_text();
+        return;
+    }
     if (kind == TextEditKind::SelectionSetName) {
         (void)commit_selection_set_name();
         return;
@@ -7199,11 +7203,12 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
         return true;
     }
     if (actionId.starts_with("mesh.") || actionId.starts_with("mirror.") ||
-        (actionId.starts_with("polygon.") && actionId!="polygon.create_plane" && actionId!="polygon.import" && actionId!="polygon.import_exact") || actionId=="subdiv.from_polygon") {
+        (actionId.starts_with("polygon.") && actionId!="polygon.create_plane" && actionId!="polygon.import" && actionId!="polygon.import_exact" && actionId!="polygon.create_exact_tube") || actionId=="subdiv.from_polygon") {
         for(auto id:workspace_.selected_objects()) { const auto* object=workspace_.document().find_object(id);
             if(object && object->is_nurbs()) {set_status("Use NURBS controls or Bake to New Polygon before polygon editing",true);return false;}
         }
     }
+    if (actionId == "polygon.create_exact_tube") return dispatch_exact_tube_action(actionId);
     if (actionId.starts_with("nurbs.")) return dispatch_nurbs_action(actionId);
     if (actionId.starts_with("subdiv.") || actionId=="create.subdivision")
         return dispatch_subdivision_action(actionId=="create.subdivision" ? "subdiv.create_cube" : actionId);
@@ -7216,7 +7221,7 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
     }
     if (actionId.starts_with("mesh.")) return dispatch_mesh_authoring_action(actionId);
     if (actionId.starts_with("polygon.") && actionId != "polygon.import" && actionId != "polygon.import_exact" &&
-        actionId != "polygon.create_plane" &&
+        actionId != "polygon.create_plane" && actionId != "polygon.create_exact_tube" &&
         actionId != "polygon.lod" && actionId != "polygon.convert_to_voxels" && actionId != "polygon.collision" && actionId != "polygon.streaming")
         return handle_polygon_action(actionId);
     if (selectionDomain_ == SelectionDomain::Polygons && (actionId == "edit.select_all" || actionId == "edit.copy" ||
@@ -10482,6 +10487,11 @@ CommandResult NativeEditorController::set_component_property_text_on_primary(
     const EditorObjectId objectId = *workspace_.selected_object();
     const Component* component = workspace_.document().find_component(objectId, componentId);
     if (!component) return CommandResult::fail("component does not exist");
+    if (component->type == kExactTubeComponent) {
+        const std::string message = "The tube record describes the exact B-rep and is not edited by hand; make a new tube with Polygon > Create Exact Tube";
+        set_status(message, true, 8.0F);
+        return CommandResult::fail(message);
+    }
     const auto it = component->properties.find(property);
     if (it == component->properties.end()) return CommandResult::fail("component property does not exist");
     std::string parseError;

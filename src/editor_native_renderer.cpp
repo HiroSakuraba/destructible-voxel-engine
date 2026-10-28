@@ -3732,6 +3732,38 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                                  "Collision: " + std::to_string(drawn) + " boxes shown, " + std::to_string(skipped) + " more not drawn",
                                  rgb(255,170,90));
     }
+    // Play/Simulate contact points from the active native backend. The reference
+    // integrator deliberately reports none, rather than fabricating collisions.
+    if (controller.viewport_settings().showCollision || shading == ShadingMode::Collision) {
+        const auto& play = controller.play_session();
+        const std::string diagnostic = controller.collision_diagnostic_summary();
+        const int diagY = viewport.y + 18;
+        viewportPainter.fill({viewport.x + 8, diagY - 13,
+                              std::min(viewport.width - 16, viewportPainter.text_width(diagnostic) + 12), 20},
+                             rgb(18, 23, 31));
+        viewportPainter.text(viewport.x + 12, diagY, diagnostic, rgb(255, 204, 125));
+        if (play.active()) {
+            const auto contacts = play.collision_contacts();
+            for (const PhysicsContactEvent& contact : contacts) {
+                const ScreenPoint point = project_world_to_screen(
+                    controller.camera(), viewport, contact.position);
+                if (!point.visible) continue;
+                const int px = static_cast<int>(point.x), py = static_cast<int>(point.y);
+                viewportPainter.outline({px - 4, py - 4, 9, 9}, rgb(255, 220, 65));
+                const Float3 normalTip = add(contact.position, multiply(contact.contactNormal, 0.12F));
+                const ScreenPoint tip = project_world_to_screen(controller.camera(), viewport, normalTip);
+                if (tip.visible) viewportPainter.line(px, py, static_cast<int>(tip.x),
+                                                        static_cast<int>(tip.y), rgb(255, 245, 120));
+            }
+            const std::string count = "Solver contacts " + std::to_string(contacts.size()) +
+                "  dropped " + std::to_string(play.dropped_collision_contacts()) +
+                (play.telemetry().productionPhysics ? "  (native)" : "  (reference: no body contacts)");
+            viewportPainter.fill({viewport.x + 8, diagY + 5,
+                                  std::min(viewport.width - 16, viewportPainter.text_width(count) + 12), 19},
+                                 rgb(18, 23, 31));
+            viewportPainter.text(viewport.x + 12, diagY + 19, count, rgb(200, 220, 255));
+        }
+    }
     if (shading != ShadingMode::Lit) {
         const std::string label = "View: " + std::string(shading_mode_label(shading)) + "  (Alt+1 Lit)";
         const int tagWidth = viewportPainter.text_width(label) + 12;

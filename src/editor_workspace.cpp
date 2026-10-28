@@ -1585,7 +1585,11 @@ std::size_t EditorProblemStore::error_count() const noexcept {
 }
 
 void EditorLogStore::add(EditorLogLevel level, std::string text) {
-    entries_.push_back({level, std::move(text)});
+    if (!entries_.empty() && entries_.back().level == level && entries_.back().text == text) {
+        ++entries_.back().repeats;
+        return;
+    }
+    entries_.push_back({level, std::move(text), 1U});
     while (entries_.size() > capacity_) entries_.pop_front();
 }
 

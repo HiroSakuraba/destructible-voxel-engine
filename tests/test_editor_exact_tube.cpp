@@ -127,6 +127,18 @@ void gap_parsing() {
     check(gap("0.1cm").meters && near(*gap("0.1cm").meters, 1e-3, 1e-15), "cm");
     check(gap("0.01in").meters && near(*gap("0.01in").meters, 2.54e-4, 1e-15), "inches");
     for (const char* bad : {"", "-1", "wide", "1 2", "1e", "nan", "inf"}) check(!gap(bad).meters && !gap(bad).error.empty(), std::string("gap refused: '") + bad + "'");
+    // The prompt refuses an out-of-range gap itself (it used to close and fail later), with the same words.
+    check(gap("100").meters && near(*gap("100").meters, 0.1, 1e-12), "100 mm is the largest gap");
+    for (const char* bad : {"100.1", "101", "11cm", "1m", "1e9"})
+        check(!gap(bad).meters && gap(bad).error == "The fit-up gap must be between 0 and 100 mm", std::string("gap out of range: '") + bad + "'");
+    // "-0" is zero, not a negative zero that prints as -0.
+    check(gap("-0").meters && !std::signbit(*gap("-0").meters), "-0 is a plain zero gap");
+}
+
+void miter_option_duplicates() {
+    for (const char* bad : {"45 high low", "45 low high", "45 + -", "45 u v", "45 v v", "45 at 5 at 6"})
+        check(!parse_miter_spec(bad).spec && !parse_miter_spec(bad).error.empty(), std::string("miter option repeated: '") + bad + "'");
+    check(parse_miter_spec("45 high u at 5").spec.has_value(), "each miter option once is fine");
 }
 
 void spec_parsing() {
@@ -390,6 +402,8 @@ void fake_cope_and_retry() {
               cut.boolean.summary.find("0.02 mm larger across") != std::string::npos, "summary states it: " + cut.boolean.summary);
     check(near(std::stod(opt(stand.seen.calls[stand.seen.calls.size() > 5 ? 4 : 0], "--radius")), 0.03, 1e-4), "(second cutter was built)");
     check(!cut.firstRefusal.empty() && cut.firstRefusal.find("OpenAssembly") != std::string::npos, "the first refusal is kept: " + cut.firstRefusal);
+    // The saved provenance records the automatic clearance, not only the typed gap.
+    check(cut.boolean.source.origin == "cope:Run:gap_mm=0:auto_clearance_mm=0.01", "origin records the automatic clearance: " + cut.boolean.source.origin);
 
     // Retry switched off: a clean refusal, nothing applied.
     ExactCopeOptions strict; strict.retryTangent = false;
@@ -1139,6 +1153,7 @@ int main(int argc, char** argv) {
     try {
         spec_parsing();
         gap_parsing();
+        miter_option_duplicates();
         miter_parsing_and_plane();
         tube_component_round_trip();
         fake_create_tube();

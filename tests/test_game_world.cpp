@@ -551,6 +551,73 @@ void test_carved_holes_rebuild_collision() {
     }
 }
 
+void test_repaired_moving_collision_preserves_velocity_field() {
+    // An off-centre authoritative brick edit changes COM while the object is rotating.
+    // Physical velocity at each unchanged world-space point must remain continuous.
+    auto physics = std::make_unique<ReferenceRigidBodyWorld>();
+    physics->set_gravity({0, 0, 0});
+    GameWorld world(std::move(physics));
+    GameObjectDesc desc;
+    desc.name = "Rotating repair";
+    desc.voxelSizeMeters = 0.5F;
+    desc.voxelScale = {1.5F, 0.75F, 1.0F};
+    desc.dynamic = true;
+    desc.transform = make_rigid_transform({3.0F, 0.0F, 2.0F}, {});
+    desc.voxels = make_solid_cube(780, 4, 1);
+    const GameObjectId id = world.create_object(std::move(desc));
+    CHECK(id != kInvalidGameObjectId);
+    if (id == kInvalidGameObjectId) return;
+
+    const Float3 rayOrigin{4.7F, 0.3F, 0.0F};
+    const auto initialHits = world.physics().ray_cast_all(rayOrigin, {0, 0, 1}, 6.0F);
+    CHECK(!initialHits.empty());
+    if (initialHits.empty()) return;
+    const RigidBodyHandle oldHandle = initialHits.front().body;
+    auto oldState = world.physics().state(oldHandle);
+    CHECK(oldState.has_value());
+    if (!oldState) return;
+    oldState->linearVelocity = {1.0F, -2.0F, 0.5F};
+    oldState->angularVelocity = {0.0F, 0.0F, 3.0F};
+    CHECK(world.physics().set_state(oldHandle, *oldState));
+    const auto originalPosition = world.position(id);
+
+    auto edit = world.voxel_brick_snapshot(id, {0, 0, 0});
+    CHECK(edit.has_value());
+    if (!edit) return;
+    for (int y = 0; y < 4; ++y)
+        for (int z = 0; z < 4; ++z)
+            edit->materials[voxel_index_unchecked({0, y, z})] = kAirMaterial;
+    ++edit->revision;
+    edit->contentHash = VoxelObject::brick_content_hash(edit->materials);
+
+    std::string error;
+    CHECK(world.replace_voxel_brick(id, *edit, &error));
+    CHECK(!world.physics().state(oldHandle).has_value());
+    CHECK(world.position(id).has_value());
+    if (originalPosition && world.position(id))
+        CHECK(length(subtract(*world.position(id), *originalPosition)) < 1.0e-5F);
+
+    // Compare independent physics and voxel raycasts on the removed and retained strips.
+    const Float3 removedRay{3.2F, 0.3F, 0.0F};
+    CHECK(!world.raycast(removedRay, {0, 0, 1}, 6.0F));
+    CHECK(world.physics().ray_cast_all(removedRay, {0, 0, 1}, 6.0F).empty());
+    CHECK(world.raycast(rayOrigin, {0, 0, 1}, 6.0F).has_value());
+    const auto newHits = world.physics().ray_cast_all(rayOrigin, {0, 0, 1}, 6.0F);
+    CHECK(!newHits.empty());
+    if (newHits.empty()) return;
+    const auto newState = world.physics().state(newHits.front().body);
+    CHECK(newState.has_value());
+    if (!newState) return;
+
+    const Float3 expectedVelocity = inherited_child_center_of_mass_velocity(
+        oldState->linearVelocity, oldState->angularVelocity,
+        oldState->currentTransform.position, newState->currentTransform.position);
+    CHECK(length(subtract(newState->linearVelocity, expectedVelocity)) < 1.0e-5F);
+    CHECK(length(subtract(newState->angularVelocity, oldState->angularVelocity)) < 1.0e-5F);
+    // Confirm the test is sensitive to the old 'copy linear velocity' bug.
+    CHECK(length(subtract(expectedVelocity, oldState->linearVelocity)) > 0.1F);
+}
+
 void test_fragment_cap_keeps_smallest_attached() {
     GameWorld world(std::make_unique<ReferenceRigidBodyWorld>());
     auto voxels = make_solid_cube(101, 4, 1);
@@ -735,6 +802,7 @@ int main() {
     test_debris_limit_recycles_oldest();
     test_fragmentation_of_moved_dynamic_object();
     test_carved_holes_rebuild_collision();
+    test_repaired_moving_collision_preserves_velocity_field();
     test_fragment_cap_keeps_smallest_attached();
     test_splitting_debris_at_the_cap_keeps_the_piece_being_split();
     test_queued_damage_on_a_large_wall_commits();

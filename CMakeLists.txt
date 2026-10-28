@@ -672,7 +672,8 @@ endif()
 if(DVE_BUILD_RHI)
     add_library(dve_rhi
         src/rhi/device.cpp
-        src/rhi/null_device.cpp)
+        src/rhi/null_device.cpp
+        src/rhi/pipeline_preparation.cpp)
     add_library(dve::rhi ALIAS dve_rhi)
     target_include_directories(dve_rhi PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
     target_compile_features(dve_rhi PUBLIC cxx_std_23)
@@ -2005,6 +2006,9 @@ if(DVE_BUILD_TESTS)
     endif()
 
     if(DVE_BUILD_RHI)
+        add_executable(dve_pso2_preparation_tests tests/test_pipeline_preparation.cpp)
+        target_link_libraries(dve_pso2_preparation_tests PRIVATE dve::rhi)
+        add_test(NAME dve_pso2_preparation_tests COMMAND dve_pso2_preparation_tests)
         add_executable(dve_rhi_mrt_tests tests/test_rhi_mrt.cpp)
         target_link_libraries(dve_rhi_mrt_tests PRIVATE dve::rhi)
         add_test(NAME dve_rhi_mrt_tests COMMAND dve_rhi_mrt_tests)

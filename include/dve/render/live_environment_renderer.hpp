@@ -85,6 +85,9 @@ struct LiveEnvironmentRendererResources {
     std::unique_ptr<LiveOpticalSceneGpu> opticalScene;
     rhi::GraphicsPipelineHandle shadowOpaquePipeline;
     rhi::GraphicsPipelineHandle shadowMaskedPipeline;
+    // PSO-2C: actual variant count prepared before this bundle became visible.
+    // This is pipeline creation during initialization, not an asynchronous host prewarm.
+    std::uint32_t preparedPipelineVariants{};
     rhi::BufferHandle skyboxVertices;
     rhi::BufferHandle skyboxIndices;
     std::size_t frameConstantCapacity{};

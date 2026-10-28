@@ -208,7 +208,35 @@ void native(){
     EditorDocument d("Native authoring");d.add_object(cube(1));auto b=cube(2);b.transform.position={.5F,0,0};d.add_object(std::move(b));auto owner=std::make_unique<NativeEditorController>(EditorWorkspace(std::move(d)));auto& c=*owner;c.resize(1600,900);c.workspace().select_object(2);c.workspace().add_to_selection(1);
     check(c.dispatch_action("mesh.boolean_difference"),"native Boolean preview");check(c.workspace().document().objects().size()==2,"preview preserves inputs");c.key_down("enter",false,false,false);check(c.workspace().document().objects().size()==3,"Boolean new output");check(c.dispatch_action("edit.undo")&&c.workspace().document().objects().size()==2,"Boolean Undo");check(c.workspace().selection_count()==2,"Boolean undo selection");
     c.workspace().select_object(1);auto geometry=c.workspace().document().find_object(1)->polygon->contentHash;check(c.dispatch_action("mesh.hull_fit"),"native fit hull");check(find_component_by_type(std::span<const Component>(c.workspace().document().find_object(1)->components),kCollisionHullComponent),"hull saved as component");c.key_down("x",false,false,false);c.key_down("minus",false,false,false);c.key_down("1",false,false,false);c.key_down("enter",false,false,false);check(c.workspace().document().find_object(1)->polygon->contentHash==geometry,"hull edits preserve visible geometry");check(c.dispatch_action("edit.undo"),"Hull point undo");c.key_down("escape",false,false,false);
-    check(c.dispatch_action("mesh.uv_editor"),"UV workspace opens");c.key_down("a",false,false,false);c.key_down("g",false,false,false);c.key_down("1",false,false,false);check(c.mesh_authoring_dragging(),"typed UV preview");check(!c.dispatch_action("file.save"),"unapplied UVs cannot save");c.key_down("enter",false,false,false);check(c.workspace().document().find_object(1)->polygon->contentHash!=geometry,"UV edit applies");check(c.dispatch_action("edit.undo")&&c.workspace().document().find_object(1)->polygon->contentHash==geometry,"UV Undo exact");Canvas canvas;c.draw_mesh_authoring(canvas,c.layout().viewport);check(canvas.lines&&canvas.fills,"UV canvas draws geometry and checker");
+    check(c.dispatch_action("mesh.uv_editor"),"UV workspace opens");c.key_down("a",false,false,false);c.key_down("g",false,false,false);c.key_down("1",false,false,false);check(c.mesh_authoring_dragging(),"typed UV preview");check(!c.dispatch_action("file.save"),"unapplied UVs cannot save");c.key_down("enter",false,false,false);check(c.workspace().document().find_object(1)->polygon->contentHash!=geometry,"UV edit applies");check(c.dispatch_action("edit.undo")&&c.workspace().document().find_object(1)->polygon->contentHash==geometry,"UV Undo exact");
+    // UV-Completion-1: density measure, typed target, preview, cancel and one undo.
+    c.key_down("q",false,false,false);
+    c.key_down("a",false,false,false);
+    c.key_down("b",false,false,false);
+    check(c.status().text.find("texels/m")!=std::string::npos,"density measurement visible to artist");
+    c.key_down("i",false,false,false);
+    for(const char* digit:{"2","5","6"})c.key_down(digit,false,false,false);
+    c.key_down("enter",false,false,false);
+    check(c.status().text.find("256")!=std::string::npos,"numeric density target accepted");
+    c.key_down("n",false,false,false);
+    check(c.mesh_authoring_dragging(),"density matching opens a cancellable preview");
+    c.key_down("escape",false,false,false);
+    check(c.workspace().document().find_object(1)->polygon->contentHash==geometry,
+          "density cancel restores source mesh byte-equivalent content hash");
+    c.key_down("n",false,false,false);
+    check(c.mesh_authoring_dragging(),"density preview opens again");
+    c.key_down("enter",false,false,false);
+    check(c.workspace().document().find_object(1)->polygon->contentHash!=geometry,
+          "density match commits changed UV coordinates");
+    check(c.dispatch_action("edit.undo")&&
+          c.workspace().document().find_object(1)->polygon->contentHash==geometry,
+          "density edit is one undoable command");
+    c.key_down("o",false,false,false);
+    check(c.mesh_authoring_dragging(),"UV island alignment previews");
+    c.key_down("escape",false,false,false);
+    check(c.workspace().document().find_object(1)->polygon->contentHash==geometry,
+          "island alignment cancellation restores original UVs");
+    Canvas canvas;c.draw_mesh_authoring(canvas,c.layout().viewport);check(canvas.lines&&canvas.fills,"UV canvas draws geometry and checker");
 }
 }
 void bevel_options(){

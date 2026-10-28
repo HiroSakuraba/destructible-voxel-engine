@@ -223,9 +223,11 @@ struct MechaGame::Impl {
  struct FootPad {GameObjectId id{};int side{};};
  struct FootState {
   Float3 ankle{},swingFrom{},swingTo{},normal{0,0,1};
+  Float3 localAnchor{};
+  GameObjectId supportObject{};
   bool initialized{},planted{},supported{},lastSwing{};
  };
- struct GroundContact {Float3 point{},normal{};};
+ struct GroundContact {Float3 point{},normal{};GameObjectId object{};};
  struct Target {
   GameObjectId id{};std::string key;float hp{},initial{},radius{};
   MechEnemyKind kind{MechEnemyKind::Dummy};
@@ -269,6 +271,7 @@ struct MechaGame::Impl {
  MechLegIkConfig ikConfig{};
  float footLift{.34F},stepReach{.85F};
  std::array<FootState,2> feet{};
+ std::vector<MechFootstepEvent> footstepEvents;
  std::vector<Leg> legs;
  std::vector<FootPad> footPads;
  std::vector<Target> targets;
@@ -346,8 +349,15 @@ struct MechaGame::Impl {
   if(hit->worldPosition.z>motor.position.z+1.0F||
      mag(minus(ankle,hipRef))>
         ikConfig.thighLength+ikConfig.shinLength-.035F)return std::nullopt;
-  return GroundContact{ankle,unit(hit->worldNormal)};
+  return GroundContact{ankle,unit(hit->worldNormal),hit->objectId};
  }
+ void bind_support(FootState& f,const GroundContact& support){
+  f.supportObject=support.object;
+  if(const auto transform=world.moving_transform(support.object))
+   f.localAnchor=inverse_transform_point(transform->current,support.point);
+  else f.supportObject=0;
+ }
+ void release_support(FootState& f){f.supportObject=0;f.localAnchor={};}
  void update_feet(float horizontalMeters,float dt,bool snap=false){
   if(legs.empty())return;
   for(const int side:{-1,1}){
@@ -361,10 +371,13 @@ struct MechaGame::Impl {
     f.normal=hit?hit->normal:Float3{0,0,1};
     f.initialized=true;f.planted=bool(hit);f.supported=bool(hit);
     f.lastSwing=false;
+    if(hit)bind_support(f,*hit);else release_support(f);
    }
+   const bool finishingSwing=f.lastSwing;
    if(jetAirborne){
     f.ankle=plus(home,{0,0,.26F});
     f.planted=f.supported=f.lastSwing=false;
+    release_support(f);
     f.normal={0,0,1};
     continue;
    }
@@ -386,6 +399,7 @@ struct MechaGame::Impl {
     const auto remaining=minus(to,f.ankle);
     const float distance=mag(remaining),step=kFinishSpeed*std::max(dt,0.F);
     f.planted=false;
+    release_support(f);
     if(distance<=step||distance<1.e-3F){f.ankle=to;f.lastSwing=false;}
     else{f.ankle=plus(f.ankle,scaled(remaining,step/distance));stance=false;}
    }else if(wantsSwing){
@@ -415,8 +429,21 @@ struct MechaGame::Impl {
     f.ankle=plus(plus(scaled(f.swingFrom,1.F-eased),scaled(f.swingTo,eased)),
                  {0,0,footLift*std::sin(pi*phase)});
     f.planted=false;f.lastSwing=true;stance=false;
+    release_support(f);
    }
    if(stance){
+    // Planted feet move with the support transform (including rotations).
+    if(f.planted&&f.supportObject){
+     if(world.is_enabled(f.supportObject)){
+      if(const auto transform=world.moving_transform(f.supportObject)){
+       const auto predicted=transform_point(transform->current,f.localAnchor);
+       if(finite3(predicted)&&mag(minus(predicted,hip))<
+          ikConfig.thighLength+ikConfig.shinLength+.05F)
+        f.ankle=predicted;
+       else{f.planted=false;f.supported=false;release_support(f);}
+      }else{f.planted=false;f.supported=false;release_support(f);}
+     }else{f.planted=false;f.supported=false;release_support(f);}
+    }
     // Foot XY stays in world space during stance. We adjust only its height to
     // track terrain changes and keep planted feet from sliding with the hips.
     // A stance foot that the hip has outrun is dragged along at full extension (continuous), never
@@ -428,13 +455,23 @@ struct MechaGame::Impl {
      f.ankle.x=hip.x+dx*(maxHorizontal/dist);f.ankle.y=hip.y+dy*(maxHorizontal/dist);
     }
     auto support=ground(f.ankle,hip);
-    if(support){
+    if(support && (!f.supportObject || f.supportObject==support->object)){
      f.ankle={f.ankle.x,f.ankle.y,support->point.z};
      f.normal=support->normal;f.planted=f.supported=true;
+     bind_support(f,*support);
+     if(finishingSwing && !snap && footstepEvents.size()<2U){
+      const float speed=std::hypot(motor.velocity.x,motor.velocity.y);
+      footstepEvents.push_back({f.ankle,f.normal,f.supportObject,
+          std::clamp(speed/config.maximumSpeed,.15F,1.F),side});
+      // M8 immediate preview on the existing portable impact-visual path.
+      // Future VFX graph consumers can replace the generic dust with terrain presets.
+      effect(f.ankle,false);
+     }
     }else{
      // Missing voxel/floor support: do not leave a weight-bearing foot hovering.
      f.ankle=plus(home,{0,0,.28F});
      f.normal={0,0,1};f.planted=f.supported=false;
+     release_support(f);
     }
    }
   }
@@ -459,7 +496,7 @@ struct MechaGame::Impl {
    const auto& foot=feet[foot_index(pad.side)];
    (void)world.set_position(pad.id,foot.ankle);
    (void)world.set_rotation(pad.id,multiply(
-       mech_align_z_axis(foot.normal),rotation(motor.legsYaw)));
+       mech_align_z_axis(mech_limit_ankle_normal(foot.normal)),rotation(motor.legsYaw)));
   }
  }
  void refresh_hud(){
@@ -518,7 +555,7 @@ struct MechaGame::Impl {
    (void)world.set_enabled(t.id,true);(void)world.set_position(t.id,t.spawn);
    (void)world.set_rotation(t.id,rotation(0));
   }
-  feet={};update_feet(0.F,0.F,true);
+  feet={};footstepEvents.clear();update_feet(0.F,0.F,true);
   publish();camera(true);refresh_hud();
  }
  Target* locked(){
@@ -840,9 +877,12 @@ std::array<MechFootContact,2> MechaGame::foot_contacts()const noexcept{
  std::array<MechFootContact,2> result{};
  for(std::size_t i=0;i<2;++i){
   const auto& f=impl_->feet[i];
-  result[i]={f.ankle,f.normal,f.planted,f.supported};
+  result[i]={f.ankle,f.normal,f.supportObject,f.planted,f.supported};
  }
  return result;
+}
+std::span<const MechFootstepEvent> MechaGame::footstep_events()const noexcept{
+ return impl_->footstepEvents;
 }
 std::string_view MechaGame::locked_target_key()const noexcept{return impl_->lockKey;}
 const MechCombatTelemetry& MechaGame::telemetry()const noexcept{return impl_->telemetry;}
@@ -937,6 +977,7 @@ bool MechaGame::start(std::string* error){
 }
 void MechaGame::step(float dt){
  auto& s=*impl_;if(!s.started||!std::isfinite(dt)||dt<=0||dt>.1F)return;
+ s.footstepEvents.clear();
  auto edge=[&](const char* a,bool& held){const bool pressed=s.world.is_action_pressed(a);
   const bool pressedEdge=pressed&&!held;held=pressed;return pressedEdge;};
  if(edge("prototype_debug",s.lastDebug))s.hud.debug=!s.hud.debug;
@@ -1167,8 +1208,15 @@ bool MechaGame::after_restore(std::string_view encoded,std::string* error){
  if(savedAirborne==0)motor.velocity.z=0; // a grounded mech carries no vertical velocity
  if(version>=3)s.feet=savedFeet;
  else s.feet={};
+ s.footstepEvents.clear();
  s.motor=motor;s.primaryCooldown=primary;s.rocketCooldown=secondary;
  if(version<3)s.update_feet(0.F,0.F,true);
+ else for(int side:{-1,1}){
+  auto& f=s.feet[Impl::foot_index(side)];
+  const auto support=s.ground(f.ankle,s.hip_at(side));
+  if(f.planted&&support)s.bind_support(f,*support);
+  else s.release_support(f);
+ }
  s.rounds=rounds;s.missiles=missiles;s.nextProjectile=next;s.boostUses=boosts;
  s.telemetry=telemetry;s.rockets=std::move(rockets);
  s.extractionReady=ready!=0;s.hud.phase=PrototypePhase(phase);

@@ -27,4 +27,8 @@ struct MechLegIkPose {
     Float3 hip, Float3 desiredAnkle, Float3 kneePole,
     const MechLegIkConfig& config={}, Float3 boneForward={}) noexcept;
 [[nodiscard]] Quaternion mech_align_z_axis(Float3 direction) noexcept;
+// Limit visual ankle roll/pitch on slopes to avoid impossible mechanical poses.
+// The stance solver keeps its actual support normal for terrain and VFX.
+[[nodiscard]] Float3 mech_limit_ankle_normal(Float3 contactNormal,
+                                             float maximumTiltRadians=0.61F) noexcept;
 } // namespace dve

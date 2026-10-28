@@ -147,6 +147,9 @@ std::span<const UnderwaterLamp> PrototypeGame::underwater_lamps()const noexcept{
 std::span<const WaterSprayEffect> PrototypeGame::water_spray_effects()const noexcept{
  return impl_->water?impl_->water->spray_effects():std::span<const WaterSprayEffect>{};
 }
+std::span<const MechFootstepEvent> PrototypeGame::mecha_footstep_events()const noexcept {
+ return impl_->mecha?impl_->mecha->footstep_events():std::span<const MechFootstepEvent>{};
+}
 std::span<const RacingVisualEffect> PrototypeGame::racing_visual_effects()const noexcept {
  return impl_->mecha?impl_->mecha->impact_visuals():impl_->racing?impl_->racing->visuals():std::span<const RacingVisualEffect>{};
 }

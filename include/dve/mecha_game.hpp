@@ -28,6 +28,7 @@ struct MechMotorInput {
                                            MechMotorInput, float dt) noexcept;
 struct MechFootContact {
     Float3 ankle{},normal{0,0,1};
+    std::uint64_t supportObject{};
     bool planted{},supported{};
 };
 enum class MechCameraMode : std::uint8_t { Tactical, ThirdPerson };
@@ -65,6 +66,7 @@ public:
     [[nodiscard]] const MechMotorState& motor() const noexcept;
     [[nodiscard]] MechCameraMode camera_mode() const noexcept;
     [[nodiscard]] std::array<MechFootContact,2> foot_contacts() const noexcept;
+    [[nodiscard]] std::span<const MechFootstepEvent> footstep_events() const noexcept;
     [[nodiscard]] std::string_view locked_target_key() const noexcept;
     [[nodiscard]] const MechCombatTelemetry& telemetry() const noexcept;
     [[nodiscard]] std::span<const RacingVisualEffect> impact_visuals() const noexcept;

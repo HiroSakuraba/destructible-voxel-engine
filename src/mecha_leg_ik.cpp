@@ -17,6 +17,18 @@ Float3 unit(Float3 a){const auto n=magnitude(a);return n>1.e-7F?times(a,1.F/n):F
 // reference exists.
 Quaternion oriented_z_axis(Float3 direction,Float3 forward,Float3 fallbackForward);
 }
+Float3 mech_limit_ankle_normal(Float3 contactNormal,float limit) noexcept {
+ if(!finite(contactNormal)||!std::isfinite(limit)||limit<0.F||limit>kPi*.5F)
+  return {0,0,1};
+ const Float3 n=unit(contactNormal);
+ if(n.z<=0.F)return {0,0,1};
+ const float radial=std::hypot(n.x,n.y);
+ if(radial<1.e-6F)return {0,0,1};
+ const float tilt=std::atan2(radial,n.z);
+ if(tilt<=limit)return n;
+ const float horizontal=std::sin(limit)/radial;
+ return {n.x*horizontal,n.y*horizontal,std::cos(limit)};
+}
 Quaternion mech_align_z_axis(Float3 direction) noexcept {
     const Float3 up{0,0,1};
     if(!finite(direction))return {};

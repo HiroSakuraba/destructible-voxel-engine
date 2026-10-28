@@ -29,6 +29,14 @@ struct WaterSprayEffect {
 };
 // Monotone event sequences cross the fixed-step / real-time audio boundary.
  // The driver de-duplicates them across render frames and avoids replay after quickload.
+// Gameplay events, NOT renderer-owned particles. The consumer chooses sound,
+// decal and VFX presets, and may ignore events when culled.
+struct MechFootstepEvent {
+    Float3 position{},normal{0,0,1};
+    std::uint64_t supportObject{};
+    float intensity{};
+    std::int32_t side{};
+};
 struct MechAudioState {
     std::uint64_t primaryShots{}, rockets{}, impacts{}, enemyShots{}, boostUses{};
 };
@@ -78,6 +86,7 @@ public:
     [[nodiscard]] PrototypeCamera camera() const;
     [[nodiscard]] const PrototypeHud& hud() const noexcept;
     [[nodiscard]] std::span<const RacingVisualEffect> racing_visual_effects() const noexcept;
+    [[nodiscard]] std::span<const MechFootstepEvent> mecha_footstep_events() const noexcept;
     [[nodiscard]] const OceanField* ocean_field() const noexcept;
     [[nodiscard]] double ocean_time() const noexcept;
     [[nodiscard]] const WaterVolumeSettings* water_volume_settings()const noexcept;

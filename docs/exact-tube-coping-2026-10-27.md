@@ -13,7 +13,7 @@ certificate. brepkernel itself is not modified.
 
 ## Commands
 
-All three are in the Polygon menu and the Command Center, disabled with the reason when they
+These commands are in the Polygon menu and the Command Center, disabled with the reason when they
 cannot run (Play or Simulate active, a long job running, nothing or the wrong thing selected,
 locked or isolated objects, no exact source, no tube record, a brepkernel that is missing).
 Each runs brepkernel as a background job (Esc cancels) and makes **one undo step**: a new
@@ -23,13 +23,27 @@ source and tube record.
 - **Create Exact Tube (CAD)...** (`polygon.create_exact_tube`). Type
   `round 50.8 3 600 y`, `square 40 2 500 x` or `rect 80x40 3 600 z`: outer size(s), wall,
   length (millimetres; the suffixes `mm`, `cm`, `m`, `in` work on any number) and the axis
-  letter x, y or z (default y). The tube is the outer solid minus a longer bore, as one exact
+  letter x, y or z (default y). Square and rectangular stock optionally accept an outer radius
+  before the axis: `rect 80x40 3 600 r 6 y`. The inner radius is max(outer radius minus wall, 0).
+  The radius is created with OpenCASCADE through Python (`DVE_CAD_PYTHON` can select the Python
+  interpreter with OCP installed); the subsequent brepkernel difference must still be accepted.
+  The tube is the outer solid minus a longer bore, as one exact
   Boolean, centred on its own origin. Checks at creation: one solid, watertight, volume within
   1e-6 of the analytic one. The wall must be at least 0.1 mm and less than half the smallest outer size.
 - **Cope Tube A to B (Exact CAD)...** (`mesh.exact_cope`). Select two tubes; the active one is A,
   the other is B. A minus B's **solid outer body** (not its bore), so A's end is saddle-cut
   through both of its walls onto B's outside surface. Type the fit-up gap in mm (default 0): the
-  cutter is B's outer body grown by the gap on every side.
+  cutter is B's outer body grown by the gap on every side. Different fixed sizes and mixed
+  round/rectangular profiles are supported; tapered or changing-width tube envelopes are not yet
+  inferred automatically. Use a supplied solid envelope for such cutters as described below.
+- **Resize Uncut Tube (New Exact CAD Object)...** (`mesh.exact_resize_tube`). Select an uncut exact
+  tube and edit its prefilled profile, sizes, wall, length or axis. This creates a new certified stock
+  tube at the source pose and scale; the original stays. Cut tubes are refused because their history
+  cannot yet be replayed. Per-face material assignments need to be reapplied to the new mesh.
+- **Cope to Supplied Exact Solid (No Gap)...** (`mesh.exact_cope_solid`). Subtract the actual B-rep
+  of selected exact CAD object B from A. A solid outer-envelope cutter can have a taper or changing
+  cross-section; B is not reconstructed from a tube record. A hollow cutter remains hollow: this
+  does not infer or fill its outside envelope. There is no fit-up gap or automatic tangent retry.
 - **Plane Cut / Miter Tube (Exact CAD)...** (`mesh.exact_miter`). Select one tube and type
   `47.5` (the angle from a square cut). Options: `high` or `low` (the end kept, default low), `u` or `v`
   (the transverse direction the plane leans toward, default u), `at 120` (where the plane
@@ -61,12 +75,16 @@ Equal squares at 90 degrees are certified at zero gap and need no retry. Pass an
 
 ## Limits and honest caveats
 
-- **No outer corner radius.** brepkernel's primitives are sharp boxes and cylinders, so a
-  rectangular or square tube has square outer and inner corners. Rounded corners would need a
-  brepkernel primitive or a fillet; they are not simulated.
+- **Rounded stock.** The OpenCASCADE input primitives are validated and passed to the same
+  certified brepkernel Boolean. The inner corner radius is max(outer radius minus wall, 0), so
+  when the outer radius is smaller than the wall the inner corner is sharp; this is a specified
+  cross-section, not a claim of constant wall thickness everywhere around the corner. If OCP or
+  certification is unavailable the operation refuses; no mesh-only corner is substituted.
 - **Uniform scale for gaps and angles.** A fit-up gap needs a uniformly scaled B and a plane cut a
   uniformly scaled tube (an angle is not true on an unevenly stretched one); otherwise the command
   refuses and says so. A cope at gap 0 uses the exact placement of B in A, scale included.
+  The automatic retry converts its world-space clearance to B's local frame; it is disabled when B
+  is nonuniformly scaled because a single local expansion would not be a uniform world-space gap.
 - **The plane must cross the side walls.** A plane that would leave through the end face of the
   tube (very shallow, or near the end) is refused with the allowed position. Angles are limited to
   within 85 degrees of a square cut.
@@ -80,8 +98,8 @@ Equal squares at 90 degrees are certified at zero gap and need no retry. Pass an
 - **Collision.** Straight tubes get certified convex collision pieces if brepkernel's collision
   extra (`scipy`, `shapely`) is installed; cut tubes are not extrusions, so they keep one convex hull.
 - **Windows.** The process runner has not been run on Windows (same as the other exact CAD commands).
-- Typed values are millimetres; the editor does not yet have a tube-editing panel: change a tube by
-  making a new one (the previous one stays until deleted).
+- Typed values are millimetres. The resize command regenerates uncut stock as a new object; it is
+  not in-place parametric editing and does not replay existing copes or miters.
 
 ## Tests
 

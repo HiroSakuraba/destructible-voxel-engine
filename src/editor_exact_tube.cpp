@@ -97,7 +97,9 @@ ExactPrimitive tube_outer_primitive(const TubeSpec& s, double grow) {
         p.height = s.length + 2 * grow;
         p.axis = s.axis;
     } else {
-        p.kind = ExactPrimitive::Kind::Box;
+        p.kind = s.outerCornerRadius > 0.0 ? ExactPrimitive::Kind::RoundedBox : ExactPrimitive::Kind::Box;
+        p.radius = s.outerCornerRadius > 0.0 ? s.outerCornerRadius + grow : 0.0;
+        p.axis = s.axis;
         p.size[std::size_t(axes[0])] = s.length + 2 * grow;
         p.size[std::size_t(axes[1])] = s.width + 2 * grow;
         p.size[std::size_t(axes[2])] = s.height + 2 * grow;
@@ -116,7 +118,10 @@ ExactPrimitive tube_bore_primitive(const TubeSpec& s) {
         p.height = s.length + 2 * margin;
         p.axis = s.axis;
     } else {
-        p.kind = ExactPrimitive::Kind::Box;
+        const double innerRadius = (std::max)(0.0, s.outerCornerRadius - s.wall);
+        p.kind = innerRadius > 0.0 ? ExactPrimitive::Kind::RoundedBox : ExactPrimitive::Kind::Box;
+        p.radius = innerRadius;
+        p.axis = s.axis;
         p.size[std::size_t(axes[0])] = s.length + 2 * margin;
         p.size[std::size_t(axes[1])] = s.width - 2 * s.wall;
         p.size[std::size_t(axes[2])] = s.height - 2 * s.wall;
@@ -149,6 +154,9 @@ std::string validate_tube_spec(const TubeSpec& s) {
     if (tube_axes(s.axis)[0] < 0) return "The tube axis must be x, y or z";
     for (const double v : {s.width, s.height, s.wall, s.length})
         if (!std::isfinite(v) || !(v > 0.0)) return "Tube sizes must be positive numbers";
+    if (!std::isfinite(s.outerCornerRadius) || s.outerCornerRadius < 0.0) return "Outer corner radius must be a finite nonnegative length";
+    if (s.profile == TubeProfile::Round && s.outerCornerRadius != 0.0) return "Corner radius is only for square or rectangular tubes";
+    if (s.outerCornerRadius >= 0.5 * (std::min)(s.width, s.height)) return "Outer corner radius must be less than half the smaller outer size";
     if (s.width > kMaxLength || s.height > kMaxLength || s.length > kMaxLength) return "Tube sizes above 100 m are not accepted (check the units)";
     if (s.profile != TubeProfile::Rectangular && !close_enough(s.width, s.height, 1.0e-12)) return "Round and square tubes have one outer size";
     if (s.wall < kMinWall) return "The wall must be at least 0.1 mm";
@@ -198,6 +206,13 @@ TubeSpecParse parse_tube_spec(std::string_view text) {
         return out;
     }
     spec.axis = 'y';
+    if (index < words.size() && (lower_copy(words[index]) == "r" || lower_copy(words[index]) == "radius")) {
+        ++index;
+        if (index >= words.size()) { out.error = "Type the outer corner radius after r"; return out; }
+        const auto radius = parse_length(words[index++]);
+        if (!radius) { out.error = "Cannot read the outer corner radius"; return out; }
+        spec.outerCornerRadius = *radius;
+    }
     if (index < words.size()) {
         const std::string axis = lower_copy(words[index]);
         if (axis.size() == 1 && (axis[0] == 'x' || axis[0] == 'y' || axis[0] == 'z')) { spec.axis = axis[0]; ++index; }
@@ -214,7 +229,9 @@ TubeSpecParse parse_tube_spec(std::string_view text) {
 std::string format_tube_spec(const TubeSpec& s) {
     std::string out = profile_name(s.profile) + " " + mm_text(s.width);
     if (s.profile == TubeProfile::Rectangular) out += "x" + mm_text(s.height);
-    out += " " + mm_text(s.wall) + " " + mm_text(s.length) + " " + std::string(1, s.axis);
+    out += " " + mm_text(s.wall) + " " + mm_text(s.length);
+    if (s.outerCornerRadius > 0.0) out += " r " + mm_text(s.outerCornerRadius);
+    out += " " + std::string(1, s.axis);
     return out;
 }
 
@@ -222,6 +239,7 @@ std::string describe_tube_spec(const TubeSpec& s) {
     std::string out = s.profile == TubeProfile::Round ? "Round tube OD " + mm_text(s.width) + " mm"
         : s.profile == TubeProfile::Square ? "Square tube " + mm_text(s.width) + " mm"
         : "Rectangular tube " + mm_text(s.width) + " x " + mm_text(s.height) + " mm";
+    if (s.outerCornerRadius > 0.0) out += ", R" + mm_text(s.outerCornerRadius) + " mm outer corners";
     return out + ", " + mm_text(s.wall) + " mm wall, " + mm_text(s.length) + " mm long, along " + axis_name(s.axis);
 }
 
@@ -230,7 +248,10 @@ double tube_cross_section_area(const TubeSpec& s) {
         const double ro = s.width / 2, ri = ro - s.wall;
         return kPi * (ro * ro - ri * ri);
     }
-    return s.width * s.height - (s.width - 2 * s.wall) * (s.height - 2 * s.wall);
+    const double innerRadius = (std::max)(0.0, s.outerCornerRadius - s.wall);
+    const double outerArea = s.width * s.height - (4.0 - kPi) * s.outerCornerRadius * s.outerCornerRadius;
+    const double innerArea = (s.width - 2 * s.wall) * (s.height - 2 * s.wall) - (4.0 - kPi) * innerRadius * innerRadius;
+    return outerArea - innerArea;
 }
 
 double tube_volume(const TubeSpec& s) { return tube_cross_section_area(s) * s.length; }
@@ -243,6 +264,7 @@ Component make_exact_tube_component(const TubeSpec& s, const std::string& cuts) 
     component.properties["height"] = s.height;
     component.properties["wall"] = s.wall;
     component.properties["length"] = s.length;
+    if (s.outerCornerRadius > 0.0) component.properties["outer_corner_radius"] = s.outerCornerRadius;
     component.properties["axis"] = std::string(1, s.axis);
     component.properties["cuts"] = cuts;
     return component;
@@ -273,6 +295,11 @@ std::optional<ExactTubeRecord> exact_tube_record(const EditorObject& object) {
         record.spec.height = number("height");
         record.spec.wall = number("wall");
         record.spec.length = number("length");
+        if (const auto it = component.properties.find("outer_corner_radius"); it != component.properties.end()) {
+            const auto* radius = std::get_if<double>(&it->second);
+            if (!radius) return std::nullopt;
+            record.spec.outerCornerRadius = *radius;
+        }
         record.cuts = text("cuts");
         if (!validate_tube_spec(record.spec).empty()) return std::nullopt;
         return record;
@@ -374,17 +401,41 @@ ExactTubeCutRequest prepare_exact_cope(const std::filesystem::path& projectRoot,
     out.cutterTube = tubeB->spec;
     // Equal outer sizes touch tangentially at 90 degrees: when any outer size of A matches one of
     // the cutter's (within a few clearances) a refusal is a candidate for the documented retry.
-    out.tangentClearanceMeters = (std::max)(0.0, options.tangentClearanceMeters);
+    // Retry clearance is specified in world metres, but the generated cutter is in B's
+    // local mesh frame. An anisotropically scaled cutter has no uniform world-space gap.
+    const bool canRetry = nearly_uniform(objectB->voxelScale) &&
+        std::isfinite(options.tangentClearanceMeters) && options.tangentClearanceMeters > 0.0;
+    out.tangentClearanceMeters = canRetry ? options.tangentClearanceMeters / scaleB : 0.0;
     bool candidate = true;
-    if (out.tubeA && nearly_uniform(objectA->voxelScale) && nearly_uniform(objectB->voxelScale)) {
+    if (out.tubeA && nearly_uniform(objectA->voxelScale) && canRetry) {
         candidate = false;
         const double sa = std::abs(double(objectA->voxelScale.x));
-        const double band = 4.0 * out.tangentClearanceMeters + 1.0e-9;
+        const double band = 4.0 * options.tangentClearanceMeters + 1.0e-9;
         for (const double da : {out.tubeA->spec.width, out.tubeA->spec.height})
             for (const double db : {tubeB->spec.width, tubeB->spec.height})
                 candidate = candidate || close_enough(da * sa, db * scaleB + 2.0 * options.gapWorldMeters, band);
     }
-    out.tangentRetry = options.retryTangent && candidate && out.tangentClearanceMeters > 0.0;
+    out.tangentRetry = options.retryTangent && canRetry && candidate;
+    return out;
+}
+
+ExactTubeCutRequest prepare_exact_cope_to_solid(const std::filesystem::path& projectRoot,
+    const EditorDocument& document, EditorObjectId a, EditorObjectId b) {
+    ExactTubeCutRequest out;
+    out.kind = "cope";
+    const auto* objectA = document.find_object(a);
+    const auto* objectB = document.find_object(b);
+    if (!objectA || !objectB || a == b) { out.error = "Choose two different exact CAD objects: A is cut by B"; return out; }
+    auto request = prepare_exact_boolean(projectRoot, document, a, b, MeshBoolean::Difference);
+    if (!request.error.empty()) { out.error = request.error; return out; }
+    request.origin = "cope-solid:" + sanitize_record(objectB->name);
+    request.summaryPrefix = "Certified exact cope to supplied solid";
+    out.boolean = std::move(request);
+    out.tubeA = exact_tube_record(*objectA);
+    out.target = objectB->name;
+    out.record = "cope to supplied exact solid " + sanitize_record(objectB->name) + ", gap 0 mm";
+    // The cutter is B's actual B-rep, not its outer envelope. There is no safe generic
+    // gap expansion or tangent retry without a corresponding exact-offset operation.
     return out;
 }
 

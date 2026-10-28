@@ -5242,6 +5242,44 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
         }
         if (measureActive_) { (void)measure_at(x, y); return; }
         update_hover(x, y);
+        // Collision shading selects solver proxy boxes rather than visible art
+        // surfaces. Clicking the same pixel again cycles overlapping and hidden
+        // colliders, with deterministic depth / object / box ordering.
+        if (selectionDomain_ == SelectionDomain::Objects &&
+            activeTool_ == EditorToolId::Select) {
+            const SettingValue shadingValue = workspace_.settings().value("viewport.shading_mode");
+            const auto* shadingName = std::get_if<std::string>(&shadingValue);
+            if (shadingName && *shadingName == "collision") {
+                const auto hits = pick_editor_collision_boxes_all(
+                    workspace_.document(),
+                    make_viewport_ray(camera_, layout_.viewport, static_cast<float>(x), static_cast<float>(y)),
+                    10000.0F, &viewportSettings_.isolatedObjects, true);
+                if (!hits.empty()) {
+                    std::size_t chosen = 0U;
+                    if (selectedCollision_ && std::abs(x - selectedCollisionX_) <= 3 &&
+                        std::abs(y - selectedCollisionY_) <= 3) {
+                        const auto it = std::find_if(hits.begin(), hits.end(), [&](const EditorCollisionPick& hit) {
+                            return hit.objectId == selectedCollision_->objectId &&
+                                hit.box == selectedCollision_->box;
+                        });
+                        if (it != hits.end())
+                            chosen = (static_cast<std::size_t>(it - hits.begin()) + 1U) % hits.size();
+                    }
+                    selectedCollision_ = hits[chosen];
+                    selectedCollisionX_ = x; selectedCollisionY_ = y;
+                    workspace_.select_object(selectedCollision_->objectId);
+                    refresh_menu_state();
+                    set_status("Collision box " + std::to_string(selectedCollision_->boxIndex + 1U) +
+                        " of object " + std::to_string(selectedCollision_->objectId) +
+                        " (depth " + std::to_string(chosen + 1U) + "/" + std::to_string(hits.size()) +
+                        "; click again to cycle overlapping colliders)");
+                } else {
+                    selectedCollision_.reset();
+                    set_status("No enabled voxel collider under pointer (including hidden proxies)", true);
+                }
+                return;
+            }
+        }
         const bool selectLikeTool = activeTool_ == EditorToolId::Select || activeTool_ == EditorToolId::Translate ||
                                     activeTool_ == EditorToolId::Rotate || activeTool_ == EditorToolId::Scale;
         if (activeTool_ == EditorToolId::Select && begin_shape_selection(x, y, modifiers)) return;

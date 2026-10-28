@@ -1,4 +1,6 @@
 #include "dve/editor_native_renderer.hpp"
+#include "dve/collision_convex_set.hpp"
+#include "dve/collision_hull.hpp"
 #include "dve/editor_nurbs_surface.hpp"
 #include "dve/voxel_metric.hpp"
 #include "dve/editor_midi.hpp"
@@ -3711,6 +3713,80 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         const auto draw_object = [&](const EditorObject& object) {
             if (controller.is_isolated_out(object.id) ||
                 (shading != ShadingMode::Collision && !object.flags.visible)) return;
+            const auto& selected = controller.selected_collision();
+            const auto highlight = [&](EditorColliderKind kind, std::size_t index) {
+                return selected && selected->objectId == object.id &&
+                       selected->kind == kind && selected->boxIndex == index;
+            };
+            if (object.flags.collisionEnabled && object.polygon) {
+                const auto drawSegment = [&](Float3 a, Float3 b, EditorColor color) {
+                    const Float3 wa = transform_point(object.transform,multiply_components(a,object.voxelScale));
+                    const Float3 wb = transform_point(object.transform,multiply_components(b,object.voxelScale));
+                    const ScreenPoint p = project_world_to_screen(controller.camera(), viewport,wa);
+                    const ScreenPoint q = project_world_to_screen(controller.camera(), viewport,wb);
+                    if (p.visible && q.visible)
+                        viewportPainter.line(static_cast<int>(p.x), static_cast<int>(p.y),
+                                             static_cast<int>(q.x), static_cast<int>(q.y), color);
+                };
+                const auto drawLocalBounds = [&](Float3 minimum, Float3 maximum, EditorColor color) {
+                    const std::array<Float3,8> corners{{
+                        {minimum.x,minimum.y,minimum.z},{maximum.x,minimum.y,minimum.z},
+                        {minimum.x,maximum.y,minimum.z},{maximum.x,maximum.y,minimum.z},
+                        {minimum.x,minimum.y,maximum.z},{maximum.x,minimum.y,maximum.z},
+                        {minimum.x,maximum.y,maximum.z},{maximum.x,maximum.y,maximum.z}}};
+                    static constexpr std::array<std::array<int,2>,12> edges{{
+                        {{0,1}},{{0,2}},{{0,4}},{{1,3}},{{1,5}},{{2,3}},
+                        {{2,6}},{{3,7}},{{4,5}},{{4,6}},{{5,7}},{{6,7}}}};
+                    for (auto edge : edges) drawSegment(corners[edge[0]],corners[edge[1]],color);
+                };
+                const auto pieces = active_convex_set(object.components);
+                if (!pieces.empty()) {
+                    for (std::size_t index = 0; index < pieces.size(); ++index) {
+                        if (drawn >= kMaxDrawnBoxes && !highlight(EditorColliderKind::ConvexPrism,index)) {
+                            ++skipped; continue;
+                        }
+                        const auto& piece=pieces[index];
+                        if (piece.bottom.size() != piece.top.size()) continue;
+                        const EditorColor color=highlight(EditorColliderKind::ConvexPrism,index)
+                            ? rgb(255,245,80) : rgb(255,140,58);
+                        for (std::size_t k=0; k<piece.bottom.size(); ++k) {
+                            const std::size_t next=(k+1U)%piece.bottom.size();
+                            drawSegment(piece.bottom[k],piece.bottom[next],color);
+                            drawSegment(piece.top[k],piece.top[next],color);
+                            drawSegment(piece.bottom[k],piece.top[k],color);
+                        }
+                        ++drawn;
+                    }
+                } else {
+                    const auto hull=active_collision_hull_points(object.components);
+                    if (!hull.empty()) {
+                        const EditorColor color=highlight(EditorColliderKind::AuthoredHull,0U)
+                            ? rgb(255,245,80) : rgb(255,140,58);
+                        // Explicit collision-only points; no misleading art mesh outline.
+                        for (Float3 local : hull) {
+                            const Float3 world=transform_point(object.transform,
+                                multiply_components(local,object.voxelScale));
+                            const ScreenPoint p=project_world_to_screen(controller.camera(),viewport,world);
+                            if (p.visible) viewportPainter.outline(
+                                {static_cast<int>(p.x)-2,static_cast<int>(p.y)-2,5,5},color);
+                        }
+                        ++drawn;
+                    } else {
+                        Float3 low{INFINITY,INFINITY,INFINITY}, high{-INFINITY,-INFINITY,-INFINITY};
+                        for (const auto& v : object.polygon->vertices) {
+                            const Float3 p=v.position;
+                            low={std::min(low.x,p.x),std::min(low.y,p.y),std::min(low.z,p.z)};
+                            high={std::max(high.x,p.x),std::max(high.y,p.y),std::max(high.z,p.z)};
+                        }
+                        if (std::isfinite(low.x)) {
+                            drawLocalBounds(low,high,highlight(EditorColliderKind::PolygonBounds,0U)
+                                ? rgb(255,245,80) : rgb(255,140,58));
+                            ++drawn;
+                        }
+                    }
+                }
+                return;
+            }
             for (const VoxelBox& box : controller.collision_proxy(object.id)) {
                 const auto& selected = controller.selected_collision();
                 const bool focused = selected && selected->objectId == object.id && selected->box == box;

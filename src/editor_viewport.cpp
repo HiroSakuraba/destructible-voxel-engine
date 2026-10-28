@@ -476,6 +476,45 @@ bool object_matches_screen_rect(const EditorObject& object, const EditorCamera& 
     return contain && foundVoxel && allContained;
 }
 
+std::vector<EditorCollisionPick> pick_editor_collision_boxes_all(
+    const EditorDocument& document, ViewportRay ray, float maximumWorldDistance,
+    const std::set<EditorObjectId>* onlyObjects, bool includeHidden) {
+    std::vector<EditorCollisionPick> hits;
+    if (!(maximumWorldDistance > 0.0F) || !std::isfinite(maximumWorldDistance) ||
+        !(length_squared(ray.direction) > 1.0e-12F)) return hits;
+    const Float3 direction = safe_normalize(ray.direction, {0, 0, -1});
+    for (const auto& [id, object] : document.objects()) {
+        if (!object.flags.collisionEnabled || (!includeHidden && !object.flags.visible) ||
+            (onlyObjects && !onlyObjects->empty() && !onlyObjects->contains(id)) ||
+            !object.voxels || object.polygon || object.text3d || object.gaborVolume ||
+            !(object.voxelSizeMeters > 0.0F)) continue;
+        const Float3 metric = multiply(object.voxelScale, object.voxelSizeMeters);
+        if (!(metric.x > 0.0F && metric.y > 0.0F && metric.z > 0.0F)) continue;
+        // Transform ray WITHOUT normalizing the local direction: slab t remains a
+        // world-distance value even under rotation and nonuniform voxel scaling.
+        const Float3 localOrigin = divide_components(inverse_transform_point(object.transform, ray.origin), metric);
+        const Float3 localDirection = divide_components(inverse_transform_vector(object.transform, direction), metric);
+        const std::vector<VoxelBox> boxes = build_merged_object_box_proxy(*object.voxels);
+        for (std::size_t index = 0; index < boxes.size(); ++index) {
+            const VoxelBox& box = boxes[index];
+            const Float3 minimum{static_cast<float>(box.min.x), static_cast<float>(box.min.y), static_cast<float>(box.min.z)};
+            const Float3 maximum{static_cast<float>(box.maxExclusive.x), static_cast<float>(box.maxExclusive.y),
+                                 static_cast<float>(box.maxExclusive.z)};
+            float enter = 0.0F, exit = 0.0F;
+            if (!ray_aabb_interval(localOrigin, localDirection, minimum, maximum, enter, exit) ||
+                enter > maximumWorldDistance) continue;
+            const float distance = std::max(0.0F, enter);
+            hits.push_back({id, index, box, add(ray.origin, multiply(direction, distance)), distance});
+        }
+    }
+    std::sort(hits.begin(), hits.end(), [](const auto& a, const auto& b) {
+        if (a.worldDistance != b.worldDistance) return a.worldDistance < b.worldDistance;
+        if (a.objectId != b.objectId) return a.objectId < b.objectId;
+        return a.boxIndex < b.boxIndex;
+    });
+    return hits;
+}
+
 std::vector<EditorPickResult> pick_editor_document_all(const EditorDocument& document, ViewportRay ray, float maximumWorldDistance,
                                                        const std::set<EditorObjectId>* onlyObjects) {
     std::vector<EditorPickResult> hits;

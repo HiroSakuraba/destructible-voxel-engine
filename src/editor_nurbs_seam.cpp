@@ -1,5 +1,6 @@
 #include "dve/editor_nurbs_seam.hpp"
 #include "dve/nurbs_topology.hpp"
+#include "dve/nurbs_curvature.hpp"
 #include "dve/editor_nurbs_surface.hpp"
 #include <algorithm>
 #include <charconv>
@@ -17,7 +18,7 @@ bool v_edge(NurbsBoundary edge){return edge==NurbsBoundary::VMin||edge==NurbsBou
 bool min_edge(NurbsBoundary edge){return edge==NurbsBoundary::UMin||edge==NurbsBoundary::VMin;}
 const std::string* encoded(const EditorObject& object){auto* component=find_component_by_type(object.components,kNurbsComponent);if(!component)return nullptr;auto it=component->properties.find(kNurbsSeamProperty);return it==component->properties.end()?nullptr:std::get_if<std::string>(&it->second);}
 std::string encode(const NurbsSeam& seam){
-    std::ostringstream out;out.imbue(std::locale::classic());out<<std::setprecision(17)<<"DVE_NURBS_SEAM 1 "<<seam.reference<<' '<<seam.moving<<' '<<unsigned(seam.options.referenceBoundary)<<' '<<unsigned(seam.options.movingBoundary)<<' '<<seam.options.reverseBoundary<<' '<<seam.options.c1<<' '<<seam.referenceStamp<<' '<<seam.movingStamp<<' ';
+    std::ostringstream out;out.imbue(std::locale::classic());out<<std::setprecision(17)<<"DVE_NURBS_SEAM 1 "<<seam.reference<<' '<<seam.moving<<' '<<unsigned(seam.options.referenceBoundary)<<' '<<unsigned(seam.options.movingBoundary)<<' '<<seam.options.reverseBoundary<<' '<<(seam.options.c2?2:seam.options.c1?1:0)<<' '<<seam.referenceStamp<<' '<<seam.movingStamp<<' ';
     for(const auto* axis:{&seam.grid.u,&seam.grid.v,&seam.fractions}){out<<axis->size()<<' ';for(double x:*axis)out<<x<<' ';}
     for(auto p:seam.anchors)out<<p.x<<' '<<p.y<<' '<<p.z<<' ';return out.str();
 }
@@ -47,6 +48,15 @@ bool continuity(const NurbsSource& a,const NurbsSource& b,const NurbsSeam& seam,
         const auto da=v_edge(seam.options.referenceBoundary)?x->dv:x->du,db=v_edge(seam.options.movingBoundary)?y->dv:y->du;
         for(unsigned k=0;k<3;++k){if(std::abs(x->position[k]-y->position[k])>1e-8*(1+std::abs(x->position[k])))return fail(error,"Linked seam C0 continuity is stale");
             if(seam.options.c1&&std::abs(da[k]*scaleA-db[k]*scaleB)>1e-7*(1+std::abs(da[k]*scaleA)))return fail(error,"Linked seam C1 continuity is stale at fraction "+std::to_string(fractions[i])+", axis "+std::to_string(k)+": "+std::to_string(da[k]*scaleA)+" vs "+std::to_string(db[k]*scaleB));}
+        if(seam.options.c2){
+            // Second cross-boundary derivatives in the unit domains; reversal signs square away.
+            auto second=[&](const NurbsSource& source,NurbsBoundary edge,double parameter){const auto& cross=v_edge(edge)?source.v:source.u;const double fixed=min_edge(edge)?cross.knots.front():cross.knots.back();
+                return evaluate_nurbs_second(source,v_edge(edge)?parameter:fixed,v_edge(edge)?fixed:parameter);};
+            auto sx=second(a,seam.options.referenceBoundary,pa[i]),sy=second(b,seam.options.movingBoundary,pb[i]);if(!sx||!sy)return fail(error,"Linked seam boundary evaluation failed");
+            const auto ea=v_edge(seam.options.referenceBoundary)?sx->dvv:sx->duu,eb=v_edge(seam.options.movingBoundary)?sy->dvv:sy->duu;
+            for(unsigned k=0;k<3;++k){const double x=ea[k]*scaleA*scaleA,y=eb[k]*scaleB*scaleB;
+                if(std::abs(x-y)>1e-6*(1+std::abs(x)+std::abs(da[k]*scaleA)))return fail(error,"Linked seam C2 continuity is stale at fraction "+std::to_string(fractions[i])+", axis "+std::to_string(k)+": "+std::to_string(x)+" vs "+std::to_string(y));}
+        }
     }
     return true;
 }
@@ -284,8 +294,8 @@ bool has_nurbs_seam(const EditorObject& object) noexcept{const auto* c=find_comp
 std::optional<NurbsSeam> decode_seam_record(const EditorObject& object,const std::string& value,std::string* error){
     auto invalid=[&]()->std::optional<NurbsSeam>{fail(error,"Invalid or unsupported NURBS seam metadata");return {};};const auto* text=&value;if(text->size()>1024*1024)return invalid();
     std::istringstream in(*text);in.imbue(std::locale::classic());std::string magic;unsigned version,a,b,reverse,c1;NurbsSeam seam;
-    if(!(in>>magic>>version>>seam.reference>>seam.moving>>a>>b>>reverse>>c1>>seam.referenceStamp>>seam.movingStamp)||magic!="DVE_NURBS_SEAM"||version!=1||a>3||b>3||reverse>1||c1>1||!seam.reference||!seam.moving||seam.reference==seam.moving||(object.id!=seam.reference&&object.id!=seam.moving))return invalid();
-    seam.options={static_cast<NurbsBoundary>(a),static_cast<NurbsBoundary>(b),reverse!=0,c1!=0,true};
+    if(!(in>>magic>>version>>seam.reference>>seam.moving>>a>>b>>reverse>>c1>>seam.referenceStamp>>seam.movingStamp)||magic!="DVE_NURBS_SEAM"||version!=1||a>3||b>3||reverse>1||c1>2||!seam.reference||!seam.moving||seam.reference==seam.moving||(object.id!=seam.reference&&object.id!=seam.moving))return invalid();
+    seam.options={static_cast<NurbsBoundary>(a),static_cast<NurbsBoundary>(b),reverse!=0,c1!=0,true};seam.options.c2=c1==2;
     for(auto* values:{&seam.grid.u,&seam.grid.v,&seam.fractions}){unsigned count;if(!(in>>count)||count<2||count>4096)return invalid();values->resize(count);for(std::size_t i=0;i<count;++i)if(!(in>>(*values)[i])||!std::isfinite((*values)[i])||(i&&!((*values)[i]>(*values)[i-1])))return invalid();}
     if(seam.fractions.front()!=0||seam.fractions.back()!=1)return invalid();seam.anchors.resize(seam.fractions.size());for(auto& p:seam.anchors)if(!(in>>p.x>>p.y>>p.z)||!std::isfinite(p.x)||!std::isfinite(p.y)||!std::isfinite(p.z)||std::abs(p.x)>1e8||std::abs(p.y)>1e8||std::abs(p.z)>1e8)return invalid();in>>std::ws;if(!in.eof())return invalid();return seam;
 }
@@ -368,7 +378,7 @@ bool validate_editor_nurbs_seams(const EditorDocument& document,std::string* err
             if(bool(a->prefabLink)!=bool(b->prefabLink)||(a->prefabLink&&(a->prefabLink->instanceId!=b->prefabLink->instanceId||a->prefabLink->prefabAsset!=b->prefabLink->prefabAsset)))return fail(error,"Linked patches must share the same prefab instance or both be owned");
             auto partners=editor_nurbs_seams(id==a->id?*b:*a,error);if(!partners)return false;
             auto it=std::find_if(partners->begin(),partners->end(),[&](const auto& s){return seam_key(s)==seam_key(seam);});
-            if(it==partners->end()||it->options.reverseBoundary!=seam.options.reverseBoundary||it->options.c1!=seam.options.c1||it->referenceStamp!=seam.referenceStamp||it->movingStamp!=seam.movingStamp||it->fractions!=seam.fractions||it->anchors.size()!=seam.anchors.size())return fail(error,"NURBS seam relationship is not reciprocal");
+            if(it==partners->end()||it->options.reverseBoundary!=seam.options.reverseBoundary||it->options.c1!=seam.options.c1||it->options.c2!=seam.options.c2||it->referenceStamp!=seam.referenceStamp||it->movingStamp!=seam.movingStamp||it->fractions!=seam.fractions||it->anchors.size()!=seam.anchors.size())return fail(error,"NURBS seam relationship is not reciprocal");
             for(std::size_t i=0;i<seam.anchors.size();++i){auto x=seam.anchors[i],y=it->anchors[i];if(x.x!=y.x||x.y!=y.y||x.z!=y.z)return fail(error,"NURBS seam anchors disagree");}
             auto sa=editor_nurbs_source(*a,error),sb=editor_nurbs_source(*b,error);if(!sa||!sb||nurbs_source_stamp(*sa)!=seam.referenceStamp||nurbs_source_stamp(*sb)!=seam.movingStamp)return fail(error,"Linked NURBS source stamps are stale");
             if(id==seam.reference&&!continuity(*sa,*sb,seam,error))return false;
@@ -438,7 +448,7 @@ bool driven_control(const NurbsSource& source,const NurbsSeam& seam,EditorObject
     const bool v=v_edge(seam.options.movingBoundary),minimum=min_edge(seam.options.movingBoundary);
     const auto cross=v?unsigned(index/source.columns):unsigned(index%source.columns);
     const auto count=v?source.rows:source.columns;
-    return (minimum?cross:count-1-cross)<=(seam.options.c1?1U:0U);
+    return (minimum?cross:count-1-cross)<=(seam.options.c2?2U:seam.options.c1?1U:0U);
 }
 }
 bool nurbs_seam_controls_driven(const EditorObject& object,const std::set<std::size_t>& indices){

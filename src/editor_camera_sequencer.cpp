@@ -112,6 +112,29 @@ bool EditorCameraSequencer::move_dolly_key(camera::CameraDollyId id, std::size_t
     return true;
 }
 
+bool EditorCameraSequencer::set_dolly_interpolation(camera::CameraDollyId dollyId,
+                                                    camera::CameraDollyInterpolation interpolation,
+                                                    std::string* error) {
+    auto candidate = sequence_;
+    const auto dolly = std::find_if(candidate.dollies.begin(), candidate.dollies.end(),
+                                    [&](const auto& value) { return value.id == dollyId; });
+    if (dolly == candidate.dollies.end()) {
+        if (error) *error = "unknown camera dolly";
+        return false;
+    }
+    if (interpolation != camera::CameraDollyInterpolation::CatmullRom &&
+        interpolation != camera::CameraDollyInterpolation::Smooth) {
+        if (error) *error = "unknown dolly interpolation";
+        return false;
+    }
+    if (dolly->interpolation == interpolation) return true;
+    dolly->interpolation = interpolation;
+    if (!candidate.validate(error)) return false;
+    push_undo();
+    sequence_ = std::move(candidate);
+    return true;
+}
+
 bool EditorCameraSequencer::set_dolly_key_post_process(
     camera::CameraDollyId dollyId,std::size_t keyIndex,
     camera::CameraPostProcessProfile profile,std::string* error) {

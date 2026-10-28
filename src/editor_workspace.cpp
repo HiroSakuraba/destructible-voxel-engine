@@ -602,6 +602,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"camera.paste_profile","Camera","Paste Cinematic Profile",""},
         {"camera.clear_effects","Camera","Clear Cinematic Effects",""},
         {"camera.keyframe_profile","Camera","Keyframe Complete Cinematic Profile",""},
+        {"camera.smooth_dolly","Camera","Smooth Dolly Path (Curvature-Continuous)",""},
         {"create.empty","Create","Empty Object","Ctrl+Shift+E"}, {"create.voxel","Create","Voxel Object","Ctrl+Shift+V"},
         {"create.polygon","Create","Polygon Cube","Ctrl+Shift+M"}, {"create.camera","Create","Camera Rig",""},
         {"create.text3d","Create","3D Text","Ctrl+Shift+T"},
@@ -742,10 +743,12 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"nurbs.attach_reverse","NURBS","Reverse Boundary Correspondence (Twist)",""},
         {"nurbs.seam_link_c0","NURBS","Link Selected Boundaries (C0, Shared Samples)",""},
         {"nurbs.seam_link_c1","NURBS","Link Selected Boundaries (C1, Shared Samples)",""},
+        {"nurbs.seam_link_g2","NURBS","Link Selected Boundaries (G2 Curvature, Shared Samples)",""},
         {"nurbs.seam_refresh","NURBS","Rebuild Seam Network",""},
         {"nurbs.seam_unlink","NURBS","Unlink Seam (Keep Matched Geometry)",""},
         {"nurbs.source_attach_c0","NURBS","Match Other Boundary to Active (C0)",""},
         {"nurbs.source_attach_c1","NURBS","Match Other Boundary to Active (C1)",""},
+        {"nurbs.source_attach_g2","NURBS","Match Other Boundary to Active (G2, Curvature)",""},
         {"nurbs.source_project_persistent","NURBS","Project Other Curve as Persistent UV Guide",""},
         {"nurbs.source_curve_refresh","NURBS","Refresh Latest Surface Curve from Projection Source",""},
         {"nurbs.source_curve_remove","NURBS","Remove Latest Surface Curve",""},
@@ -757,6 +760,11 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"nurbs.source_intersect_planes","NURBS","Intersect Two Affine Planar Patches",""},
         {"nurbs.source_crop","NURBS","Crop Central Surface by Parameter Margin",""},
         {"nurbs.source_fillet_corner","NURBS","Create Corner Fillet Arc by Leg Fraction",""},
+        {"nurbs.source_blend_corner_radius","NURBS","Create G2 Corner Blend (As Round as the Fillet)",""},
+        {"nurbs.source_blend_corner_setback","NURBS","Create G2 Corner Blend by Leg Fraction",""},
+        {"nurbs.source_continuity","NURBS","Report Continuity (G0 / G1 / G2)",""},
+        {"nurbs.bridge_g2","NURBS","Bridge Two Curves (G2, Curvature-Matched)",""},
+        {"nurbs.show_curvature","NURBS","Show Curvature Comb",""},
         {"nurbs.source_length","NURBS","Measure Curve Length (World Units)",""},
         {"nurbs.source_elevate_u","NURBS","Elevate U Degree (Keep Shape)",""},
         {"nurbs.source_elevate_v","NURBS","Elevate V Degree (Keep Shape)",""},
@@ -998,6 +1006,10 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     for(auto id:{"nurbs.attach_reference_umin","nurbs.attach_reference_umax","nurbs.attach_reference_vmin","nurbs.attach_reference_vmax"})configure(id,"Attachment Reference Boundary",55,true,"nurbs.attach.reference");
     for(auto id:{"nurbs.attach_moving_umin","nurbs.attach_moving_umax","nurbs.attach_moving_vmin","nurbs.attach_moving_vmax"})configure(id,"Attachment Moving Boundary",55,true,"nurbs.attach.moving");
     configure("nurbs.attach_reverse","Attachment Correspondence",56,true);
+    configure("nurbs.show_curvature","Curve Analysis",58,true);
+    configure("nurbs.source_continuity","Curve Analysis",58);
+    configure("nurbs.bridge_g2","Curve Analysis",58);
+    configure("camera.smooth_dolly","Sequencer",60,true);
     for(auto id:{"nurbs.source_quality","nurbs.source_display_coarse","nurbs.source_display_standard","nurbs.source_display_fine"})configure(id,"Surface Display",60,true,"nurbs.display");
     for (std::string_view id : {"view.lit", "view.unlit", "view.wireframe", "view.material_ids", "view.normals",
                                 "view.lighting_only", "view.overdraw", "view.voxel_debug"})

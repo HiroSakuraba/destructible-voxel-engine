@@ -1323,6 +1323,9 @@ public:
     void capture_nurbs_selection(EditorSelectionSnapshot&) const;
     void restore_nurbs_selection(const EditorSelectionSnapshot&);
     void draw_nurbs(const IEditorCanvas&,UiRect) const;
+    void draw_nurbs_curvature(const IEditorCanvas&,UiRect) const;
+    bool report_nurbs_continuity();
+    bool bridge_nurbs_curves();
     bool dispatch_mesh_authoring_action(std::string_view);
     bool start_exact_boolean(EditorObjectId a, EditorObjectId b, MeshBoolean operation);
     bool start_exact_tube_cut(ExactTubeCutRequest request, std::string nameSuffix);
@@ -1532,6 +1535,10 @@ private:
     double nurbsOperationParameter_{.5};
     NurbsAttachmentOptions nurbsAttachmentOptions_;
     unsigned nurbsDisplaySamples_{8};
+    bool showNurbsCurvature_{};
+    // Corner fillet / blend leg fraction (its own field: the shared parameter defaults to a
+    // midpoint for splits and isocurves, at which "as round as the fillet" never fits).
+    double nurbsCornerFraction_{.3};
     // CV selection parked while the density settings panel is open (only one panel at a time).
     EditorObjectId nurbsParkedObject_{};std::set<std::size_t> nurbsParkedSelection_;std::size_t nurbsParkedControl_{};
     void restore_parked_nurbs_controls();

@@ -73,7 +73,7 @@ void test_sequence_v3_round_trip_and_interpolation(){
     shot.dollyId=4U;shot.blendIn={CameraBlendCurve::Cut,0.0F};sequence.shots.push_back(shot);
     std::string error;require(sequence.validate(&error),error.c_str());
     const std::string serialized=sequence.serialize();
-    require(serialized.starts_with("DVE_CAMERA_SEQUENCE 3\n"),"camera sequence did not advance to v3");
+    require(serialized.starts_with("DVE_CAMERA_SEQUENCE 4\n"),"camera sequence did not advance to v4");
     const auto parsed=CameraSequence::parse(serialized,&error);require(parsed.has_value(),error.c_str());
     const auto middle=parsed->evaluate(1.0F);require(middle.pose.has_value(),"v3 sequence lost dolly pose");
     // 2026-07-25: these midpoints were the linear-in-display-units values (21.0 m, 5900 K,

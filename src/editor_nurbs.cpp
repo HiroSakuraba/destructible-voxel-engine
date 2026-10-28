@@ -2,6 +2,7 @@
 #include "dve/editor_nurbs_seam.hpp"
 #include "dve/editor_nurbs_surface.hpp"
 #include <algorithm>
+#include <cmath>
 namespace dve::editor {
 bool has_nurbs_source(const EditorObject& o) noexcept {return find_component_by_type(o.components,kNurbsComponent)!=nullptr;}
 std::optional<NurbsSource> editor_nurbs_source(const EditorObject& o,std::string* e){
@@ -134,5 +135,21 @@ CommandResult EditNurbsCommand::execute(EditorDocument& d){
     return seamEdit_?seamEdit_->execute(d):apply(d,before_,after_);
 }
 CommandResult EditNurbsCommand::undo(EditorDocument& d){return seamEdit_?seamEdit_->undo(d):apply(d,after_,before_);}
+std::optional<NurbsSource> world_editor_nurbs_source(const EditorDocument& document,const EditorObject& object,std::string* error){
+    auto source=editor_nurbs_source(object,error);if(!source)return std::nullopt;
+    const RigidTransform pose=document.world_transform(object.id).value_or(object.transform);
+    const double qx=pose.rotation.x,qy=pose.rotation.y,qz=pose.rotation.z,qw=pose.rotation.w;
+    const double qn=std::sqrt(qx*qx+qy*qy+qz*qz+qw*qw);
+    if(!(qn>0)){if(error)*error="Object rotation is degenerate";return std::nullopt;}
+    const double x=qx/qn,y=qy/qn,z=qz/qn,w=qw/qn;
+    for(auto& p:source->controls){
+        const double vx=p.x*object.voxelScale.x,vy=p.y*object.voxelScale.y,vz=p.z*object.voxelScale.z;
+        // v' = v + 2w (q x v) + 2 q x (q x v)
+        const double tx=2*(y*vz-z*vy),ty=2*(z*vx-x*vz),tz=2*(x*vy-y*vx);
+        p.x=vx+w*tx+(y*tz-z*ty)+pose.position.x;p.y=vy+w*ty+(z*tx-x*tz)+pose.position.y;p.z=vz+w*tz+(x*ty-y*tx)+pose.position.z;
+    }
+    if(!validate_nurbs(*source,error))return std::nullopt;
+    return source;
+}
 }
 

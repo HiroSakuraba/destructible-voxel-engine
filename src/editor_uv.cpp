@@ -396,6 +396,13 @@ PolygonEditResult edit_polygon_uv(const CookedPolygonAsset& source,const std::se
     if((operation==UvEdit::Unwrap||operation==UvEdit::Pack||operation==UvEdit::MatchDensity||
         operation==UvEdit::AlignIslandU||operation==UvEdit::AlignIslandV)&&corners.size()>60000)return fail("Select at most 20,000 UV faces per unwrap/pack operation");
     if(operation==UvEdit::Scale&&(!(settings.vector.x>0)||!(settings.vector.y>0)))return fail("UV scale factors must be positive");
+    if(operation==UvEdit::MatchDensity||operation==UvEdit::AlignIslandU||operation==UvEdit::AlignIslandV) {
+        // Check ORIGINAL island boundaries before selected-vs-unselected
+        // attribute detachment; detachment must not make a partial island
+        // masquerade as a complete chart.
+        const auto original=measure_polygon_uv_density(source,corners,settings);
+        if(!original)return fail(original.error);
+    }
     auto& m=r.mesh;std::set<std::uint32_t> outside;for(std::uint32_t c=0;c<source.indices.size();++c)if(!corners.contains(c))outside.insert(source.indices[c]);std::map<std::uint32_t,std::uint32_t> remap;
     for(auto c:corners){auto old=source.indices[c];auto [it,added]=remap.emplace(old,old);if(added&&outside.contains(old)){it->second=std::uint32_t(m.vertices.size());m.vertices.push_back(source.vertices[old]);}m.indices[c]=it->second;r.selection.components.insert(c/3);}
     std::set<std::uint32_t> selected;for(auto c:corners)selected.insert(m.indices[c]);

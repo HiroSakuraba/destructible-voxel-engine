@@ -714,6 +714,7 @@ bool NativeEditorController::mesh_authoring_pointer_down(PointerButton button,in
         const int modeWidth=std::max(1,(panel.width-16)/4),actionWidth=std::max(1,(panel.width-16)/5);
         for(unsigned i=0;i<4;++i)if(UiRect{panel.x+8+int(i)*modeWidth,panel.y+28,modeWidth-2,20}.contains(x,y)){cancel_mesh_authoring_drag();s.uvMode=i;s.tool=0;return true;}
         for(unsigned i=0;i<5;++i)if(UiRect{panel.x+8+int(i)*actionWidth,panel.y+50,actionWidth-2,20}.contains(x,y)){const char* key[]={"g","r","s","u","k"};(void)mesh_authoring_key(key[i],false,false,false);return true;}
+        for(unsigned i=0;i<5;++i)if(UiRect{panel.x+8+int(i)*actionWidth,panel.y+72,actionWidth-2,20}.contains(x,y)){const char* key[]={"b","i","n","o","l"};(void)mesh_authoring_key(key[i],false,false,false);return true;}
     }
     if(!uv_canvas(layout_.viewport).contains(x,y))return true;
     s.startX=s.lastX=x;s.startY=s.lastY=y;s.startUv=from_screen(x,y,s,layout_.viewport);
@@ -814,9 +815,12 @@ void NativeEditorController::draw_mesh_authoring(const IEditorCanvas& canvas,UiR
     if(s.kind!=NativeMeshAuthoringState::Kind::Uv)return;
     (void)refresh_uv_flags(s,*object);
     auto panel=uv_panel(viewport),rect=uv_canvas(viewport);RectClipCanvas painter(canvas,rect);canvas.fill(panel,color(20,27,36));canvas.text(panel.x+12,panel.y+23,"UV WORKSPACE | channel "+std::to_string(s.channel)+" | "+std::to_string(s.corners.size())+" corners"+(s.uvFlags.enabled?" | Tab channel":" | flags disabled"),color(120,215,255));const int modeWidth=std::max(1,(panel.width-16)/4),actionWidth=std::max(1,(panel.width-16)/5);
-    const char* modes[]={"1 Vertex","2 Edge","3 Face","4 Island"};const char* actions[]={"G Move","R Rotate","S Scale","U Unwrap","K Pack"};
+    const char* modes[]={"1 Vertex","2 Edge","3 Face","4 Island"};const char* actions[]={"G Move","R Rotate","S Scale","U Unwrap","K Pack"};const char* densityActions[]={"B Measure","I Target","N Match","O Align U","L Align V"};
     for(unsigned i=0;i<4;++i){UiRect button{panel.x+8+int(i)*modeWidth,panel.y+28,modeWidth-2,20};canvas.fill(button,s.uvMode==i?color(80,92,112):color(38,48,64));canvas.text(button.x+4,button.y+15,modes[i],color(225,230,240));}
     for(unsigned i=0;i<5;++i){UiRect button{panel.x+8+int(i)*actionWidth,panel.y+50,actionWidth-2,20};canvas.fill(button,color(38,48,64));canvas.text(button.x+4,button.y+15,actions[i],color(225,230,240));}
+    for(unsigned i=0;i<5;++i){UiRect button{panel.x+8+int(i)*actionWidth,panel.y+72,actionWidth-2,20};canvas.fill(button,color(38,48,64));canvas.text(button.x+4,button.y+15,densityActions[i],color(225,230,240));}
+    if(s.uvDensityTyping)canvas.text(panel.x+12,panel.y+panel.height-49,
+        "Target texels/m: "+s.uvDensityText+" | Enter accept, Esc cancel",color(255,220,110));
     const PolygonImage* image=nullptr;if(s.texture&&!object->polygon->materialBindings.empty()){auto binding=object->polygon->materialBindings[0].baseColor.texture;if(binding&&*binding<object->polygon->textures.size()){auto index=object->polygon->textures[*binding].imageIndex;if(index<object->polygon->images.size())image=&object->polygon->images[index];}}
     constexpr int tile=12;for(int y=rect.y;y<rect.y+rect.height;y+=tile)for(int x=rect.x;x<rect.x+rect.width;x+=tile){auto p=from_screen(x+tile/2,y+tile/2,s,viewport);bool dark=std::fmod(std::floor(double(p.x)*8)+std::floor(double(p.y)*8),2.0)!=0;auto c=dark?color(46,53,64):color(69,76,88);
         if(image&&p.x>=0&&p.x<1&&p.y>=0&&p.y<1&&image->width&&image->height&&image->rgba8.size()>=std::size_t(image->width)*image->height*4){auto ix=std::min(image->width-1,std::uint32_t(p.x*image->width)),iy=std::min(image->height-1,std::uint32_t((1-p.y)*image->height));auto k=(std::size_t(iy)*image->width+ix)*4;c=color(image->rgba8[k],image->rgba8[k+1],image->rgba8[k+2]);}painter.fill({x,y,tile,tile},c);}
@@ -844,6 +848,6 @@ void NativeEditorController::draw_mesh_authoring(const IEditorCanvas& canvas,UiR
             int(std::clamp(point.y,-100000.0F,100000.0F))-3,7,7},color(230,110,245));
     }
     if(s.selecting)painter.outline({std::min(s.startX,s.lastX),std::min(s.startY,s.lastY),std::abs(s.lastX-s.startX)+1,std::abs(s.lastY-s.startY)+1},color(255,190,65));
-    canvas.text(panel.x+12,panel.y+panel.height-28,"Middle drag pan | wheel/+/- zoom | F frame | T texture/checker",color(205,220,235));canvas.text(panel.x+12,panel.y+panel.height-8,s.typed.empty()?(s.uvFlagsValid?"P saved pin | M seam / Shift+M clear | J stitch | Esc close":"Saved UV flags need Reset UV Flags (or Undo topology edit)"):("Value: "+s.typed+" | Enter apply | Esc cancel"),color(255,205,145));
+    canvas.text(panel.x+12,panel.y+panel.height-28,"Target "+std::to_string(s.uvDensityTarget)+" texels/m | Shift+B capture | C/Shift+C straighten",color(205,220,235));canvas.text(panel.x+12,panel.y+panel.height-8,s.typed.empty()?(s.uvFlagsValid?"P saved pin | M seam / Shift+M clear | J stitch | Esc close":"Saved UV flags need Reset UV Flags (or Undo topology edit)"):("Value: "+s.typed+" | Enter apply | Esc cancel"),color(255,205,145));
 }
 } // namespace dve::editor

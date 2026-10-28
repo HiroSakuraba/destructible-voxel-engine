@@ -3,7 +3,10 @@
 #include "dve/nurbs_curvature.hpp"
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
 #include <limits>
+#include <locale>
+#include <sstream>
 
 // Curvature comb overlay and the continuity report for native NURBS sources.
 namespace dve::editor {
@@ -63,6 +66,30 @@ bool NativeEditorController::report_nurbs_continuity(){
         description=report->description;
     }else{set_status("Continuity compares two curves or two surfaces, not one of each",true);return false;}
     set_status(description+" (world units, sampled)",false,20.0F);
+    return true;
+}
+
+bool NativeEditorController::bridge_nurbs_curves(){
+    auto& document=workspace_.document();
+    if(workspace_.selection_count()!=2){set_status("Select two NURBS curves to bridge; the nearest ends are joined",true);return false;}
+    std::vector<NurbsSource> curves;std::string error;
+    for(auto id:workspace_.selected_objects()){
+        const auto* o=document.find_object(id);
+        if(!o||!has_nurbs_source(*o)||!o->flags.visible||is_isolated_out(id)){set_status("Select two visible native NURBS curves",true);return false;}
+        auto s=world_editor_nurbs_source(document,*o,&error);if(!s){set_status(error,true);return false;}
+        if(!s->is_curve()){set_status("A G2 bridge joins two curves, not surfaces",true);return false;}
+        curves.push_back(std::move(*s));
+    }
+    auto bridge=bridge_nurbs_curves_g2(curves[0],curves[1],&error);
+    if(!bridge){set_status(error,true);return false;}
+    // Built in world space, so the new object has the identity pose and unit scale.
+    if(!create_nurbs_source(bridge->source,"NURBS G2 Bridge",std::pair{RigidTransform{},Float3{1,1,1}}))return false;
+    auto first=nurbs_curve_join_continuity(curves[0],bridge->source),second=nurbs_curve_join_continuity(curves[1],bridge->source);
+    std::ostringstream text;text.imbue(std::locale::classic());text<<std::setprecision(4)
+        <<"G2 bridge added (cubic; handles "<<bridge->handleA<<" and "<<bridge->handleB<<" world units; "<<bridge->solutions
+        <<(bridge->solutions==1?" solution":" solutions, kept the most stable")<<"). Ends: "
+        <<(first?nurbs_continuity_name(first->level):"?")<<" / "<<(second?nurbs_continuity_name(second->level):"?")<<"; one undo step";
+    set_status(text.str(),false,15.0F);
     return true;
 }
 

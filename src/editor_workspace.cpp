@@ -763,6 +763,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"nurbs.source_blend_corner_radius","NURBS","Create G2 Corner Blend (As Round as the Fillet)",""},
         {"nurbs.source_blend_corner_setback","NURBS","Create G2 Corner Blend by Leg Fraction",""},
         {"nurbs.source_continuity","NURBS","Report Continuity (G0 / G1 / G2)",""},
+        {"nurbs.bridge_g2","NURBS","Bridge Two Curves (G2, Curvature-Matched)",""},
         {"nurbs.show_curvature","NURBS","Show Curvature Comb",""},
         {"nurbs.source_length","NURBS","Measure Curve Length (World Units)",""},
         {"nurbs.source_elevate_u","NURBS","Elevate U Degree (Keep Shape)",""},
@@ -999,6 +1000,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     configure("nurbs.attach_reverse","Attachment Correspondence",56,true);
     configure("nurbs.show_curvature","Curve Analysis",58,true);
     configure("nurbs.source_continuity","Curve Analysis",58);
+    configure("nurbs.bridge_g2","Curve Analysis",58);
     configure("camera.smooth_dolly","Sequencer",60,true);
     for(auto id:{"nurbs.source_quality","nurbs.source_display_coarse","nurbs.source_display_standard","nurbs.source_display_fine"})configure(id,"Surface Display",60,true,"nurbs.display");
     for (std::string_view id : {"view.lit", "view.unlit", "view.wireframe", "view.material_ids", "view.normals",

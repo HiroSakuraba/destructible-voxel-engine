@@ -89,4 +89,26 @@ struct NurbsSurfaceJoinReport : NurbsContinuityReport {
     const NurbsSource& a, const NurbsSource& b, unsigned samples = 9,
     NurbsContinuityTolerance = {}, std::string* error = nullptr);
 
+// G2 bridge between two curves (Wittens, "Curvature Beziers"). A cubic Bezier from the nearest
+// end of A to the nearest end of B that continues each curve's tangent direction and curvature
+// (signed, so S-bends work). With P1 = A + l0*T0 and P2 = D - l1*T1, signed curvature at the ends
+// gives the coupled system
+//     1.5 k0 l0^2 + s l1 - c0 = 0,    1.5 k1 l1^2 + s l0 - c1 = 0,
+//     s = (T0 x T1).n,  c0 = (T0 x (D-A)).n,  c1 = ((D-A) x T1).n
+// whose positive solutions are found from the quartic in l0 (or directly when s = 0). When
+// several solutions exist they are different curves; the one kept is the article's most stable,
+// least loopy choice: weight (l0 l1 acos(-cos theta) / |l|^2)^2, theta between the gradients of
+// the two equations (near-opposite gradients mean two solutions about to merge and vanish).
+// The ends, their tangents and curvature vectors must lie in one plane (a planar cubic has one
+// osculating plane at each end). Some configurations have no cubic solution (for example
+// parallel straight ends offset sideways); those are refused.
+struct NurbsCurveBridge {
+    NurbsSource source;           // degree-3 Bezier, 4 controls
+    bool endOfA{}, endOfB{};      // which ends were bridged (true: upper end of the domain)
+    double handleA{}, handleB{};  // l0, l1
+    unsigned solutions{};         // positive exact solutions found
+};
+[[nodiscard]] std::optional<NurbsCurveBridge> bridge_nurbs_curves_g2(
+    const NurbsSource& a, const NurbsSource& b, std::string* error = nullptr);
+
 } // namespace dve

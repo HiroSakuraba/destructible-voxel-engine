@@ -7,6 +7,7 @@
 #include "dve/nurbs_curvature.hpp"
 #include "dve/nurbs_modeling.hpp"
 #include "dve/nurbs_topology.hpp"
+#include <algorithm>
 #include <cmath>
 #include <numeric>
 #include <iostream>
@@ -136,6 +137,41 @@ void corner_blend_and_joins() {
     check(join && join->level == NurbsContinuity::None, "gap is not connected");
 }
 
+void bridges() {
+    std::string error;
+    // A C-bend: a quarter arc (curvature 1/2) bridged to a line.
+    const auto arc = make_nurbs_arc(2, 1.5707963267948966);          // XZ plane: (2,0,0) to (0,0,2)
+    const auto line = polyline({{-2, 0, 1}, {-5, 0, -1}});
+    auto check_bridge = [&](const NurbsSource& a, const NurbsSource& b, const std::string& name) {
+        auto bridge = bridge_nurbs_curves_g2(a, b, &error);
+        check(bool(bridge), name + ": " + error);
+        check(bridge->source.columns == 4 && bridge->solutions >= 1 && bridge->handleA > 0 && bridge->handleB > 0, name + " shape");
+        auto ja = nurbs_curve_join_continuity(a, bridge->source, {}, &error), jb = nurbs_curve_join_continuity(b, bridge->source, {}, &error);
+        check(ja && ja->level == NurbsContinuity::G2, name + " meets A in G2: " + (ja ? ja->description : error));
+        check(jb && jb->level == NurbsContinuity::G2, name + " meets B in G2: " + (jb ? jb->description : error));
+        return *bridge;
+    };
+    auto first = check_bridge(arc, line, "arc to line");
+    check(first.endOfA && !first.endOfB, "nearest ends chosen");
+    // Either order and either direction of B.
+    (void)check_bridge(line, arc, "line to arc");
+    (void)check_bridge(arc, *reverse_nurbs_axis(line, false), "arc to reversed line");
+    // An S-bend: curvature changes sign across the bridge.
+    const auto down = cubic({0,0,0,0,1,1,1,1}, {{0,0,0},{1,0,0},{2,-.5,0},{3,-.5,0}});
+    const auto up = cubic({0,0,0,0,1,1,1,1}, {{5,1.5,0},{6,1.5,0},{7,1.1,0},{8,1.2,0}});
+    (void)check_bridge(down, up, "S-bend");
+    // Straight ends at an angle: zero curvature at both ends of the bridge.
+    auto corner = check_bridge(polyline({{0,0,0},{2,0,0}}), polyline({{4,2,0},{4,5,0}}), "straight ends");
+    for (double u : {0.0, 1.0}) check(nurbs_curve_curvature(corner.source, u, u == 1.0)->curvature < 1e-9, "straight ends leave the bridge straight");
+    // Collinear straight ends: the straight segment.
+    (void)check_bridge(polyline({{0,0,0},{1,0,0}}), polyline({{3,0,0},{4,0,0}}), "collinear");
+    // Out of plane, a sideways offset between parallel straight ends, and touching ends refuse.
+    auto lifted = line; for (auto& p : lifted.controls) p.y = 1;
+    check(!bridge_nurbs_curves_g2(arc, lifted, &error) && error.find("one plane") != std::string::npos, "non-planar refuses");
+    check(!bridge_nurbs_curves_g2(polyline({{0,0,0},{1,0,0}}), polyline({{3,1,0},{4,1,0}}), &error) && error.find("No cubic bridge") != std::string::npos, "parallel offset refuses: " + error);
+    check(!bridge_nurbs_curves_g2(polyline({{0,0,0},{1,0,0}}), polyline({{1,0,0},{1,1,0}}), &error) && error.find("already touch") != std::string::npos, "touching refuses");
+}
+
 NurbsSource reference_patch() {
     auto s = make_nurbs_patch(2);
     // Bent across the boundary (in x) and along it (in z), and rational.
@@ -250,11 +286,15 @@ void editor_actions() {
     c.workspace().select_object(2);
     c.workspace().add_to_selection(1);
     check(c.dispatch_action("nurbs.source_continuity") && c.status().text.starts_with("Not connected"), "unmatched originals are apart: " + c.status().text);
-    // Leg fraction 0.25 (the fillet's own control): fillet setback 1 on these 4-unit legs.
+    // The default corner leg fraction (0.3) fits "as round as the fillet": 1.2 x 4/(1+sin 45).
+    c.workspace().select_object(3);
+    check(c.dispatch_action("nurbs.source_blend_corner_radius") && c.status().text.find("setback 2.812") != std::string::npos, "default fraction fits: " + c.status().text);
+    check(c.dispatch_action("edit.undo"), "undo default blend");
+    // Corner leg fraction 0.25 (its own settings field): fillet setback 1 on these 4-unit legs.
     c.workspace().select_object(3);
     check(c.dispatch_action("nurbs.construct_settings"), "settings");
     const auto view = c.layout().viewport;
-    c.pointer_down(PointerButton::Primary, view.x + 25, view.y + 8 + 125 + 3 * 32 + 12, 0);
+    c.pointer_down(PointerButton::Primary, view.x + 25, view.y + 8 + 125 + 5 * 32 + 12, 0);
     c.text_input("0.25");
     c.key_down("enter", false, false, false);
     // Both corner blends from the menu.
@@ -275,6 +315,19 @@ void editor_actions() {
     check(c.dispatch_action("edit.undo"), "undo");
     c.workspace().select_object(3);
     check(c.dispatch_action("nurbs.source_blend_corner_radius") && c.status().text.find("setback 2.343") != std::string::npos, "radius mode: " + c.status().text);
+    // Bridge two curves from the menu: identity-pose object, both ends G2, one undo step.
+    add(document, 10, make_nurbs_arc(2, 1.5707963267948966));
+    add(document, 11, polyline({{-2, 0, 1}, {-5, 0, -1}}));
+    document.find_object(10)->transform.position = {1, 0, 0};
+    document.find_object(11)->transform.position = {1, 0, 0};
+    c.workspace().select_object(10);
+    c.workspace().add_to_selection(11);
+    const auto beforeBridge = document.objects().size();
+    check(c.dispatch_action("nurbs.bridge_g2"), "bridge: " + c.status().text);
+    check(document.objects().size() == beforeBridge + 1 && c.status().text.find("G2 (curvature continuous) / G2") != std::string::npos, "bridge status: " + c.status().text);
+    auto bridgeSource = editor_nurbs_source(*document.find_object(*c.workspace().selected_object()));
+    check(bridgeSource && std::any_of(bridgeSource->controls.begin(), bridgeSource->controls.end(), [](const NurbsPoint& p) { return near(p.x, 1, 1e-9) && near(p.y, 0, 1e-9) && near(p.z, 2, 1e-9); }), "bridge built in world space (arc end moved by the pose)");
+    check(c.dispatch_action("edit.undo") && document.objects().size() == beforeBridge, "bridge undo");
     // The comb toggle.
     check(c.dispatch_action("nurbs.show_curvature") && c.dispatch_action("nurbs.show_curvature"), "comb toggles");
     // Mixed selections refuse.
@@ -354,6 +407,7 @@ int main() {
         curvature_queries();
         internal_continuity();
         corner_blend_and_joins();
+        bridges();
         surface_g2();
         seam_g2();
         editor_actions();

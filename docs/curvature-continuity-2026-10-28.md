@@ -1,4 +1,4 @@
-# Curvature continuity: comb, G2 matching, G2 corner blend, smooth dolly (28 Oct 2026)
+# Curvature continuity: comb, G2 matching, G2 corner blend, G2 bridge, smooth dolly (28 Oct 2026)
 
 Stacked on `feature/honest-test-coverage`. Prompted by Steven Wittens'
 [Curvature Beziers](https://acko.net/blog/curvature-beziers/): tangent alignment (G1) is not
@@ -69,10 +69,11 @@ curvature instead.
 solution. Zero curvature at each end puts the third control on the first leg's line and the
 second control on the second leg's line. Since each inner control also sits on its own end's
 tangent, both are forced onto the corner, and the blend is X, B, B, Y. Wittens' quartic is
-needed when the ends have nonzero target curvature. That would be a bridge between two
-curves, which this branch does not add.
+needed when the ends have nonzero target curvature; that is the G2 bridge below.
 
-**Two ways to size it, both from the existing leg-fraction control:**
+**Two ways to size it, both from the corner leg fraction.** This is now its own field in the
+construction settings, "Corner fillet / blend leg fraction", defaulting to 0.3 (it was the
+shared parameter, which stays 0.5 for splits and isocurves):
 
 | menu | meaning |
 | --- | --- |
@@ -82,8 +83,37 @@ curves, which this branch does not add.
 **Trade-offs.**
 - **Peak curvature.** It is higher than the arc's, at the middle. The status line reports it
   next to the curvature of a circular fillet through the same midpoint.
-- **Leg length.** "As round" needs legs long enough. With the default fraction of 0.5 it
-  never fits, so it refuses and says to reduce the size.
+- **Leg length.** "As round" needs legs long enough: at fraction f it reaches 2 to 4 × f of
+  the shorter leg, so above about 0.43 (at 90°) it refuses and says to reduce the size. The
+  default of 0.3 fits at any corner angle up to about 130° between the legs' directions.
+
+## G2 bridge between two curves (the article's solver)
+
+NURBS > Bridge Two Curves (G2, Curvature-Matched) joins the nearest ends of two selected curves
+with a cubic that continues each one's tangent direction and curvature, sign included, so
+S-bends work. `bridge_nurbs_curves_g2(a, b)`:
+
+- **The system.** With P1 = A + l0·T0 and P2 = D − l1·T1, the signed end curvatures give
+  Wittens' two coupled equations
+  `1.5 k0 l0² + s l1 − c0 = 0` and `1.5 k1 l1² + s l0 − c1 = 0`, where
+  s = (T0×T1)·n, c0 = (T0×(D−A))·n and c1 = ((D−A)×T1)·n. It is solved in units of the chord.
+- **Solving.** Substituting l1 gives a quartic in l0. Its positive roots are found by
+  recursing on derivatives and bisecting each monotone piece. Parallel tangents (s = 0)
+  decouple into a·l² = c. Every candidate is checked against both equations, and handles must
+  be positive (a negative one would flip the tangent).
+- **Several solutions.** They are different curves. The article blends them for interactive
+  dragging; this is a one-shot construction, so it keeps the single solution with the
+  article's best weight, (l0·l1·acos(−cos θ)/|l|²)². That favours stable, non-looping curves:
+  θ is the angle between the two equations' gradients, and near-opposite gradients mean two
+  solutions about to merge and vanish. The status line says how many there were.
+- **Refusals.**
+  - The ends, tangents and curvature vectors must lie in one plane.
+  - Some configurations have no cubic at all, for example parallel straight ends offset
+    sideways, or a start that curves away from where B is. These are refused with that
+    explanation.
+  - Touching ends are refused too.
+- **World space.** The bridge is built in world space, so the new object has the identity
+  pose. The status reports the G0/G1/G2 result at both ends.
 
 ## Smooth camera dolly
 
@@ -110,6 +140,13 @@ Catmull-Rom dollies shape each segment in its own parameter.
   - Zero end curvature, and the midpoint is (X+Y)/8 + 3B/4.
   - "As round" has the fillet's midpoint distance and the 4/(1+sin) reach.
   - It refuses when too large, when the corner is straight, or when the size is negative.
+- **Bridges** (each checked G2 at both ends with the join report):
+  - arc to line, in either order and with B reversed;
+  - an S-bend;
+  - straight ends at an angle (the bridge leaves both ends with zero curvature);
+  - collinear ends.
+
+  Out-of-plane ends, parallel straight ends offset sideways, and touching ends are refused.
 - **Joins.**
   - A leg into the fillet is G1, with a jump of exactly 1/r.
   - A leg into the blend is G2, in either order and direction.
@@ -124,8 +161,11 @@ Catmull-Rom dollies shape each segment in its own parameter.
 - **Editor.**
   - Attach G2 from the menu, then the report says G2.
   - The unmatched originals read as not connected.
+  - At the default corner fraction (0.3), "as round" fits (setback 2.812).
   - Both blend modes work through the menu with undo, and the status reports setbacks 1 and
-    2.343 at fraction 0.25.
+    2.343 at fraction 0.25, set through the new field.
+  - The bridge is built in world space from posed objects, reports G2 at both ends, and is
+    one undo step.
   - The comb toggles, and a mixed curve-and-surface report is refused.
 - **Dolly.**
   - Both modes pass through every key.

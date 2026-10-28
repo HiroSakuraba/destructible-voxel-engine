@@ -159,6 +159,17 @@ std::string validate_tube_spec(const TubeSpec& s) {
     return {};
 }
 
+ExactGapParse parse_fit_up_gap(std::string_view text) {
+    ExactGapParse out;
+    const auto words = split_words(text);
+    if (words.size() != 1) { out.error = "Type one length for the fit-up gap, in mm (0 for none), e.g. 0.5 or 1.2mm"; return out; }
+    const auto value = parse_length(words[0]);
+    if (!value) { out.error = "Cannot read '" + words[0] + "' as a length (mm by default; units mm, cm, m, in)"; return out; }
+    if (!(*value >= 0.0)) { out.error = "The fit-up gap cannot be negative"; return out; }
+    out.meters = *value;
+    return out;
+}
+
 TubeSpecParse parse_tube_spec(std::string_view text) {
     TubeSpecParse out;
     const auto words = split_words(text);

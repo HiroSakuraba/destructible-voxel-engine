@@ -116,6 +116,19 @@ bool closed(const CookedPolygonAsset& m) {
 // ---------------------------------------------------------------------------------------------
 // Always-run tests
 // ---------------------------------------------------------------------------------------------
+void gap_parsing() {
+    const auto gap = [](const char* text) { return parse_fit_up_gap(text); };
+    check(gap("0").meters && near(*gap("0").meters, 0.0, 0), "gap 0");
+    check(gap("0.5").meters && near(*gap("0.5").meters, 5e-4, 1e-15), "plain numbers are millimetres");
+    check(gap("1.2mm").meters && near(*gap("1.2mm").meters, 1.2e-3, 1e-15), "1.2mm");
+    check(gap("1e-3").meters && near(*gap("1e-3").meters, 1e-6, 1e-18), "scientific notation without a unit is 0.001 mm, not 1 mm");
+    check(gap("2E-2").meters && near(*gap("2E-2").meters, 2e-5, 1e-17), "capital E");
+    check(gap("1e-3mm").meters && near(*gap("1e-3mm").meters, 1e-6, 1e-18), "scientific notation with mm");
+    check(gap("0.1cm").meters && near(*gap("0.1cm").meters, 1e-3, 1e-15), "cm");
+    check(gap("0.01in").meters && near(*gap("0.01in").meters, 2.54e-4, 1e-15), "inches");
+    for (const char* bad : {"", "-1", "wide", "1 2", "1e", "nan", "inf"}) check(!gap(bad).meters && !gap(bad).error.empty(), std::string("gap refused: '") + bad + "'");
+}
+
 void spec_parsing() {
     auto round = parse_tube_spec("round 50.8 3 600 y");
     check(round.spec && round.error.empty(), "round parses: " + round.error);
@@ -1125,6 +1138,7 @@ int main(int argc, char** argv) {
     const auto wanted = [&](const char* name) { return only.empty() || std::string(name).find(only) != std::string::npos; };
     try {
         spec_parsing();
+        gap_parsing();
         miter_parsing_and_plane();
         tube_component_round_trip();
         fake_create_tube();

@@ -19,7 +19,6 @@
 #include <string>
 
 #include "dve/editor_exact_tube.hpp"
-#include "dve/editor_number_field.hpp"
 #include "editor_native_long_job.hpp"
 
 namespace dve::editor {
@@ -108,18 +107,15 @@ bool NativeEditorController::commit_exact_tube_text() {
         return start_exact_tube(*parsed.spec);
     }
     if (kind == TextEditKind::ExactCopeGap) {
-        bool hasUnit = false;
-        for (const char c : text) hasUnit = hasUnit || std::isalpha(static_cast<unsigned char>(c));
-        const NumberFieldParse gap = parse_number_field(hasUnit ? text : text + "mm", NumberFieldUnit::Meters, 0.0);
-        if (!gap.ok) { set_status("Cope: " + gap.error, true, 8.0F); return false; }
-        if (!(gap.value >= 0.0)) { set_status("Cope: the fit-up gap cannot be negative", true, 8.0F); return false; }
+        const auto gap = parse_fit_up_gap(text);
+        if (!gap.meters) { set_status("Cope: " + gap.error, true, 8.0F); return false; }
         const auto selected = workspace_.selected_objects();
         const auto primary = workspace_.selected_object();
         if (!primary || selected.size() != 2) { set_status("Cope: select two tubes (A active)", true); return false; }
         EditorObjectId other = 0;
         for (const EditorObjectId id : selected) if (id != *primary) other = id;
         ExactCopeOptions options;
-        options.gapWorldMeters = gap.value;
+        options.gapWorldMeters = *gap.meters;
         return start_exact_cope(*primary, other, options);
     }
     if (kind == TextEditKind::ExactMiter) {

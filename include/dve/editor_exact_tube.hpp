@@ -117,6 +117,14 @@ struct ExactCopeOptions {
     const std::filesystem::path& projectRoot, const EditorDocument& document, EditorObjectId a, EditorObjectId b,
     const ExactCopeOptions& options = {});
 
+// The typed fit-up gap: a length in millimetres by default (units mm, cm, m, in; scientific notation
+// such as 1e-3 is a plain number, so 0.001 mm), never negative.
+struct ExactGapParse {
+    std::optional<double> meters;
+    std::string error;
+};
+[[nodiscard]] ExactGapParse parse_fit_up_gap(std::string_view text);
+
 enum class MiterKeep { Low, High };              // keep the end on the -axis side (Low) or +axis side (High) of the plane
 struct ExactMiterSpec {
     double angleDegrees{45.0};                   // from a square cut: 0 = square, 45 = a 90 degree joint, |angle| < 85

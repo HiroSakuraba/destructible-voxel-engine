@@ -12286,14 +12286,28 @@ bool NativeEditorController::rebuild_collision_proxies() {
                                    : std::shared_ptr<const VoxelObject>(&live, [](const VoxelObject*) {});
     }
     auto shared = std::make_shared<std::vector<Target>>(std::move(targets));
+    std::size_t totalBricks = 0;
+    for (const Target& target : *shared) totalBricks += target.voxels->bricks().size();
     return start_long_job(
         LongJobKind::RebuildCollision, "Rebuild Collision", voxelTotal,
-        [shared](LongJob& job) {
+        [shared, totalBricks](LongJob& job) {
+            std::size_t finishedBricks = 0;
             for (std::size_t i = 0; i < shared->size(); ++i) {
                 if (job.cancelled()) return;
-                job.report(static_cast<float>(i) / static_cast<float>(shared->size()),
-                           "Object " + std::to_string(i + 1) + " of " + std::to_string(shared->size()));
-                (*shared)[i].boxes = build_merged_object_box_proxy(*(*shared)[i].voxels);
+                const std::size_t offset = finishedBricks;
+                const bool complete = build_merged_object_box_proxy_progress(
+                    *(*shared)[i].voxels, (*shared)[i].boxes,
+                    [&](std::size_t done, std::size_t total) {
+                        if (job.cancelled()) return false;
+                        const float fraction = totalBricks == 0U ? 1.0F
+                            : static_cast<float>(offset + done) / static_cast<float>(totalBricks);
+                        job.report(fraction, "Object " + std::to_string(i + 1) + " of " +
+                            std::to_string(shared->size()) + " - brick " +
+                            std::to_string(done) + " of " + std::to_string(total));
+                        return true;
+                    });
+                if (!complete) return;  // cancellation never publishes partial output
+                finishedBricks += (*shared)[i].voxels->bricks().size();
                 (*shared)[i].voxels.reset();
             }
             job.report(1.0F, "Done");

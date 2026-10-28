@@ -1,4 +1,7 @@
 #include "dve/editor_viewport.hpp"
+#include "dve/collision_convex_set.hpp"
+#include "dve/collision_hull.hpp"
+#include "dve/editor_mesh_authoring.hpp"
 #include "dve/editor_subdivision.hpp"
 #include "dve/editor_polygon.hpp"
 #include "dve/voxel_metric.hpp"
@@ -485,8 +488,91 @@ std::vector<EditorCollisionPick> pick_editor_collision_boxes_all(
     const Float3 direction = safe_normalize(ray.direction, {0, 0, -1});
     for (const auto& [id, object] : document.objects()) {
         if (!object.flags.collisionEnabled || (!includeHidden && !object.flags.visible) ||
-            (onlyObjects && !onlyObjects->empty() && !onlyObjects->contains(id)) ||
-            !object.voxels || object.polygon || object.text3d || object.gaborVolume ||
+            (onlyObjects && !onlyObjects->empty() && !onlyObjects->contains(id))) continue;
+        if (object.polygon) {
+            if (!(object.voxelScale.x > 0.0F && object.voxelScale.y > 0.0F &&
+                  object.voxelScale.z > 0.0F)) continue;
+            const Float3 localOrigin = divide_components(
+                inverse_transform_point(object.transform, ray.origin), object.voxelScale);
+            const Float3 localDirection = divide_components(
+                inverse_transform_vector(object.transform, direction), object.voxelScale);
+            const auto collisionPieces = active_convex_set(object.components);
+            // A collection of certified convex prisms: intersect its physical
+            // piece volumes, not the enclosing art mesh or the object's bounds.
+            if (!collisionPieces.empty()) {
+                for (std::size_t pieceIndex = 0; pieceIndex < collisionPieces.size(); ++pieceIndex) {
+                    const ConvexPrism& prism = collisionPieces[pieceIndex];
+                    if (prism.bottom.size() < 3U || prism.bottom.size() != prism.top.size()) continue;
+                    Float3 center{};
+                    for (Float3 p : prism.bottom) center = add(center,p);
+                    for (Float3 p : prism.top) center = add(center,p);
+                    center = multiply(center,1.0F / static_cast<float>(2U*prism.bottom.size()));
+                    float enter = 0.0F, exit = maximumWorldDistance;
+                    bool inside = true;
+                    const auto clipPlane = [&](Float3 a, Float3 b, Float3 d) {
+                        Float3 normal = cross(subtract(b,a),subtract(d,a));
+                        if (length_squared(normal) < 1.0e-14F) return;
+                        if (dot(normal, subtract(center,a)) > 0.0F) normal = multiply(normal,-1.0F);
+                        const float distance = dot(normal, subtract(localOrigin,a));
+                        const float toward = dot(normal,localDirection);
+                        if (std::abs(toward) < 1.0e-10F) {
+                            if (distance > 1.0e-6F) inside = false;
+                        } else {
+                            const float t = -distance / toward;
+                            if (toward < 0.0F) enter = std::max(enter,t);
+                            else exit = std::min(exit,t);
+                            if (enter > exit) inside = false;
+                        }
+                    };
+                    const std::size_t n = prism.bottom.size();
+                    for (std::size_t i = 1; i + 1 < n && inside; ++i) {
+                        clipPlane(prism.bottom[0],prism.bottom[i],prism.bottom[i+1]);
+                        clipPlane(prism.top[0],prism.top[i],prism.top[i+1]);
+                    }
+                    for (std::size_t i = 0; i < n && inside; ++i) {
+                        const std::size_t next = (i + 1U)%n;
+                        clipPlane(prism.bottom[i],prism.bottom[next],prism.top[next]);
+                    }
+                    if (!inside || enter > maximumWorldDistance) continue;
+                    const float distance = std::max(0.0F,enter);
+                    hits.push_back({id,pieceIndex,{},add(ray.origin,multiply(direction,distance)),
+                                    distance,EditorColliderKind::ConvexPrism});
+                }
+                continue;
+            }
+            const std::vector<Float3> hullPoints = active_collision_hull_points(object.components);
+            if (!hullPoints.empty()) {
+                const auto fitted = convex_editor_hull(id,hullPoints);
+                if (fitted) {
+                    EditorObject proxy(id,"Collision hull proxy");
+                    proxy.transform = object.transform;
+                    proxy.voxelScale = object.voxelScale;
+                    proxy.polygon = fitted.mesh;
+                    if (const auto hit = pick_editor_polygon(proxy, ray, maximumWorldDistance)) {
+                        hits.push_back({id,0U,{},hit->position,hit->distance,EditorColliderKind::AuthoredHull});
+                    }
+                }
+                // Do not fall back to an unrelated art mesh if the authored hull
+                // cannot be evaluated on this build; that would produce false picks.
+                continue;
+            }
+            // Plain polygon's physical fallback is its local bounding box.
+            Float3 minimum{INFINITY,INFINITY,INFINITY}, maximum{-INFINITY,-INFINITY,-INFINITY};
+            for (const auto& vertex : object.polygon->vertices) {
+                const Float3 p=vertex.position;
+                minimum={std::min(minimum.x,p.x),std::min(minimum.y,p.y),std::min(minimum.z,p.z)};
+                maximum={std::max(maximum.x,p.x),std::max(maximum.y,p.y),std::max(maximum.z,p.z)};
+            }
+            if (!std::isfinite(minimum.x)) continue;
+            float enter = 0.0F, exit = maximumWorldDistance;
+            if (!ray_aabb_interval(localOrigin,localDirection,minimum,maximum,enter,exit) ||
+                enter > maximumWorldDistance) continue;
+            const float distance = std::max(0.0F,enter);
+            hits.push_back({id,0U,{},add(ray.origin,multiply(direction,distance)),
+                            distance,EditorColliderKind::PolygonBounds});
+            continue;
+        }
+        if (!object.voxels || object.text3d || object.gaborVolume ||
             !(object.voxelSizeMeters > 0.0F)) continue;
         const Float3 metric = multiply(object.voxelScale, object.voxelSizeMeters);
         if (!(metric.x > 0.0F && metric.y > 0.0F && metric.z > 0.0F)) continue;

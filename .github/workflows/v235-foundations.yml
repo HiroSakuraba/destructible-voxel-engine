@@ -1,8 +1,9 @@
 name: v2.35 foundations
 
 on:
+  # Push only runs on main; feature branches are covered by the pull_request trigger.
   push:
-    branches: [main, "codex/**"]
+    branches: [main]
   pull_request:
     paths-ignore:
       - "docs/**"
@@ -10,6 +11,12 @@ on:
 
 permissions:
   contents: read
+
+# Pull requests: one run per PR, superseded runs are cancelled. Pushes to main: every run gets its
+# own group and is never cancelled (same scheme as ci.yml).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}${{ github.event_name != 'pull_request' && format('-{0}', github.run_id) || '' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   repository-build:

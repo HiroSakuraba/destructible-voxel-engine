@@ -6,7 +6,7 @@ name: CI
 
 on:
   push:
-    branches: [main, "codex/**"]
+    branches: [main]
   # Docs-only pull requests skip CI. Pushes to main are not filtered, so main always gets the
   # full run (including the ASan leg and the source-manifest check, which hashes docs too).
   pull_request:
@@ -22,9 +22,10 @@ permissions:
   contents: read
   packages: read
 
-# Pull requests: one run per PR, superseded runs are cancelled. Pushes to main / schedule /
-# dispatch: every run gets its own group, so a push no longer queues behind the 40+ min ASan leg
-# of the previous run. The ASan leg serializes itself with a job-level group (see ctest).
+# Pull requests: one run per PR, superseded runs are cancelled. Feature-branch pushes
+# must not start another copy of this entire workflow; only pushes to main do.
+# Pushes to main / schedule / dispatch have independent groups; ASan serializes itself
+# on main through its job-level concurrency policy (see ctest).
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}${{ github.event_name != 'pull_request' && format('-{0}', github.run_id) || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}

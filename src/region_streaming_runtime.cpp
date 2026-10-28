@@ -46,11 +46,16 @@ RegionStreamingTickStats RegionStreamingRuntime::tick(RegionKey camera, std::uin
         std::vector<std::uint64_t> finished;
         for (auto& [id, job] : pending_) {
             if (!job.cancelRequested) { job.cancellation.request_cancel(); job.cancelRequested = true; ++stats.cancelled; }
-            if (job.future.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+            if (job.readyResult ||
+                (job.future.valid() &&
+                 job.future.wait_for(std::chrono::seconds(0)) == std::future_status::ready))
                 finished.push_back(id);
         }
         for (auto id : finished) {
-            try { (void)pending_.at(id).future.get(); } catch (...) { ++stats.errors; }
+            try {
+                auto& job=pending_.at(id);
+                if(!job.readyResult && job.future.valid())(void)job.future.get();
+            } catch (...) { ++stats.errors; }
             pending_.erase(id);
             ++stats.discarded;
         }
@@ -90,7 +95,9 @@ RegionStreamingTickStats RegionStreamingRuntime::tick(RegionKey camera, std::uin
             job.cancelRequested = true;
             ++stats.cancelled;
         }
-        if (job.future.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+        if (job.readyResult ||
+            (job.future.valid() &&
+             job.future.wait_for(std::chrono::seconds(0)) == std::future_status::ready))
             ready.push_back(id);
     }
     std::sort(ready.begin(), ready.end());
@@ -100,8 +107,11 @@ RegionStreamingTickStats RegionStreamingRuntime::tick(RegionKey camera, std::uin
         auto iter = pending_.find(id);
         if (iter == pending_.end()) continue;
         try {
-            auto result = iter->second.future.get();
-            ++stats.completed;
+            if (!iter->second.readyResult) {
+                iter->second.readyResult.emplace(iter->second.future.get());
+                ++stats.completed;
+            }
+            auto& result=*iter->second.readyResult;
             const auto* current = world_.scene(sceneHandle_);
             const auto* object = current ? current->find_object(id) : nullptr;
             if (!near(id) || !object || object->loaded()) {
@@ -109,6 +119,12 @@ RegionStreamingTickStats RegionStreamingRuntime::tick(RegionKey camera, std::uin
             } else if (result.error) {
                 ++stats.errors;
                 failedAt_[id] = tick;
+            } else if (config_.pipelinesReadyForPublication &&
+                       !config_.pipelinesReadyForPublication(id)) {
+                // CPU staging stays resident under the executor's retained-memory
+                // backpressure. The main thread never blocks waiting for PSOs.
+                ++stats.waitingForPipelines;
+                continue;
             } else {
                 RuntimeSceneError error;
                 if (world_.publish_staged_deferred_object(std::move(result.staging), &error)) {

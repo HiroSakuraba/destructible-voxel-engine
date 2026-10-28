@@ -5,8 +5,10 @@ name: CI
 # v235-foundations.yml unchanged, so existing branch-protection check names keep working.
 
 on:
+  # Push only runs on main; feature branches are covered by the pull_request trigger, so a branch
+  # with an open PR is no longer validated twice (push + pull_request).
   push:
-    branches: [main, "codex/**"]
+    branches: [main]
   # Docs-only pull requests skip CI. Pushes to main are not filtered, so main always gets the
   # full run (including the ASan leg and the source-manifest check, which hashes docs too).
   pull_request:

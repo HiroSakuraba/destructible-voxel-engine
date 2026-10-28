@@ -528,7 +528,7 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
             }
         }
         output << "next_prefab_instance " << nextPrefabInstanceId_ << "\n";
-        if (hasVoxelPalettes || hasSubdivisions || hasModeling || hasRetiredModeling || hasSelectionSets || hasBakes) {
+        if (hasVoxelPalettes || hasSubdivisions || hasModeling || hasRetiredModeling || hasSelectionSets || hasBakes || hasUvSmoothing) {
             const auto count = std::count_if(objects_.begin(),objects_.end(),
                 [](const auto& entry) { return !entry.second.voxelMaterials.empty(); });
             output << "voxel_palettes " << count << "\n";
@@ -541,7 +541,7 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
                 output << "\n";
             }
         }
-        if (hasSubdivisions || hasModeling || hasRetiredModeling || hasSelectionSets || hasBakes) {
+        if (hasSubdivisions || hasModeling || hasRetiredModeling || hasSelectionSets || hasBakes || hasUvSmoothing) {
             const auto count=std::count_if(objects_.begin(),objects_.end(),
                 [](const auto& entry) {return entry.second.subdivision.has_value();});
             output << "subdivisions " << count << "\n";
@@ -560,7 +560,7 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
                     output << "edge_crease " << edge << ' ' << strength << "\n";
             }
         }
-        if(hasModeling || hasRetiredModeling || hasSelectionSets || hasBakes) {
+        if(hasModeling || hasRetiredModeling || hasSelectionSets || hasBakes || hasUvSmoothing) {
             const auto count=std::count_if(objects_.begin(),objects_.end(),[](const auto& entry){return entry.second.modelingTopology.has_value();});
             output<<"modeling_topologies "<<count<<"\n";
             for(const auto& [id,object]:objects_)if(object.modelingTopology) {
@@ -568,12 +568,12 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
                 output<<"modeling_object "<<id<<"\n";write_modeling_topology(output,topology);
             }
         }
-        if(hasRetiredModeling || hasSelectionSets || hasBakes) {
+        if(hasRetiredModeling || hasSelectionSets || hasBakes || hasUvSmoothing) {
             const auto count=std::count_if(objects_.begin(),objects_.end(),[](const auto& entry){return !entry.second.modelingTopology&&entry.second.modelingNextId>1;});
             output<<"modeling_floors "<<count<<"\n";
             for(const auto& [id,object]:objects_)if(!object.modelingTopology&&object.modelingNextId>1)output<<"modeling_floor "<<id<<' '<<object.modelingNextId<<"\n";
         }
-        if (hasSelectionSets || hasBakes) {
+        if (hasSelectionSets || hasBakes || hasUvSmoothing) {
             output << "selection_sets " << selectionSets_.size() << "\n";
             for (const EditorSelectionSet& set : selectionSets_) {
                 output << "selection_set " << unsigned(set.kind) << ' ' << set.mesh << ' ' << std::quoted(set.name) << ' '
@@ -593,7 +593,7 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
                     output << "\n";
                 }
         }
-        if(hasBakes){
+        if(hasBakes || hasUvSmoothing){
             output<<"material_bakes "<<std::count_if(objects_.begin(),objects_.end(),[](const auto& item){return item.second.materialBake.has_value();})<<"\n";
             for(const auto& [id,object]:objects_)if(object.materialBake)output<<"material_bake "<<id<<"\n";
         }

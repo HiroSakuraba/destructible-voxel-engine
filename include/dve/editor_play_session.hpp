@@ -1,4 +1,5 @@
 #pragma once
+#include "dve/physics_contact_sink.hpp"
 
 #include <cstdint>
 #include <filesystem>
@@ -107,6 +108,10 @@ public:
     [[nodiscard]] const EditorPlayInputSnapshot& input() const noexcept { return input_; }
     [[nodiscard]] const EditorPlayHudSnapshot& hud() const noexcept { return hud_; }
     [[nodiscard]] const EditorPlaySessionTelemetry& telemetry() const noexcept { return telemetry_; }
+    // Raw solver contact events from the latest fixed tick. Empty when the
+    // reference solver is selected; the reference solver has no contacts.
+    [[nodiscard]] std::vector<PhysicsContactEvent> collision_contacts() const;
+    [[nodiscard]] std::uint64_t dropped_collision_contacts() const noexcept;
     [[nodiscard]] const EditorPlaySessionConfig& config() const noexcept { return config_; }
     [[nodiscard]] const camera::ICameraCollisionWorld* camera_collision_world() const noexcept;
     // Whether the running world saw `action` as pressed on its most recent fixed step (what

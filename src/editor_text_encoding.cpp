@@ -27,6 +27,68 @@ char32_t decode_utf8_code_point(std::string_view value, std::size_t& offset) noe
     return codePoint;
 }
 
+bool append_utf8_code_point(std::string& out, char32_t codePoint) {
+    if (codePoint > 0x10FFFFU || (codePoint >= 0xD800U && codePoint <= 0xDFFFU)) return false;
+    if (codePoint < 0x80U) {
+        out.push_back(static_cast<char>(codePoint));
+    } else if (codePoint < 0x800U) {
+        out.push_back(static_cast<char>(0xC0U | (codePoint >> 6U)));
+        out.push_back(static_cast<char>(0x80U | (codePoint & 0x3FU)));
+    } else if (codePoint < 0x10000U) {
+        out.push_back(static_cast<char>(0xE0U | (codePoint >> 12U)));
+        out.push_back(static_cast<char>(0x80U | ((codePoint >> 6U) & 0x3FU)));
+        out.push_back(static_cast<char>(0x80U | (codePoint & 0x3FU)));
+    } else {
+        out.push_back(static_cast<char>(0xF0U | (codePoint >> 18U)));
+        out.push_back(static_cast<char>(0x80U | ((codePoint >> 12U) & 0x3FU)));
+        out.push_back(static_cast<char>(0x80U | ((codePoint >> 6U) & 0x3FU)));
+        out.push_back(static_cast<char>(0x80U | (codePoint & 0x3FU)));
+    }
+    return true;
+}
+
+namespace {
+bool printable_code_point(char32_t c) noexcept {
+    if (c < 0x20U || (c >= 0x7FU && c <= 0x9FU)) return false;
+    if (c == 0xFFFEU || c == 0xFFFFU || c == kUtf8ReplacementCodePoint) return false;
+    return c <= 0x10FFFFU && !(c >= 0xD800U && c <= 0xDFFFU);
+}
+} // namespace
+
+std::string utf8_from_keysym(unsigned long keysym) {
+    std::string out;
+    char32_t codePoint = 0;
+    if ((keysym >= 0x20UL && keysym <= 0x7EUL) || (keysym >= 0xA0UL && keysym <= 0xFFUL)) {
+        codePoint = static_cast<char32_t>(keysym);  // ASCII and Latin-1 keysyms are their code point
+    } else if (keysym >= 0x01000100UL && keysym <= 0x0110FFFFUL) {
+        codePoint = static_cast<char32_t>(keysym - 0x01000000UL);  // Unicode keysym
+    } else if (keysym >= 0xFFB0UL && keysym <= 0xFFB9UL) {
+        codePoint = static_cast<char32_t>(U'0' + (keysym - 0xFFB0UL));  // KP_0 .. KP_9
+    } else {
+        switch (keysym) {
+        case 0xFFAAUL: codePoint = U'*'; break;  // KP_Multiply
+        case 0xFFABUL: codePoint = U'+'; break;  // KP_Add
+        case 0xFFADUL: codePoint = U'-'; break;  // KP_Subtract
+        case 0xFFAEUL: codePoint = U'.'; break;  // KP_Decimal
+        case 0xFFAFUL: codePoint = U'/'; break;  // KP_Divide
+        case 0x20ACUL: codePoint = U'\u20AC'; break;  // EuroSign (legacy keysym value)
+        default: return out;
+        }
+    }
+    if (!printable_code_point(codePoint)) return {};
+    (void)append_utf8_code_point(out, codePoint);
+    return out;
+}
+
+bool is_printable_utf8(std::string_view text) noexcept {
+    if (text.empty()) return false;
+    for (std::size_t offset = 0; offset < text.size();) {
+        // Malformed input decodes to U+FFFD, which is not printable text either.
+        if (!printable_code_point(decode_utf8_code_point(text, offset))) return false;
+    }
+    return true;
+}
+
 std::size_t utf8_code_point_count(std::string_view value) noexcept {
     std::size_t count = 0;
     for (std::size_t offset = 0; offset < value.size(); ++count) (void)decode_utf8_code_point(value, offset);

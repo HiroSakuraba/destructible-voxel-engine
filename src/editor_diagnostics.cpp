@@ -8,6 +8,7 @@
 #include <set>
 #include <vector>
 
+#include "dve/collision_convex_set.hpp"
 #include "dve/fragment.hpp"
 #include "dve/surface.hpp"
 
@@ -47,6 +48,21 @@ bool finite3(Float3 value) noexcept {
     return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
 }
 
+// The density Play gives a polygon object: the triangle-weighted average of its materials' densities
+// (the same rule GameWorld uses), 1000 kg/m^3 when none is set.
+double polygon_object_density(const CookedPolygonAsset& asset) noexcept {
+    double weighted = 0.0, weight = 0.0;
+    for (const PolygonSubmesh& submesh : asset.submeshes) {
+        if (submesh.materialIndex >= asset.materials.size()) continue;
+        const double density = asset.materials[submesh.materialIndex].densityKilogramsPerCubicMeter;
+        if (!(density > 0.0) || !std::isfinite(density)) continue;
+        const double triangles = static_cast<double>(submesh.indexCount / 3U);
+        weighted += density * triangles;
+        weight += triangles;
+    }
+    return weight > 0.0 ? weighted / weight : kDefaultPolygonDensity;
+}
+
 } // namespace
 
 EditorObjectDiagnostics analyze_editor_object(
@@ -59,8 +75,23 @@ EditorObjectDiagnostics analyze_editor_object(
     if (!object.voxels || result.occupiedVoxels == 0) {
         result.finite = true;
         result.collisionProxyValid = true;
+        // A polygon object with exact convex collision pieces (a CAD tube) has a real volume: report
+        // the pieces and the mass Play will give it, instead of 0 kg and 0 collision boxes.
+        if (object.polygon && object.flags.collisionEnabled) {
+            const auto pieces = active_convex_set(object.components);
+            const auto properties = pieces.empty() ? std::nullopt : convex_set_mass_properties(pieces);
+            if (properties) {
+                result.collisionConvexPieces = pieces.size();
+                result.massKnown = true;
+                result.massKilograms = std::abs(properties->volumeCubicMeters) * polygon_object_density(*object.polygon);
+                result.centerOfMassLocalMeters = properties->centerOfMass;
+                result.centerOfMassWorldMeters = transform_point(object.transform, result.centerOfMassLocalMeters);
+                result.finite = std::isfinite(result.massKilograms) && finite3(result.centerOfMassWorldMeters);
+            }
+        }
         return result;
     }
+    result.massKnown = true;
 
     const auto voxels = occupied_voxels(*object.voxels);
     for (const auto& [voxel, material] : voxels) {
@@ -198,6 +229,8 @@ EditorSelectionDiagnostics analyze_editor_selection(
         result.connectedComponents += diagnostics.connectedComponents;
         result.detachedComponents += diagnostics.detachedComponents;
         result.collisionBoxes += diagnostics.collisionBoxes;
+        result.collisionConvexPieces += diagnostics.collisionConvexPieces;
+        if (!diagnostics.massKnown && diagnostics.occupiedVoxels == 0U) ++result.objectsWithoutMass;
         result.massKilograms += diagnostics.massKilograms;
         weightedX += diagnostics.massKilograms * diagnostics.centerOfMassWorldMeters.x;
         weightedY += diagnostics.massKilograms * diagnostics.centerOfMassWorldMeters.y;

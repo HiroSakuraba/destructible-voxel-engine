@@ -117,6 +117,9 @@ struct ExactCopeOptions {
     const std::filesystem::path& projectRoot, const EditorDocument& document, EditorObjectId a, EditorObjectId b,
     const ExactCopeOptions& options = {});
 
+// The largest fit-up gap a cope accepts, in metres (100 mm).
+inline constexpr double kMaxFitUpGapMeters = 0.1;
+
 // The typed fit-up gap: a length in millimetres by default (units mm, cm, m, in; scientific notation
 // such as 1e-3 is a plain number, so 0.001 mm), never negative.
 struct ExactGapParse {

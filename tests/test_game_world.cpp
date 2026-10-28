@@ -618,6 +618,44 @@ void test_repaired_moving_collision_preserves_velocity_field() {
     CHECK(length(subtract(expectedVelocity, oldState->linearVelocity)) > 0.1F);
 }
 
+void test_repeated_same_brick_cuts_update_physics_collision() {
+    // A second cut inside an already modified brick must not leave a welded,
+    // invisible collider. Exercise static and dynamic bodies via the same query API.
+    for (const bool dynamic : {false, true}) {
+        auto physics = std::make_unique<ReferenceRigidBodyWorld>();
+        physics->set_gravity({0, 0, 0});
+        GameWorld world(std::move(physics));
+        GameObjectDesc desc;
+        desc.name = "Two independent cuts";
+        desc.dynamic = dynamic;
+        desc.voxelSizeMeters = 1.0F;
+        desc.voxels = std::make_unique<VoxelObject>(781);
+        for (int x = 0; x < 8; ++x)
+            for (int y = 0; y < 8; ++y)
+                (void)desc.voxels->set_voxel({x, y, 0}, 1);
+        const GameObjectId id = world.create_object(std::move(desc));
+        CHECK(id != kInvalidGameObjectId);
+        if (id == kInvalidGameObjectId) continue;
+
+        const auto cast = [&](float x, float y) {
+            const Float3 ray{x, y, -2.0F};
+            const bool voxelsHit = world.raycast(ray, {0, 0, 1}, 5.0F).has_value();
+            const bool physicsHit = !world.physics().ray_cast_all(ray, {0, 0, 1}, 5.0F).empty();
+            CHECK(voxelsHit == physicsHit);
+            return physicsHit;
+        };
+        CHECK(cast(2.5F, 2.5F));
+        CHECK(cast(5.5F, 5.5F));
+        CHECK(world.damage_sphere(id, {2.5F, 2.5F, 0.5F}, 0.8F).value_or(0) > 0);
+        CHECK(!cast(2.5F, 2.5F));
+        CHECK(cast(5.5F, 5.5F));
+        CHECK(world.damage_sphere(id, {5.5F, 5.5F, 0.5F}, 0.8F).value_or(0) > 0);
+        CHECK(!cast(2.5F, 2.5F));
+        CHECK(!cast(5.5F, 5.5F));
+        CHECK(cast(0.5F, 0.5F)); // unaffected island still collides
+    }
+}
+
 void test_fragment_cap_keeps_smallest_attached() {
     GameWorld world(std::make_unique<ReferenceRigidBodyWorld>());
     auto voxels = make_solid_cube(101, 4, 1);
@@ -803,6 +841,7 @@ int main() {
     test_fragmentation_of_moved_dynamic_object();
     test_carved_holes_rebuild_collision();
     test_repaired_moving_collision_preserves_velocity_field();
+    test_repeated_same_brick_cuts_update_physics_collision();
     test_fragment_cap_keeps_smallest_attached();
     test_splitting_debris_at_the_cap_keeps_the_piece_being_split();
     test_queued_damage_on_a_large_wall_commits();

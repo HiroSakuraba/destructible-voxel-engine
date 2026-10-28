@@ -3750,6 +3750,10 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                 if (!point.visible) continue;
                 const int px = static_cast<int>(point.x), py = static_cast<int>(point.y);
                 viewportPainter.outline({px - 4, py - 4, 9, 9}, rgb(255, 220, 65));
+                // These are solver body handles, not editor object IDs.
+                viewportPainter.text(px + 6, py - 6,
+                    std::to_string(contact.bodyA) + "/" + std::to_string(contact.bodyB),
+                    rgb(255, 235, 150));
                 const Float3 normalTip = add(contact.position, multiply(contact.contactNormal, 0.12F));
                 const ScreenPoint tip = project_world_to_screen(controller.camera(), viewport, normalTip);
                 if (tip.visible) viewportPainter.line(px, py, static_cast<int>(tip.x),

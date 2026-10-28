@@ -4607,14 +4607,15 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                                          static_cast<int>(b.x), static_cast<int>(b.y), rgb(255,190,80));
             }
         }
-        // The preview needs room: in a narrow viewport (a small window) it covered the tool options at
-        // the top left (the "Click select" hint and the Surface offset field), so it is left out there.
-        if (rig && settingBool("camera.preview_selected", true) && viewport.width >= 480 && viewport.height >= 220) {
+        // In a narrow viewport (a small window) the preview sat on top of the tool options at the top
+        // left (the "Click select" hint and the Surface offset field); it moves below them there.
+        const int previewTop = viewport.width < 560 ? 56 : 14;
+        if (rig && settingBool("camera.preview_selected", true) && viewport.height - previewTop - 14 >= 60) {
             const float ratio = std::clamp(settingFloat("camera.preview_size", 0.25F), 0.1F, 0.75F);
             const int previewWidth = std::max(180, static_cast<int>(static_cast<float>(viewport.width) * ratio));
             const int previewHeight = std::max(110, previewWidth * 9 / 16);
-            const UiRect preview{viewport.x + viewport.width - previewWidth - 14, viewport.y + 14,
-                                 previewWidth, std::min(previewHeight, viewport.height - 28)};
+            const UiRect preview{viewport.x + viewport.width - previewWidth - 14, viewport.y + previewTop,
+                                 previewWidth, std::min(previewHeight, viewport.height - previewTop - 14)};
             viewportPainter.fill(preview, rgb(12,16,22));
             EditorCamera previewCamera;
             apply_camera_pose(previewCamera, rig->authoredPose);

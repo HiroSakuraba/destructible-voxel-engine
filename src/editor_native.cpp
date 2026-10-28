@@ -954,7 +954,11 @@ std::vector<CommandPaletteResult> NativeEditorController::build_command_palette_
     const auto commandResult = [&](const MenuAction& action, int score) {
         const std::string breadcrumb = action.menu +
             (action.section.empty() ? std::string{} : " > " + action.section);
-        append(score + (action.enabled ? 0 : 500),
+        // An unavailable command sinks below the available ones when browsing (empty query), but not
+        // below unrelated fuzzy hits when it was searched for by name: "cope tube" must find the
+        // greyed-out Cope command (with its reason) ahead of "Create Subdivision Plane", whose letters
+        // merely occur in order. Enter on a greyed-out result never runs anything.
+        append(score + (action.enabled ? 0 : (query.empty() ? 500 : 30)),
                {CommandPaletteResultKind::Command, action.id, action.label, breadcrumb,
                 action.description, action.shortcut, action.disabledReason, action.enabled,
                 favoriteCommandIds_.contains(action.id)});
@@ -9758,8 +9762,8 @@ bool NativeEditorController::set_number_field(NumberFieldId field, int axis, std
                 if (!(parsed.value > 0.0) || !(spacing >= 0.001 && spacing <= 10.0)) {
                     // Say the allowed factors; "a cell must stay..." made no sense for a polygon object,
                     // which has no cells (its unit size is the same 0.1 m default).
-                    char range[96]{};
-                    std::snprintf(range, sizeof range, " must be between %g and %g (1 mm to 10 m per unit)",
+                    char range[112]{};
+                    std::snprintf(range, sizeof range, " must be between %g and %g (a unit stays between 1 mm and 10 m)",
                                   0.001 / static_cast<double>(object->voxelSizeMeters), 10.0 / static_cast<double>(object->voxelSizeMeters));
                     set_status(std::string("Scale ") + axis_name(a) + range, true);
                     return false;

@@ -193,8 +193,10 @@ bool NativeEditorController::start_exact_tube(const TubeSpec& spec) {
             auto& result = **created;
             const auto before = capture_selection_snapshot();
             const std::string profile = spec.profile == TubeProfile::Round ? "Round" : spec.profile == TubeProfile::Square ? "Square" : "Rect";
-            EditorObject object(id, profile + " tube " + mm_label(spec.width) + (spec.profile == TubeProfile::Rectangular ? "x" + mm_label(spec.height) : std::string()) +
-                                        "x" + mm_label(spec.wall));
+            // Two tubes of one size would be indistinguishable in the Hierarchy: the second is "... #2".
+            EditorObject object(id, unique_object_name(workspace_.document(), profile + " tube " + mm_label(spec.width) +
+                                        (spec.profile == TubeProfile::Rectangular ? "x" + mm_label(spec.height) : std::string()) +
+                                        "x" + mm_label(spec.wall)));
             object.voxelSizeMeters = 1.0F;
             object.polygon = std::move(result.mesh);
             object.polygon->objectId = id;

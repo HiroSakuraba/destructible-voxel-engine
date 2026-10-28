@@ -79,7 +79,13 @@ EditorObjectDiagnostics analyze_editor_object(
         // A polygon object with exact convex collision pieces (a CAD tube) has a real volume: report
         // the pieces and the mass Play will give it, instead of 0 kg and 0 collision boxes.
         if (object.polygon && object.flags.collisionEnabled) {
-            const auto pieces = active_convex_set(object.components);
+            // Pieces are in unscaled mesh coordinates; Play bakes the object's scale into them before
+            // building the body, so the Inspector does the same (a 2x tube weighs 8x).
+            std::vector<Component> baked;
+            baked.reserve(object.components.size());
+            for (const Component& component : object.components)
+                baked.push_back(component.type == kConvexSetComponent ? bake_convex_set_component(component, object.voxelScale) : component);
+            const auto pieces = active_convex_set(baked);
             const auto properties = pieces.empty() ? std::nullopt : convex_set_mass_properties(pieces);
             if (properties) {
                 result.collisionConvexPieces = pieces.size();

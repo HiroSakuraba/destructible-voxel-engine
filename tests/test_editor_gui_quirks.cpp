@@ -221,6 +221,12 @@ void diagnostics_of_exact_collision() {
     const auto exact = analyze_editor_object(*document.find_object(1), materials);
     check(exact.collisionConvexPieces == 2U && exact.massKnown, "exact pieces are counted and the mass is known");
     check(std::abs(exact.massKilograms - 4000.0) < 1.0, "mass is the exact volume x 1000 kg/m^3, got " + std::to_string(exact.massKilograms));
+    // Play bakes the object's scale into the pieces; the Inspector must too (2x in every axis = 8x mass).
+    document.find_object(1)->voxelScale = {2.0F, 2.0F, 2.0F};
+    const auto scaled = analyze_editor_object(*document.find_object(1), materials);
+    check(std::abs(scaled.massKilograms - 32000.0) < 5.0, "scaled tube mass x8, got " + std::to_string(scaled.massKilograms));
+    check(std::abs(scaled.centerOfMassLocalMeters.y - 2.0F) < 1e-3F, "centre of mass is scaled too");
+    document.find_object(1)->voxelScale = {1.0F, 1.0F, 1.0F};
     const auto plainDiagnostics = analyze_editor_object(*document.find_object(2), materials);
     check(!plainDiagnostics.massKnown && plainDiagnostics.massKilograms == 0.0, "a polygon without a volume model has an unknown mass");
     const auto selection = analyze_editor_selection(document, materials, {1, 2});

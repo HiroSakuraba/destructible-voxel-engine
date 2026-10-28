@@ -1238,7 +1238,13 @@ bool GameWorld::replace_voxel_brick(
             object.densityQuantumKilogramsPerCubicMeter, object.structural,
             &replacementLocalCenterOfMass, &buildError, object.voxelScale);
         if (bodyDesc && previousState) {
-            bodyDesc->linearVelocity = previousState->linearVelocity;
+            // Repair changes the center of mass. Retain the old rigid motion field:
+            // v(new COM) = v(old COM) + omega x (new COM - old COM).
+            // Merely copying the linear velocity makes rotating objects jump in velocity
+            // when network/authoritative edits remove an off-centre voxel.
+            bodyDesc->linearVelocity = inherited_child_center_of_mass_velocity(
+                previousState->linearVelocity, previousState->angularVelocity,
+                previousState->currentTransform.position, bodyDesc->transform.position);
             bodyDesc->angularVelocity = previousState->angularVelocity;
         }
         if (bodyDesc) replacementHandle = physics_->create_body(*bodyDesc);

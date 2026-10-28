@@ -4,6 +4,7 @@
 // Also: edge-crease save/load, control-quad/triangulate undo and no-op honesty.
 #include "dve/editor_native.hpp"
 #include "dve/editor_subdivision.hpp"
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -103,9 +104,12 @@ void uv_smoothing_completion() {
               "UV smoothing preserves evaluated vertex count");
         for(std::size_t i=0;i<linear.mesh->vertices.size();++i){
             const auto& a=linear.mesh->vertices[i];const auto& b=smooth.mesh->vertices[i];
-            near(a.position.x,b.position.x,"subdivision UV option does not move X");
-            near(a.position.y,b.position.y,"subdivision UV option does not move Y");
-            near(a.position.z,b.position.z,"subdivision UV option does not move Z");
+            check(std::abs(a.position.x-b.position.x)<1e-6F,
+                  "subdivision UV option does not move X");
+            check(std::abs(a.position.y-b.position.y)<1e-6F,
+                  "subdivision UV option does not move Y");
+            check(std::abs(a.position.z-b.position.z)<1e-6F,
+                  "subdivision UV option does not move Z");
         }
     }
     EditorDocument doc("Smooth UV save");

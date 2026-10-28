@@ -2,6 +2,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <chrono>
 #include <cstring>
 #include <cstdlib>
 #include <iostream>
@@ -11,6 +12,7 @@
 #include <vector>
 
 #include "dve/rhi/vulkan_device.hpp"
+#include "dve/rhi/pipeline_preparation.hpp"
 
 namespace {
 void require(bool condition, const char* message) {
@@ -175,8 +177,15 @@ int main() {
         pipelineDesc.bytecode = storage_write_shader();
         pipelineDesc.bindGroupLayouts.push_back(layout);
         pipelineDesc.bindGroupLayouts.push_back(imageLayout);
-        const ComputePipelineHandle pipeline = device.create_compute_pipeline(pipelineDesc, &error);
-        require(static_cast<bool>(pipeline), error.c_str());
+        PipelinePreparationQueue prepared(device);
+        require(prepared.stage_compute(1U,"storage-write",pipelineDesc,&error),error.c_str());
+        const auto prep=prepared.pump(1U,std::chrono::microseconds{1000000});
+        require(prep.compiled==1U && prepared.ready_to_publish(1U),
+                "compute PSO not ready before dispatch");
+        const ComputePipelineHandle pipeline=prepared.take_compute(1U,"storage-write");
+        require(static_cast<bool>(pipeline),"prepared compute pipeline unavailable");
+        prepared.discard_epoch(1U);
+
 
         TimestampQueryPoolHandle timestamps{};
         if (device.capabilities().timestampQueries) {

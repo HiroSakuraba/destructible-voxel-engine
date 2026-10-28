@@ -12289,6 +12289,53 @@ const std::vector<VoxelBox>& NativeEditorController::collision_proxy(EditorObjec
     return cached.boxes;
 }
 
+std::string NativeEditorController::collision_diagnostic_summary() const {
+    const auto& ids = workspace_.selected_objects();
+    if (ids.empty()) return "Collision: select one or two objects for diagnostics";
+    const EditorDocument& document = workspace_.document();
+    const auto failure = [](const EditorObject& obj) -> std::string {
+        if (!obj.flags.collisionEnabled) return "Collision disabled in Inspector";
+        if (!obj.flags.visible) return "Art hidden (collision may still be enabled)";
+        if (obj.voxels && obj.voxels->occupied_voxel_count() == 0)
+            return "Empty voxel geometry: no collider";
+        if (!obj.voxels && !obj.polygon) return "No solid geometry";
+        return {};
+    };
+    if (ids.size() == 1) {
+        const EditorObject* a = document.find_object(*ids.begin());
+        if (!a) return "Collision: selected object missing";
+        if (const std::string problem = failure(*a); !problem.empty())
+            return "Collision " + std::to_string(a->id) + ": " + problem;
+        const auto cache = collisionProxyCache_.find(a->id);
+        if (a->voxels && (cache == collisionProxyCache_.end() ||
+            cache->second.revision != a->voxels->revision()))
+            return "Collision " + std::to_string(a->id) + ": proxy revision stale/not built; query rebuilds it";
+        return "Collision " + std::to_string(a->id) + ": " +
+            (a->flags.anchored ? "static" : "dynamic") +
+            (a->flags.structural ? ", Full (all categories)" : ", DebrisNoSelf (other debris masked)") +
+            "; editor scene layer " + std::to_string(a->layer) + " (not a physics mask)";
+    }
+    if (ids.size() == 2) {
+        auto it = ids.begin();
+        const EditorObject* a = document.find_object(*it++);
+        const EditorObject* b = document.find_object(*it);
+        if (!a || !b) return "Collision pair: one object missing";
+        if (!a->flags.collisionEnabled || !b->flags.collisionEnabled)
+            return "No collision: one or both objects have collision disabled";
+        if ((!a->flags.structural && !b->flags.structural) &&
+            !a->flags.anchored && !b->flags.anchored)
+            return "No collision: DebrisNoSelf vs DebrisNoSelf is filtered by physics class";
+        if (a->flags.anchored && b->flags.anchored)
+            return "No dynamic contact: both bodies are static";
+        if ((a->attachment && a->attachment->parent == b->id) ||
+            (b->attachment && b->attachment->parent == a->id))
+            return "No collision: parent-child attachment pair is filtered";
+        return "Pair " + std::to_string(a->id) + "/" + std::to_string(b->id) +
+            ": eligible by authored collision class; check spatial overlap/contact normals";
+    }
+    return "Collision: select exactly two objects to explain pair filtering";
+}
+
 bool NativeEditorController::rebuild_collision_proxies() {
     if (longJob_) { set_status(long_job_busy_reason(), true); return false; }
     const EditorDocument& document = workspace_.document();

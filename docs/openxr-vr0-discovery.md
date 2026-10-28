@@ -1,6 +1,6 @@
 # VR-0: experimental OpenXR runtime discovery
 
-This is the first small piece of VR-0, not a VR player. The optional `dve_openxr_probe`
+This is an early part of VR-0, not a VR player. The optional `dve_openxr_probe`
 loads an OpenXR loader, enumerates instance extensions, creates an instance, prints
 runtime information, and requests an HMD system. It reports whether either Vulkan
 extension is advertised. It does not enable the extensions, query Vulkan requirements,
@@ -28,12 +28,27 @@ On Unix with tests and Python available, build `dve_fake_openxr_loader` and run
 The shim checks success, missing headset, missing loader and bad arguments, including
 instance destruction. It is not a runtime, Vulkan, session, graphics or hardware test.
 
+## Session and frame controller
+
+The optional `dve_xr_session_loop` library contains a session-state controller and an
+OpenXR driver around caller-provided function pointers and an existing session. It begins
+and ends a session on state events, honors `shouldRender`, passes predicted display time
+to a renderer, and submits an empty frame when rendering fails. The calling application
+must poll OpenXR events and map session states, provide a valid session and graphics
+binding, manage image acquisition/release, and keep submitted layer data alive through
+end-frame. Neither the probe nor the existing player connects this controller yet.
+
+Release-build tests use fake callbacks and a fake OpenXR function table; they exercise
+ordering, skipped rendering, errors, focus, stopping, restart and loss. They do not
+execute an OpenXR runtime or verify Vulkan synchronization.
+
 ## Remaining VR-0 work
 
 - Test the CMake option and build on Windows and additional supported configurations.
   A Linux XR-enabled configure/build and fake-loader CTest passed; XR-disabled configure also passed.
 - Audit the active game-rendering path and design Vulkan ownership and required-device selection.
-- Implement session state and frame lifecycles, runtime-owned swapchain image interop,
+- Connect runtime event polling, a real created session and renderer to the controller;
+  implement runtime-owned swapchain image interop,
   predicted-time stereo views, coordinate conversions and synchronization.
 - Build an actual stereo diagnostic scene and validate it with an executing OpenXR
   runtime and physical headset; record device, runtime and GPU. No such run has been made.

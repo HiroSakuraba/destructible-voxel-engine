@@ -46,11 +46,33 @@ ordering, skipped rendering, errors, focus, stopping, restart, loss, event filte
 recenter records and valid/invalid stereo view results. They do not
 execute an OpenXR runtime or verify Vulkan synchronization.
 
+## Vulkan and swapchain building blocks
+
+With `DVE_BUILD_OPENXR_VULKAN_BRIDGE=ON`, also set `DVE_VULKAN_INCLUDE_DIR` to a
+Vulkan-Headers `include` directory. Contract tests used Vulkan-Headers commit
+`73814d006638aa00bd553215b054f0f02e457e22`. The bridge wraps the
+`XR_KHR_vulkan_enable2` requirements, instance/device creation and runtime-selected GPU
+calls; it can construct a graphics binding and enumerate runtime-owned Vulkan images.
+The caller must enable the extension, resolve functions, choose a compatible Vulkan API
+version and graphics queue, synchronize GPU work, and destroy owned Vulkan objects in
+correct order. The bridge is not connected to DVE's VulkanDevice.
+
+Session/swapchain wrappers create and explicitly close OpenXR handles. An acquired
+swapchain image cannot be released until wait succeeds; timeout requires another wait.
+The wrappers refuse to destroy an acquired swapchain, and callers must close handles
+before their parent or runtime goes away. The projection helper produces right-handed,
+negative-Z-forward eye projection with Vulkan depth [0,1] and positive-height viewport;
+it does not convert DVE world-space axes or construct a view matrix.
+
+The dedicated `openxr-foundation.yml` workflow compiles these components and runs fake
+API contract tests, not a native runtime or physical GPU/headset test.
+
 ## Remaining VR-0 work
 
 - Test the CMake option and build on Windows and additional supported configurations.
   A Linux XR-enabled configure/build and fake-loader CTest passed; XR-disabled configure also passed.
-- Audit the active game-rendering path and design Vulkan ownership and required-device selection.
+- Integrate Vulkan ownership and the runtime-selected device into the actual player rendering path;
+  the inspected player uses its CPU renderer and the Vulkan RHI manages its own device.
 - Connect the event pump, a real created session and renderer to the controller;
   implement runtime-owned swapchain image interop,
   predicted-time stereo views, coordinate conversions and synchronization.

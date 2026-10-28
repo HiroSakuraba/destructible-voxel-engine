@@ -1,0 +1,60 @@
+name: OpenXR foundation contracts
+on:
+  pull_request:
+    paths:
+      - 'include/dve/xr/**'
+      - 'src/xr/**'
+      - 'tests/xr/**'
+      - 'docs/openxr-vr0-discovery.md'
+      - 'CMakeLists.txt'
+      - '.github/workflows/openxr-foundation.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'include/dve/xr/**'
+      - 'src/xr/**'
+      - 'tests/xr/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/openxr-foundation.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  xr-contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out pinned OpenXR headers
+        uses: actions/checkout@v4
+        with:
+          repository: KhronosGroup/OpenXR-SDK
+          ref: 24a1f2b92d212501a2b1b8d30ffd53abf55fcfa8
+          path: external-openxr
+      - name: Check out pinned Vulkan headers
+        uses: actions/checkout@v4
+        with:
+          repository: KhronosGroup/Vulkan-Headers
+          ref: 73814d006638aa00bd553215b054f0f02e457e22
+          path: external-vulkan
+      - name: Configure
+        run: >-
+          cmake -S . -B build-xr -DCMAKE_BUILD_TYPE=Release
+          -DDVE_BUILD_OPENXR_PROBE=ON -DDVE_BUILD_OPENXR_VULKAN_BRIDGE=ON
+          -DDVE_OPENXR_INCLUDE_DIR="$GITHUB_WORKSPACE/external-openxr/include"
+          -DDVE_VULKAN_INCLUDE_DIR="$GITHUB_WORKSPACE/external-vulkan/include"
+          -DDVE_BUILD_TESTS=ON -DDVE_BUILD_EDITOR=OFF -DDVE_BUILD_PLAYER=OFF
+          -DDVE_BUILD_ASSET_COOKER=OFF -DDVE_BUILD_ASSET_PIPELINE_TESTS=OFF
+          -DDVE_BUILD_BENCHMARK=OFF -DDVE_ENABLE_MESH_AUTHORING=OFF
+          -DDVE_ENABLE_PRINT_EXPORT=OFF -DDVE_ENABLE_SDL3_HOST=OFF
+          -DDVE_ENABLE_RTMIDI=OFF -DDVE_BUILD_AUDIO_SYNTH=OFF
+      - name: Build focused tests
+        run: >-
+          cmake --build build-xr --parallel 3 --target
+          dve_xr_session_loop_tests dve_openxr_driver_tests dve_openxr_events_views_tests
+          dve_openxr_resources_tests dve_openxr_projection_tests dve_openxr_vulkan_tests
+          dve_openxr_probe dve_fake_openxr_loader
+      - name: Run fake-runtime contract tests
+        run: >-
+          ctest --test-dir build-xr --output-on-failure
+          -R '^dve_(xr_session_loop|openxr_driver|openxr_events_views|openxr_resources|openxr_projection|openxr_vulkan|openxr_probe)_tests$'

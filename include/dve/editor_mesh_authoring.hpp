@@ -57,8 +57,38 @@ struct PolygonUvAuthoring {
     EditorDocument&,const EditorObject&,const PolygonUvAuthoring&,std::string* error=nullptr);
 [[nodiscard]] std::vector<std::set<std::uint32_t>> polygon_uv_islands(
     const CookedPolygonAsset&,std::uint32_t channel=0,const std::set<std::uint64_t>& seams={});
-enum class UvEdit : std::uint8_t { Translate, Rotate, Scale, Split, Stitch, Unwrap, Pack, FlipU, FlipV };
-struct UvEditSettings { Float2 vector{}; Float2 pivot{.5F,.5F}; float angle{}; float padding{.02F}; std::uint32_t channel{}; std::map<std::uint32_t,Float2> pins; std::set<std::uint64_t> seams; };
+enum class UvEdit : std::uint8_t {
+    Translate, Rotate, Scale, Split, Stitch, Unwrap, Pack, FlipU, FlipV,
+    MatchDensity, AlignIslandU, AlignIslandV, StraightenU, StraightenV
+};
+// Density uses physically scaled surface area and physical texel area, not
+// bounding rectangles. Report per-chart values because two islands can have
+// different density even when their combined ratio looks correct.
+struct UvDensityChart {
+    std::size_t faces{};
+    double geometricAreaSquareMeters{};
+    double uvArea{};
+    double texelsPerMeter{};
+};
+struct UvDensityReport {
+    std::vector<UvDensityChart> charts;
+    double texelsPerMeter{}; // area-weighted aggregate across selected complete charts
+    double geometricAreaSquareMeters{};
+    double uvArea{};
+    std::string error;
+    [[nodiscard]] explicit operator bool() const noexcept { return error.empty() && !charts.empty(); }
+};
+struct UvEditSettings {
+    Float2 vector{}; Float2 pivot{.5F,.5F}; float angle{}; float padding{.02F};
+    std::uint32_t channel{}; std::map<std::uint32_t,Float2> pins;
+    std::set<std::uint64_t> seams;
+    Float3 objectScale{1,1,1}; // object-local meters multiplied by the authored axis scale
+    std::uint32_t textureWidth{1024},textureHeight{1024};
+    float targetTexelsPerMeter{512.0F};
+};
+[[nodiscard]] UvDensityReport measure_polygon_uv_density(
+    const CookedPolygonAsset&, const std::set<std::uint32_t>& corners,
+    const UvEditSettings& = {});
 // IDs identify triangle corners (face*3+corner), so shared vertex attributes never pull an
 // unselected face through a UV edit. UV0 and UV1 are independent.
 [[nodiscard]] PolygonEditResult edit_polygon_uv(const CookedPolygonAsset&,const std::set<std::uint32_t>& corners,UvEdit,const UvEditSettings& = {});

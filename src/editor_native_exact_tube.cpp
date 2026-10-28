@@ -19,6 +19,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "dve/editor_exact_tube.hpp"
 #include "editor_native_long_job.hpp"

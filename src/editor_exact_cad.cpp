@@ -13,6 +13,7 @@
 #include <fstream>
 #include <iterator>
 #include <sstream>
+#include <system_error>
 #include <thread>
 
 #include "dve/ai/json.hpp"

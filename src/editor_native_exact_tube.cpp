@@ -11,7 +11,9 @@
 #include "dve/editor_native.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <memory>
 #include <optional>
 #include <string>

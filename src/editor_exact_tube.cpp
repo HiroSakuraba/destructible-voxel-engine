@@ -1,12 +1,16 @@
 #include "dve/editor_exact_tube.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <charconv>
 #include <cmath>
 #include <iomanip>
 #include <locale>
 #include <sstream>
+#include <filesystem>
+#include <optional>
+#include <string>
 #include <vector>
 
 namespace dve::editor {
@@ -122,8 +126,8 @@ ExactPrimitive tube_bore_primitive(const TubeSpec& s) {
 
 bool nearly_uniform(const Float3& s) {
     const double a = std::abs(double(s.x)), b = std::abs(double(s.y)), c = std::abs(double(s.z));
-    const double top = std::max({a, b, c});
-    return top > 0.0 && std::min({a, b, c}) >= top * (1.0 - 1.0e-6);
+    const double top = (std::max)({a, b, c});
+    return top > 0.0 && (std::min)({a, b, c}) >= top * (1.0 - 1.0e-6);
 }
 
 std::string profile_name(TubeProfile p) { return p == TubeProfile::Round ? "round" : p == TubeProfile::Square ? "square" : "rect"; }
@@ -149,7 +153,7 @@ std::string validate_tube_spec(const TubeSpec& s) {
     if (s.profile != TubeProfile::Rectangular && !close_enough(s.width, s.height, 1.0e-12)) return "Round and square tubes have one outer size";
     if (s.wall < kMinWall) return "The wall must be at least 0.1 mm";
     if (s.length < kMinLength) return "The tube must be at least 1 mm long";
-    const double smallest = std::min(s.width, s.height);
+    const double smallest = (std::min)(s.width, s.height);
     if (!(2.0 * s.wall < smallest * 0.999)) return "The wall is too thick: it must be less than half of the smallest outer size";
     if (smallest - 2.0 * s.wall < kMinWall) return "The bore would be narrower than 0.1 mm";
     return {};
@@ -357,7 +361,7 @@ ExactTubeCutRequest prepare_exact_cope(const std::filesystem::path& projectRoot,
     out.cutterTube = tubeB->spec;
     // Equal outer sizes touch tangentially at 90 degrees: when any outer size of A matches one of
     // the cutter's (within a few clearances) a refusal is a candidate for the documented retry.
-    out.tangentClearanceMeters = std::max(0.0, options.tangentClearanceMeters);
+    out.tangentClearanceMeters = (std::max)(0.0, options.tangentClearanceMeters);
     bool candidate = true;
     if (out.tubeA && nearly_uniform(objectA->voxelScale) && nearly_uniform(objectB->voxelScale)) {
         candidate = false;

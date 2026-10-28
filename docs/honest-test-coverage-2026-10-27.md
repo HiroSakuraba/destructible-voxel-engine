@@ -35,6 +35,7 @@ packaging tests included):
   | `MeshAuthoring` | Manifold mesh authoring | `DVE_ENABLE_MESH_AUTHORING` / `DVE_ENABLE_PRINT_EXPORT` |
   | `AudioSynth` | Audio synthesis | `DVE_BUILD_AUDIO_SYNTH` |
   | `Box2D`, `Box3D` | Box2D, Box3D | `DVE_ENABLE_BOX2D`, `DVE_ENABLE_BOX3D` |
+  | `Brepkernel` | Exact CAD geometry through brepkernel | `brepkernel` runnable at configure time (`DVE_BREPKERNEL`, `brepkernel` on PATH, or `python3 -m brepkernel`) |
 
 - **Where it shows up.** The report is written to `<build>/dve_test_coverage.txt`. Configuration
   prints it as a **warning** when any group is missing.
@@ -64,6 +65,7 @@ environment variable `DVE_REQUIRE_COMPLETE_TESTS=1` for the ctest step, which tu
 | `rdv-bbv.yml` | Vulkan | yes (with `DVE_REQUIRE_VULKAN`) | has a software ICD (lavapipe) |
 | `region-index.yml` ctest steps | none (RHI off) | yes | the selected contract tests may not skip |
 | `texture-t1.yml` native formats | Vulkan, Player | no | `dve_vulkan_texture_t1_format_tests` exits 77 without a device |
+| `exact-tube.yml` | Editor, Brepkernel | yes (with `DVE_REQUIRE_BREPKERNEL`) | the only job with a pinned brepkernel; the exact tube and exact CAD tests may not skip there. Everywhere else their real-geometry parts exit 77 |
 
 The per-leg list of `ci.yml` is the `DVE_EXPECTED_TEST_GROUPS` job env (a map keyed by preset); a preset
 missing from the map fails the Configure step instead of silently dropping the requirement.

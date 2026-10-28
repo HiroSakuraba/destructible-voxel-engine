@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -50,7 +51,7 @@ void check(bool condition, const std::string& message = "native command did not 
     if (!condition) { std::printf("FAIL: %s\n", message.c_str()); std::fflush(stdout); ++g_failures; }
 }
 bool near(double a, double b, double tolerance) { return std::abs(a - b) <= tolerance; }
-bool near_rel(double a, double b, double relative) { return std::abs(a - b) <= relative * std::max(std::abs(a), std::abs(b)); }
+bool near_rel(double a, double b, double relative) { return std::abs(a - b) <= relative * (std::max)(std::abs(a), std::abs(b)); }
 std::string num(double v) { std::ostringstream o; o.precision(9); o << v; return o.str(); }
 
 constexpr double kPi = std::numbers::pi;
@@ -100,7 +101,7 @@ PlaneFace plane_face(const CookedPolygonAsset& m, const V3& point, const V3& nor
         face.area += twice / 2;
         ++face.triangles;
         for (const V3& p : {a, b, c}) {
-            face.worst = std::max(face.worst, std::abs(dot(sub(p, point), normal)));
+            face.worst = (std::max)(face.worst, std::abs(dot(sub(p, point), normal)));
             face.vertices.push_back(p);
         }
     }
@@ -524,11 +525,11 @@ Frame frame_of(const EditorObject& o) {
 }
 
 struct Interval { double lo{-1e300}, hi{1e300}; bool empty{}; };
-void clip(Interval& i, double lo, double hi) { if (lo > hi) { i.empty = true; return; } i.lo = std::max(i.lo, lo); i.hi = std::min(i.hi, hi); if (i.lo > i.hi) i.empty = true; }
+void clip(Interval& i, double lo, double hi) { if (lo > hi) { i.empty = true; return; } i.lo = (std::max)(i.lo, lo); i.hi = (std::min)(i.hi, hi); if (i.lo > i.hi) i.empty = true; }
 void clip_slab(Interval& i, double w, double d, double h) {      // |w + s d| <= h
     if (std::abs(d) < 1e-14) { if (std::abs(w) > h) i.empty = true; return; }
     const double a = (-h - w) / d, b = (h - w) / d;
-    clip(i, std::min(a, b), std::max(a, b));
+    clip(i, (std::min)(a, b), (std::max)(a, b));
 }
 
 // Independent volume of tube A minus the outer body of tube B grown by `gap`: integrate over A's wall
@@ -571,7 +572,7 @@ double cope_volume_numeric(const TubeSpec& a, const Frame& fa, const TubeSpec& b
                 clip_slab(inside, w0[bu], d[bu], b.width / 2 + gap);
                 clip_slab(inside, w0[bv], d[bv], b.height / 2 + gap);
             }
-            const double removed = inside.empty ? 0.0 : std::max(0.0, inside.hi - inside.lo);
+            const double removed = inside.empty ? 0.0 : (std::max)(0.0, inside.hi - inside.lo);
             total += (a.length - removed) * du * dv;
         }
     }

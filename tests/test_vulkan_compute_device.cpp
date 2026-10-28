@@ -244,6 +244,16 @@ int main() {
         require(device.destroy_bind_group(group, &error), error.c_str());
         require(device.destroy_bind_group_layout(layout, &error), error.c_str());
         require(device.destroy_buffer(buffer, &error), error.c_str());
+        // PSO-1 timing covers driver vkCreate*Pipelines calls, not GPU draw time.
+        const auto cache=device.pipeline_cache_stats();
+        require(cache.computeAttempts>=1U,"PSO-1 Vulkan pipeline creation not measured");
+        std::cout<<"PSO-1 compute cache_available="<<cache.cacheAvailable
+                 <<" pso_seed_accepted="<<cache.diskSeedAccepted
+                 <<" create_calls="<<cache.computeAttempts
+                 <<" total_ns="<<cache.computeTotalNanoseconds
+                 <<" max_ns="<<cache.computeMaxNanoseconds<<"\n";
+        if(const char* path=std::getenv("DVE_PSO_CACHE_FILE");path&&*path)
+            require(device.flush_pipeline_cache(),"PSO-1 failed to persist validated cache");
         std::cout << "dve_vulkan_compute_tests: PASS\n";
         return 0;
     } catch (const std::exception& exception) {

@@ -1,10 +1,14 @@
 #include "dve/rhi/vulkan_device.hpp"
 
 #include "vulkan_loader_api.hpp"
+#include "dve/rhi/pipeline_cache_file.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <chrono>
+#include <cstdlib>
+#include <filesystem>
 #include <cstring>
 #include <limits>
 #include <string>
@@ -416,6 +420,9 @@ struct VulkanDevice::Impl {
         vk::PFN_UpdateDescriptorSets updateDescriptorSets{};
         vk::PFN_CreatePipelineLayout createPipelineLayout{};
         vk::PFN_DestroyPipelineLayout destroyPipelineLayout{};
+        vk::PFN_CreatePipelineCache createPipelineCache{};
+        vk::PFN_DestroyPipelineCache destroyPipelineCache{};
+        vk::PFN_GetPipelineCacheData getPipelineCacheData{};
         vk::PFN_CreateGraphicsPipelines createGraphicsPipelines{};
         vk::PFN_CreateComputePipelines createComputePipelines{};
         vk::PFN_DestroyPipeline destroyPipeline{};
@@ -575,6 +582,10 @@ struct VulkanDevice::Impl {
     vk::Instance instance{};
     vk::PhysicalDevice physicalDevice{};
     vk::Device device{};
+    vk::PipelineCache pipelineCache{};
+    std::filesystem::path pipelineCacheFile;
+    pso::Identity cacheIdentity{};
+    VulkanPipelineCacheStats cacheStats{};
     vk::Queue queue{};
     vk::CommandPool commandPool{};
     std::uint32_t queueFamily{};
@@ -600,7 +611,7 @@ struct VulkanDevice::Impl {
     std::uint64_t nextFence{1U};
     std::uint64_t completedFence{};
 
-    Impl() {
+    explicit Impl(std::filesystem::path path) : pipelineCacheFile(std::move(path)) {
         capabilities.backend = Backend::Vulkan;
         capabilities.adapterName = "Vulkan 1.0 offscreen graphics device";
         capabilities.presentation = false;
@@ -732,6 +743,10 @@ struct VulkanDevice::Impl {
         capabilities.vendorId = physicalProperties.vendorID;
         capabilities.deviceId = physicalProperties.deviceID;
         capabilities.driverVersion = physicalProperties.driverVersion;
+        cacheIdentity={physicalProperties.vendorID, physicalProperties.deviceID,
+                       physicalProperties.driverVersion, physicalProperties.apiVersion, {}};
+        std::copy(std::begin(physicalProperties.pipelineCacheUUID),
+                  std::end(physicalProperties.pipelineCacheUUID),cacheIdentity.uuid.begin());
         capabilities.apiVersion = physicalProperties.apiVersion;
         capabilities.nativeLimitsQueried = true;
         capabilities.maxTextureDimension2D = physicalProperties.limits.maxImageDimension2D;
@@ -865,6 +880,36 @@ struct VulkanDevice::Impl {
             !load_device(fn.waitForFences, "vkWaitForFences") ||
             !load_device(fn.deviceWaitIdle, "vkDeviceWaitIdle")) return;
 
+        // Pipeline-cache failure cannot prevent startup. A driver can refuse a
+        // seemingly compatible saved blob: retry with a fresh empty cache.
+        fn.createPipelineCache = function_pointer<vk::PFN_CreatePipelineCache>(
+            fn.getDeviceProcAddr(device,"vkCreatePipelineCache"));
+        fn.destroyPipelineCache = function_pointer<vk::PFN_DestroyPipelineCache>(
+            fn.getDeviceProcAddr(device,"vkDestroyPipelineCache"));
+        fn.getPipelineCacheData = function_pointer<vk::PFN_GetPipelineCacheData>(
+            fn.getDeviceProcAddr(device,"vkGetPipelineCacheData"));
+        if(fn.createPipelineCache && fn.destroyPipelineCache && fn.getPipelineCacheData) {
+            std::vector<std::byte> seed;
+            bool loaded=false;
+            try { loaded=pso::load(pipelineCacheFile,cacheIdentity,seed); }
+            catch (...) { seed.clear(); } // optional cache must not break Vulkan startup
+            const vk::PipelineCacheCreateInfo info{
+                vk::StructureTypePipelineCacheCreateInfo,nullptr,0U,
+                loaded ? seed.size() : 0U,loaded ? seed.data() : nullptr};
+            if(fn.createPipelineCache(device,&info,nullptr,&pipelineCache)==vk::Success &&
+               pipelineCache) {
+                cacheStats.cacheAvailable=true;
+                cacheStats.diskSeedAccepted=loaded;
+                cacheStats.diskSeedBytes=loaded?seed.size():0U;
+            } else {
+                pipelineCache={};
+                const vk::PipelineCacheCreateInfo empty{
+                    vk::StructureTypePipelineCacheCreateInfo,nullptr,0U,0U,nullptr};
+                if(fn.createPipelineCache(device,&empty,nullptr,&pipelineCache)==vk::Success &&
+                   pipelineCache)cacheStats.cacheAvailable=true;
+                else pipelineCache={};
+            }
+        }
         capabilities.timestampQueries = timestampValidBits != 0U;
         capabilities.timestampValidBits = timestampValidBits;
         fn.getDeviceQueue(device, queueFamily, 0U, &queue);
@@ -892,8 +937,27 @@ struct VulkanDevice::Impl {
         reason.clear();
     }
 
+    [[nodiscard]] bool flush_pipeline_cache() noexcept {
+        try {
+        if(!device || !pipelineCache || pipelineCacheFile.empty() ||
+           !fn.getPipelineCacheData || status==DeviceStatus::Lost)return false;
+        std::size_t size=0U;
+        if(fn.getPipelineCacheData(device,pipelineCache,&size,nullptr)!=vk::Success ||
+           size<32U || size>pso::kMaximumDriverCacheBytes)return false;
+        std::vector<std::byte> bytes(size);
+        if(fn.getPipelineCacheData(device,pipelineCache,&size,bytes.data())!=vk::Success ||
+           size<32U || size>bytes.size())return false;
+        bytes.resize(size);
+        if(!pso::save(pipelineCacheFile,cacheIdentity,bytes))return false;
+        cacheStats.diskSaveSucceeded=true;
+        cacheStats.diskSavedBytes=bytes.size();
+        return true;
+        } catch (...) { return false; } // I/O/allocation is best-effort only
+    }
+
     void shutdown() noexcept {
         if (device && fn.deviceWaitIdle) (void)fn.deviceWaitIdle(device);
+        (void)flush_pipeline_cache();
         if (device) {
             if (fn.destroyQueryPool) {
                 for (auto& slot : timestampPools) {
@@ -959,6 +1023,9 @@ struct VulkanDevice::Impl {
                 }
             }
         }
+        if(device && pipelineCache && fn.destroyPipelineCache)
+            fn.destroyPipelineCache(device,pipelineCache,nullptr);
+        pipelineCache={};
         if (device && commandPool && fn.destroyCommandPool)
             fn.destroyCommandPool(device, commandPool, nullptr);
         if (device && fn.destroyDevice) fn.destroyDevice(device, nullptr);
@@ -1438,7 +1505,16 @@ struct VulkanDevice::Impl {
     }
 };
 
-VulkanDevice::VulkanDevice() : impl_(std::make_unique<Impl>()) {}
+VulkanDevice::VulkanDevice() : VulkanDevice([] {
+    const char* env=std::getenv("DVE_PSO_CACHE_FILE");
+    return env && *env ? std::filesystem::path(env) : std::filesystem::path{};
+}()) {}
+VulkanDevice::VulkanDevice(std::filesystem::path file)
+    : impl_(std::make_unique<Impl>(std::move(file))) {}
+VulkanPipelineCacheStats VulkanDevice::pipeline_cache_stats() const noexcept {
+    return impl_->cacheStats;
+}
+bool VulkanDevice::flush_pipeline_cache() noexcept { return impl_->flush_pipeline_cache(); }
 VulkanDevice::~VulkanDevice() = default;
 const DeviceCapabilities& VulkanDevice::capabilities() const noexcept { return impl_->capabilities; }
 TextureFormatCapabilities VulkanDevice::texture_format_capabilities(TextureFormat format) const noexcept {
@@ -2062,9 +2138,16 @@ ComputePipelineHandle VulkanDevice::create_compute_pipeline(const ComputePipelin
         const vk::ComputePipelineCreateInfo info{
             vk::StructureTypeComputePipelineCreateInfo, nullptr, 0U, stage,
             pipelineLayout, 0U, -1};
-        ok = impl_->check(impl_->fn.createComputePipelines(impl_->device, 0U, 1U, &info,
-                                                           nullptr, &pipeline),
-                          "vkCreateComputePipelines", error);
+        const auto start=std::chrono::steady_clock::now();
+        const auto native=impl_->fn.createComputePipelines(impl_->device,
+                                  impl_->pipelineCache,1U,&info,nullptr,&pipeline);
+        const auto elapsed=static_cast<std::uint64_t>(std::chrono::duration_cast<
+            std::chrono::nanoseconds>(std::chrono::steady_clock::now()-start).count());
+        ++impl_->cacheStats.computeAttempts;
+        impl_->cacheStats.computeTotalNanoseconds+=elapsed;
+        impl_->cacheStats.computeMaxNanoseconds=std::max(
+            impl_->cacheStats.computeMaxNanoseconds,elapsed);
+        ok = impl_->check(native,"vkCreateComputePipelines",error);
     }
     impl_->fn.destroyShaderModule(impl_->device, module, nullptr);
     if (!ok) {
@@ -2231,9 +2314,16 @@ GraphicsPipelineHandle VulkanDevice::create_graphics_pipeline(const GraphicsPipe
             &vertexInput, &assembly, nullptr, &viewportState, &raster,
             &multisample, desc.depthFormat ? &depth : nullptr,
             &blendState, &dynamic, layout, compatible, 0U, 0U, -1};
-        ok = impl_->check(impl_->fn.createGraphicsPipelines(impl_->device, 0U, 1U,
-                                                            &info, nullptr, &pipeline),
-                          "vkCreateGraphicsPipelines", error);
+        const auto start=std::chrono::steady_clock::now();
+        const auto native=impl_->fn.createGraphicsPipelines(impl_->device,
+                                  impl_->pipelineCache,1U,&info,nullptr,&pipeline);
+        const auto elapsed=static_cast<std::uint64_t>(std::chrono::duration_cast<
+            std::chrono::nanoseconds>(std::chrono::steady_clock::now()-start).count());
+        ++impl_->cacheStats.graphicsAttempts;
+        impl_->cacheStats.graphicsTotalNanoseconds+=elapsed;
+        impl_->cacheStats.graphicsMaxNanoseconds=std::max(
+            impl_->cacheStats.graphicsMaxNanoseconds,elapsed);
+        ok = impl_->check(native,"vkCreateGraphicsPipelines",error);
     }
     if (fragment) impl_->fn.destroyShaderModule(impl_->device, fragment, nullptr);
     impl_->fn.destroyShaderModule(impl_->device, vertex, nullptr);

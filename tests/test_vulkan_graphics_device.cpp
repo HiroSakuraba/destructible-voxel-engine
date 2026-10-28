@@ -327,6 +327,16 @@ int main() {
                 "Vulkan graphics statistics are incorrect");
         require(stats.texturesCreated == stats.texturesDestroyed,
                 "Vulkan texture lifetime is unbalanced");
+        // PSO-1 timing covers driver vkCreate*Pipelines calls, not GPU draw time.
+        const auto cache=device.pipeline_cache_stats();
+        require(cache.graphicsAttempts>=1U,"PSO-1 Vulkan pipeline creation not measured");
+        std::cout<<"PSO-1 graphics cache_available="<<cache.cacheAvailable
+                 <<" pso_seed_accepted="<<cache.diskSeedAccepted
+                 <<" create_calls="<<cache.graphicsAttempts
+                 <<" total_ns="<<cache.graphicsTotalNanoseconds
+                 <<" max_ns="<<cache.graphicsMaxNanoseconds<<"\n";
+        if(const char* path=std::getenv("DVE_PSO_CACHE_FILE");path&&*path)
+            require(device.flush_pipeline_cache(),"PSO-1 failed to persist validated cache");
         std::cout << "Vulkan offscreen indexed graphics tests passed\n";
         return 0;
     } catch (const std::exception& exception) {

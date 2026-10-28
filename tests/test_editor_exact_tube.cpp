@@ -235,6 +235,9 @@ void tube_component_round_trip() {
     broken.components.push_back(bad);
     check(!exact_tube_record(broken), "a zero wall is not a tube record");
     broken.components[0] = make_exact_tube_component(spec);
+    broken.components[0].properties["outer_corner_radius"] = std::string("invalid");
+    check(!exact_tube_record(broken), "a malformed corner radius cannot silently become a sharp tube");
+    broken.components[0] = make_exact_tube_component(spec);
     broken.components[0].properties["profile"] = std::string("hex");
     check(!exact_tube_record(broken), "an unknown profile is not a tube record");
     check(append_tube_cut("", "cope to A; B") == "cope to A, B" && append_tube_cut("x", "y") == "x; y", "cut records are ';'-separated and clean");

@@ -4,6 +4,8 @@
 #include "dve/region_streaming.hpp"
 #include "dve/runtime_scene.hpp"
 #include <future>
+#include <functional>
+#include <optional>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -18,6 +20,10 @@ struct RegionStreamingRuntimeConfig {
     bool enableStaticUnloads{false}; // off until R4 persistence/rollback integration
     RuntimeSceneStageOptions stage{};
     RuntimeSceneSubmissionOptions submission{};
+    // Optional PSO-2 publication gate, called on the authority thread.
+    // False defers completed staging without repeating the worker job.
+    // Callback and any captured pipeline queue must outlive this streamer.
+    std::function<bool(std::uint64_t objectId)> pipelinesReadyForPublication;
 };
 
 struct RegionStreamingTickStats {
@@ -32,6 +38,7 @@ struct RegionStreamingTickStats {
     std::size_t unloaded{};
     std::size_t errors{};
     std::size_t pending{};
+    std::size_t waitingForPipelines{};
 };
 
 class RegionStreamingRuntime {
@@ -52,6 +59,7 @@ public:
 private:
     struct Pending {
         std::future<RuntimeDeferredObjectStageResult> future;
+        std::optional<RuntimeDeferredObjectStageResult> readyResult;
         RuntimeSceneCancellationToken cancellation{};
         bool cancelRequested{};
     };

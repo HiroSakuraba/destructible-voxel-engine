@@ -1,4 +1,5 @@
 #include "dve/editor_mesh_authoring.hpp"
+#include "dve/voxel_metric.hpp"
 #include <algorithm>
 #include <charconv>
 #include <locale>

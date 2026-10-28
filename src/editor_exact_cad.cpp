@@ -13,6 +13,7 @@
 #include <fstream>
 #include <iterator>
 #include <sstream>
+#include <system_error>
 #include <thread>
 
 #include "dve/ai/json.hpp"
@@ -455,6 +456,143 @@ ExactCadImportResult import_exact_cad(const std::filesystem::path& projectRoot, 
     return result;
 }
 
+namespace {
+constexpr const char* kEdgeFilletScript = R"DVE_FILLET(
+import argparse,json,math,sys
+p=argparse.ArgumentParser();p.add_argument('command');p.add_argument('source');p.add_argument('-o',required=True)
+p.add_argument('--start',nargs=3,type=float);p.add_argument('--end',nargs=3,type=float);p.add_argument('--faces',nargs=2,type=int)
+p.add_argument('--radii',nargs=2,type=float,required=True);p.add_argument('--report',required=True);a=p.parse_args()
+try:
+    from OCP.BRep import BRep_Builder,BRep_Tool
+    from OCP.BRepTools import BRepTools
+    from OCP.BRepAdaptor import BRepAdaptor_Curve
+    from OCP.BRepCheck import BRepCheck_Analyzer
+    from OCP.BRepFilletAPI import BRepFilletAPI_MakeFillet
+    from OCP.TopAbs import TopAbs_EDGE,TopAbs_SOLID,TopAbs_FACE
+    from OCP.TopExp import TopExp_Explorer
+    from OCP.TopoDS import TopoDS,TopoDS_Shape
+    shape=TopoDS_Shape()
+    if not BRepTools.Read_s(shape,a.source,BRep_Builder()): raise RuntimeError('cannot read source B-rep')
+    if shape.IsNull() or not BRepCheck_Analyzer(shape).IsValid(): raise RuntimeError('input B-rep is invalid')
+    def solid_count(s):
+        ex=TopExp_Explorer(s,TopAbs_SOLID);n=0
+        while ex.More(): n+=1;ex.Next()
+        return n
+    if solid_count(shape)!=1: raise RuntimeError('edge fillet requires exactly one solid')
+    def xyz(p): return (p.X(),p.Y(),p.Z())
+    def dist(x,y): return math.sqrt(sum((x[i]-y[i])**2 for i in range(3)))
+    tol=1e-7
+    if a.faces is not None:
+        # Same unique oriented face order as brepkernel's mesh/describe path.
+        faces=[];ex=TopExp_Explorer(shape,TopAbs_FACE)
+        while ex.More():
+            cast=getattr(TopoDS,'Face_s',None) or getattr(TopoDS,'Face');f=cast(ex.Current())
+            if not any(f.IsSame(old) and f.Orientation()==old.Orientation() for old in faces): faces.append(f)
+            ex.Next()
+        i,j=a.faces
+        if i<0 or j<0 or i>=len(faces) or j>=len(faces) or i==j: raise RuntimeError('face indices are invalid for this exact source')
+        def edges(face):
+            result=[];ex=TopExp_Explorer(face,TopAbs_EDGE)
+            while ex.More():
+                cast=getattr(TopoDS,'Edge_s',None) or getattr(TopoDS,'Edge');e=cast(ex.Current())
+                if not any(e.IsSame(old) for old in result): result.append(e)
+                ex.Next()
+            return result
+        left,right=edges(faces[i]),edges(faces[j])
+        shared=[e for e in left if any(e.IsSame(other) for other in right)]
+        if len(shared)!=1: raise RuntimeError('face pair must share exactly one B-rep edge; found '+str(len(shared)))
+        curve=BRepAdaptor_Curve(shared[0]);a.start=xyz(curve.Value(curve.FirstParameter()));a.end=xyz(curve.Value(curve.LastParameter()))
+    elif a.start is None or a.end is None: raise RuntimeError('edge endpoints are required')
+    matches=[];seen=[];ex=TopExp_Explorer(shape,TopAbs_EDGE)
+    while ex.More():
+        cast=getattr(TopoDS,'Edge_s',None) or getattr(TopoDS,'Edge');edge=cast(ex.Current())
+        if not any(edge.IsSame(other) for other in seen):
+            seen.append(edge);curve=BRepAdaptor_Curve(edge)
+            first,last=curve.FirstParameter(),curve.LastParameter()
+            if math.isfinite(first) and math.isfinite(last):
+                x=xyz(curve.Value(first));y=xyz(curve.Value(last))
+                if dist(x,y)>tol and ((dist(x,a.start)<=tol and dist(y,a.end)<=tol) or (dist(y,a.start)<=tol and dist(x,a.end)<=tol)):
+                    matches.append(edge)
+        ex.Next()
+    if len(matches)!=1: raise RuntimeError('endpoints must identify exactly one open B-rep edge; found '+str(len(matches)))
+    fillet=BRepFilletAPI_MakeFillet(shape);fillet.Add(matches[0])
+    if fillet.NbContours()!=1 or fillet.NbEdges(1)!=1: raise RuntimeError('tangent-connected multi-edge contours are not supported')
+    first=xyz(BRep_Tool.Pnt_s(fillet.FirstVertex(1)));last=xyz(BRep_Tool.Pnt_s(fillet.LastVertex(1)))
+    if dist(first,a.start)<=tol and dist(last,a.end)<=tol: r0,r1=a.radii
+    elif dist(first,a.end)<=tol and dist(last,a.start)<=tol: r1,r0=a.radii
+    else: raise RuntimeError('fillet contour endpoints do not match the specified edge')
+    fillet.SetRadius(r0,r1,1,1);fillet.Build()
+    if not fillet.IsDone(): raise RuntimeError('OpenCASCADE could not construct this fillet')
+    result=fillet.Shape()
+    if result.IsNull() or result.IsSame(shape) or solid_count(result)!=1 or not BRepCheck_Analyzer(result).IsValid(): raise RuntimeError('fillet result is not one changed valid solid')
+    BRepTools.Write_s(result,a.o)
+    with open(a.report,'w',encoding='utf-8') as f:json.dump({'schema':'brepkernel.cli/1','status':'ok'},f)
+except Exception as exc:
+    with open(a.report,'w',encoding='utf-8') as f:json.dump({'schema':'brepkernel.cli/1','status':'error','error':str(exc)},f)
+    sys.exit(2)
+)DVE_FILLET";
+}
+ExactEdgeFilletRequest prepare_exact_edge_fillet(const std::filesystem::path& root,const EditorDocument& document,
+        EditorObjectId id,std::array<double,3> start,std::array<double,3> end,double r0,double r1) {
+    ExactEdgeFilletRequest request;request.object=id;request.start=start;request.end=end;request.radiusStart=r0;request.radiusEnd=r1;
+    const auto* object=document.find_object(id);
+    if (!object || !object->polygon || !object->flags.visible || object->flags.locked || object->prefabLink) {
+        request.error="Select one visible, unlocked exact CAD polygon object outside a prefab";return request;
+    }
+    const auto source=exact_brep_source(*object);
+    if (!source || !contained_relative(source->relativePath)) {request.error="Object has no valid project-owned exact B-rep";return request;}
+    request.sourcePath=root/source->relativePath;
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(request.sourcePath,ec)) {request.error="Exact CAD source file is missing";return request;}
+    double distance2=0.0;
+    for (std::size_t i=0;i<3;++i) {
+        if(!std::isfinite(start[i]) || !std::isfinite(end[i])) {request.error="Edge endpoints must be finite";return request;}
+        const double d=start[i]-end[i];distance2+=d*d;
+    }
+    if(!std::isfinite(distance2) || distance2<4e-14 || !std::isfinite(r0) || !std::isfinite(r1) || r0<=0 || r1<=0 || r0>100 || r1>100) {
+        request.error="Use distinct edge endpoints and positive finite radii no larger than 100 m";return request;
+    }
+    request.operandStamp=exact_operand_stamp(document,id,id);return request;
+}
+ExactEdgeFilletRequest prepare_exact_face_fillet(const std::filesystem::path& root,const EditorDocument& document,
+        EditorObjectId id,int faceA,int faceB,double radius) {
+    auto request=prepare_exact_edge_fillet(root,document,id,{0,0,0},{0.001,0,0},radius,radius);
+    if (!request.error.empty()) return request;
+    if (faceA<0 || faceB<0 || faceA==faceB) {request.error="Select two different nonnegative face indices";return request;}
+    request.facePair=std::array<int,2>{faceA,faceB};return request;
+}
+ExactEdgeFilletResult run_exact_edge_fillet(const std::filesystem::path& root,const ExactEdgeFilletRequest& request,
+        const ExactCadSettings& settings,const ExactCadRunner& runner) {
+    ExactEdgeFilletResult out;
+    if(!request.error.empty()) {out.error=request.error;return out;}
+    TemporaryDirectory temp;if(!temp.ok()) {out.error="Cannot create a temporary folder";return out;}
+    const auto candidate=temp.path()/"fillet.brep";
+    ExactCadSettings helper=settings;
+    const char* custom=std::getenv("DVE_CAD_PYTHON");
+    if(custom && *custom) helper.command={custom,"-c",kEdgeFilletScript};
+    else if(settings.command.size()>=3 && settings.command[1]=="-m" && settings.command[2]=="brepkernel")
+        helper.command={settings.command[0],"-c",kEdgeFilletScript};
+#ifdef _WIN32
+    else helper.command={"python","-c",kEdgeFilletScript};
+#else
+    else helper.command={"python3","-c",kEdgeFilletScript};
+#endif
+    std::vector<std::string> args{"fillet",utf8(request.sourcePath),"-o",utf8(candidate)};
+    if (request.facePair) {args.push_back("--faces");args.push_back(std::to_string((*request.facePair)[0]));args.push_back(std::to_string((*request.facePair)[1]));}
+    else {
+        args.push_back("--start");for(double v:request.start) args.push_back(format_double(v));
+        args.push_back("--end");for(double v:request.end) args.push_back(format_double(v));
+    }
+    args.push_back("--radii");args.push_back(format_double(request.radiusStart));args.push_back(format_double(request.radiusEnd));
+    const auto result=run_tool(helper,runner,std::move(args),temp.path()/"fillet.json");
+    if(!result.report) {out.error=result.error;return out;}
+    if(result.exitCode!=0) {out.error="Exact edge fillet failed: "+json_string(*result.report,{"error"});return out;}
+    out.imported=import_exact_cad(root,candidate,request.object,settings,runner);
+    if(!out.imported) {out.error="Fillet B-rep import failed: "+out.imported.error;return out;}
+    out.imported.source.origin=request.facePair ? "occt-adjacent-face-fillet" : "occt-edge-fillet";
+    return out;
+}
+
 ExactCadRemeshResult remesh_exact_cad(const std::filesystem::path& projectRoot, const ExactBrepSource& source, EditorObjectId id,
                                       double deflectionMeters, const ExactCadSettings& settings, const ExactCadRunner& runner) {
     ExactCadRemeshResult result;
@@ -556,13 +694,73 @@ ExactBooleanRequest prepare_exact_boolean(const std::filesystem::path& projectRo
 }
 
 namespace {
-// Builds an analytic solid with `brepkernel primitive` into `output` (empty string on success).
+// Build a rounded box using the same OpenCASCADE Python bindings used by brepkernel.
+// It is an input primitive, not a certified result: the subsequent brepkernel Boolean
+// still decides acceptance. No shell or external script file is used.
+constexpr const char* kRoundedBoxScript = R"DVE_PY(
+import argparse, json, sys
+p=argparse.ArgumentParser()
+p.add_argument('command');p.add_argument('kind');p.add_argument('-o',required=True)
+p.add_argument('--size',nargs=3,type=float,required=True);p.add_argument('--radius',type=float,required=True)
+p.add_argument('--axis',choices=['x','y','z'],required=True);p.add_argument('--at',nargs=3,type=float,required=True)
+p.add_argument('--report',required=True);a=p.parse_args()
+try:
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
+    from OCP.BRepFilletAPI import BRepFilletAPI_MakeFillet
+    from OCP.BRepAdaptor import BRepAdaptor_Curve
+    from OCP.BRepCheck import BRepCheck_Analyzer
+    from OCP.TopAbs import TopAbs_EDGE
+    from OCP.TopExp import TopExp_Explorer
+    from OCP.TopoDS import TopoDS
+    from OCP.BRepTools import BRepTools
+    from OCP.gp import gp_Pnt
+    lower=[a.at[i]-a.size[i]/2 for i in range(3)]
+    shape=BRepPrimAPI_MakeBox(gp_Pnt(*lower),*a.size).Shape()
+    fillet=BRepFilletAPI_MakeFillet(shape); explorer=TopExp_Explorer(shape,TopAbs_EDGE)
+    axis='xyz'.index(a.axis); seen=set()
+    while explorer.More():
+        cast=getattr(TopoDS,'Edge_s',None) or getattr(TopoDS,'Edge')
+        edge=cast(explorer.Current()); curve=BRepAdaptor_Curve(edge)
+        u=curve.Value(curve.FirstParameter());v=curve.Value(curve.LastParameter())
+        x=(u.X(),u.Y(),u.Z());y=(v.X(),v.Y(),v.Z())
+        delta=[abs(x[i]-y[i]) for i in range(3)]
+        if abs(delta[axis]-a.size[axis]) < 1e-9*max(1.0,a.size[axis]) and all(delta[i] < 1e-9 for i in range(3) if i!=axis):
+            key=tuple(sorted((x,y)))
+            if key not in seen: fillet.Add(a.radius,edge);seen.add(key)
+        explorer.Next()
+    if len(seen)!=4: raise RuntimeError('expected four longitudinal box edges')
+    fillet.Build()
+    if not fillet.IsDone(): raise RuntimeError('OpenCASCADE rounded box failed')
+    result=fillet.Shape()
+    if not BRepCheck_Analyzer(result).IsValid(): raise RuntimeError('rounded box is invalid')
+    BRepTools.Write_s(result,a.o)
+    with open(a.report,'w',encoding='utf-8') as f: json.dump({'schema':'brepkernel.cli/1','status':'ok'},f)
+except Exception as exc:
+    with open(a.report,'w',encoding='utf-8') as f: json.dump({'schema':'brepkernel.cli/1','status':'error','error':str(exc)},f)
+    sys.exit(2)
+)DVE_PY";
+
+// Builds an analytic solid into `output` (empty string on success).
 std::string build_exact_primitive(const ExactCadSettings& settings, const ExactCadRunner& runner, const ExactPrimitive& primitive,
                                   const std::filesystem::path& output, const std::filesystem::path& report) {
-    std::vector<std::string> args{"primitive", primitive.kind == ExactPrimitive::Kind::Box ? "box" : "cylinder", "-o", utf8(output)};
-    if (primitive.kind == ExactPrimitive::Kind::Box) {
+    const bool rounded = primitive.kind == ExactPrimitive::Kind::RoundedBox;
+    ExactCadSettings helperSettings = settings;
+    if (rounded) {
+        const char* overridePython = std::getenv("DVE_CAD_PYTHON");
+        if (overridePython && *overridePython) helperSettings.command = {overridePython, "-c", kRoundedBoxScript};
+        else if (settings.command.size() >= 3 && settings.command[1] == "-m" && settings.command[2] == "brepkernel")
+            helperSettings.command = {settings.command[0], "-c", kRoundedBoxScript};
+#ifdef _WIN32
+        else helperSettings.command = {"python", "-c", kRoundedBoxScript};
+#else
+        else helperSettings.command = {"python3", "-c", kRoundedBoxScript};
+#endif
+    }
+    std::vector<std::string> args{"primitive", primitive.kind == ExactPrimitive::Kind::Box ? "box" : rounded ? "rounded-box" : "cylinder", "-o", utf8(output)};
+    if (primitive.kind == ExactPrimitive::Kind::Box || rounded) {
         args.push_back("--size");
         for (const double v : primitive.size) args.push_back(format_double(v));
+        if (rounded) { args.push_back("--radius"); args.push_back(format_double(primitive.radius)); args.push_back("--axis"); args.push_back(std::string(1, primitive.axis)); }
     } else {
         args.push_back("--radius");
         args.push_back(format_double(primitive.radius));
@@ -573,7 +771,7 @@ std::string build_exact_primitive(const ExactCadSettings& settings, const ExactC
     }
     args.push_back("--at");
     for (const double v : primitive.centre) args.push_back(format_double(v));
-    const auto run = run_tool(settings, runner, std::move(args), report);
+    const auto run = run_tool(helperSettings, runner, std::move(args), report);
     if (!run.report) return run.error;
     if (run.exitCode != 0) {
         const auto message = json_string(*run.report, {"error"});

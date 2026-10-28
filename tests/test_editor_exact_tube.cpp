@@ -164,6 +164,13 @@ void spec_parsing() {
         const auto parsed = parse_tube_spec(bad);
         check(!parsed.spec && !parsed.error.empty(), std::string("rejected: '") + bad + "'");
     }
+    auto rounded = parse_tube_spec("rect 80x40 3 600 r 6 z");
+    check(rounded.spec && near(rounded.spec->outerCornerRadius, .006, 1e-12), "rect outer radius parses");
+    if (rounded.spec) { const auto again = parse_tube_spec(format_tube_spec(*rounded.spec));
+        check(again.spec && near(again.spec->outerCornerRadius, rounded.spec->outerCornerRadius, 1e-12),
+              "rounded tube specification round trips"); }
+    for (const char* invalid : {"rect 80x40 3 600 r 20 y", "rect 80x40 3 600 r -1 y", "round 50 3 600 r 1 y", "rect 80x40 3 600 r"})
+        check(!parse_tube_spec(invalid).spec, std::string("invalid outer radius refused: ")+invalid);
     TubeSpec spec;
     spec.profile = TubeProfile::Rectangular; spec.width = 0.08; spec.height = 0.04; spec.wall = 0.003; spec.length = 0.6; spec.axis = 'z';
     check(format_tube_spec(spec) == "rect 80x40 3 600 z", "format: " + format_tube_spec(spec));
@@ -204,7 +211,7 @@ void miter_parsing_and_plane() {
 
 void tube_component_round_trip() {
     TempDir dir;
-    TubeSpec spec; spec.profile = TubeProfile::Rectangular; spec.width = 0.08; spec.height = 0.04; spec.wall = 0.003; spec.length = 0.6; spec.axis = 'z';
+    TubeSpec spec; spec.profile = TubeProfile::Rectangular; spec.width = 0.08; spec.height = 0.04; spec.wall = 0.003; spec.length = 0.6; spec.axis = 'z'; spec.outerCornerRadius = 0.006;
     EditorObject tube(1, "Rail");
     tube.polygon = make_editor_polygon_cube(1);
     Component exact = make_exact_brep_component({"sources/exact/rail-0123456789ab.brep", "0123456789abcdef", "tube:rect"});
@@ -225,7 +232,7 @@ void tube_component_round_trip() {
     check(loaded.has_value(), "scene reloads: " + error);
     if (loaded) {
         const auto again = exact_tube_record(*loaded->find_object(1));
-        check(again && again->spec.profile == TubeProfile::Rectangular && near(again->spec.width, 0.08, 1e-15) && near(again->spec.wall, 0.003, 1e-15) &&
+        check(again && again->spec.profile == TubeProfile::Rectangular && near(again->spec.width, 0.08, 1e-15) && near(again->spec.wall, 0.003, 1e-15) && near(again->spec.outerCornerRadius,0.006,1e-15) &&
                   again->cuts == read->cuts, "tube record survives save/load");
         check(exact_brep_source(*loaded->find_object(1)).has_value(), "exact source survives next to it");
         const auto exported = export_editor_scene(*loaded, EditorMaterialLibrary::make_default(), dir.path / "runtime.dvoxscene.json");
@@ -239,6 +246,9 @@ void tube_component_round_trip() {
     bad.id = 1;
     broken.components.push_back(bad);
     check(!exact_tube_record(broken), "a zero wall is not a tube record");
+    broken.components[0] = make_exact_tube_component(spec);
+    broken.components[0].properties["outer_corner_radius"] = std::string("invalid");
+    check(!exact_tube_record(broken), "a malformed corner radius cannot silently become a sharp tube");
     broken.components[0] = make_exact_tube_component(spec);
     broken.components[0].properties["profile"] = std::string("hex");
     check(!exact_tube_record(broken), "an unknown profile is not a tube record");
@@ -361,6 +371,18 @@ void fake_create_tube() {
     for (std::size_t i = 0; i < outerBox.size(); ++i) if (outerBox[i] == "--size") size = {outerBox[i + 1], outerBox[i + 2], outerBox[i + 3]};
     check(size.size() == 3 && size[0] == "0.6" && size[1] == "0.08" && size[2] == "0.04", "x tube: length along X, width along Y, height along Z");
 
+    TubeSpec rounded = rect; rounded.outerCornerRadius = 0.006;
+    stand.seen.calls.clear(); stand.resultVolume = tube_volume(rounded);
+    const auto roundBox = create_exact_tube(dir.path, rounded, 7, fake_settings(), stand.runner());
+    check(bool(roundBox) && has(stand.seen.calls[0], "rounded-box") && has(stand.seen.calls[1], "rounded-box"),
+          "rounded tube builds exact outer and inner rounded primitives");
+    check(near(std::stod(opt(stand.seen.calls[0], "--radius")),0.006,1e-12) &&
+          near(std::stod(opt(stand.seen.calls[1], "--radius")),0.003,1e-12),
+          "inner corner radius offsets the outer radius by wall thickness");
+    auto record = make_exact_tube_component(rounded); EditorObject stock(10,"rounded stock"); record.id=1; stock.components.push_back(record);
+    const auto stored = exact_tube_record(stock);
+    check(stored && near(stored->spec.outerCornerRadius,.006,1e-12),"rounded radius survives the tube component");
+    stand.seen.calls.clear();
     // Self-checks refuse a result that does not match the analytic tube.
     stand.resultVolume = tube_volume(rect) * 1.001;
     check(!create_exact_tube(dir.path, rect, 6, fake_settings(), stand.runner()), "a wrong volume is refused");
@@ -404,6 +426,58 @@ void fake_cope_and_retry() {
     check(!cut.firstRefusal.empty() && cut.firstRefusal.find("OpenAssembly") != std::string::npos, "the first refusal is kept: " + cut.firstRefusal);
     // The saved provenance records the automatic clearance, not only the typed gap.
     check(cut.boolean.source.origin == "cope:Run:gap_mm=0:auto_clearance_mm=0.01", "origin records the automatic clearance: " + cut.boolean.source.origin);
+
+    // A 2x world-scaled B needs half the world clearance in its mesh frame.
+    EditorDocument scaled("Scaled");
+    scaled.add_object(tube_object(1, "Branch", round_spec(0.06, 0.003, 0.3, 'y'), dir.path, "a.brep"));
+    auto scaledB = tube_object(2, "Run", round_spec(0.03, 0.0015, 0.4, 'x'), dir.path, "b.brep");
+    scaledB.voxelScale = {2.0F, 2.0F, 2.0F};
+    scaled.add_object(std::move(scaledB));
+    auto scaledRequest = prepare_exact_cope(dir.path, scaled, 1, 2);
+    check(scaledRequest.tangentRetry && near(scaledRequest.tangentClearanceMeters, 5e-6, 1e-15),
+          "world clearance is converted to the scaled cutter frame");
+    StandIn scaledStand{{}, dir.path / "cube.glb"};
+    scaledStand.refuseRadiusAtMost = 0.015;
+    auto scaledCut = run_exact_tube_cut(dir.path, scaledRequest, fake_settings(), scaledStand.runner());
+    check(bool(scaledCut) && scaledCut.clearanceApplied && near(scaledCut.appliedGapMeters, 5e-6, 1e-15),
+          "scaled retry applies 0.005 mm locally = 0.01 mm in world space");
+    check(scaledCut.record.find("gap 0.01 mm") != std::string::npos &&
+              scaledCut.boolean.summary.find("0.02 mm larger across") != std::string::npos,
+          "scaled retry records actual world clearance");
+    scaled.find_object(2)->voxelScale = {2.0F, 1.0F, 2.0F};
+    auto stretched = prepare_exact_cope(dir.path, scaled, 1, 2);
+    check(stretched.error.empty() && !stretched.tangentRetry,
+          "nonuniformly scaled B cannot receive a uniform-world clearance retry");
+
+    // Rounded rectangular B uses the rounded outer envelope with gap added to both radii and dimensions.
+    EditorDocument roundedDoc("Rounded cutter");
+    roundedDoc.add_object(tube_object(1,"Branch",round_spec(0.06,0.003,0.3,'y'),dir.path,"a.brep"));
+    TubeSpec rb; rb.profile=TubeProfile::Rectangular; rb.width=0.08; rb.height=0.04;
+    rb.wall=0.003; rb.length=0.4; rb.axis='x'; rb.outerCornerRadius=0.006;
+    roundedDoc.add_object(tube_object(2,"Rounded B",rb,dir.path,"b.brep"));
+    ExactCopeOptions roundedOptions; roundedOptions.gapWorldMeters=0.001;
+    const auto roundedRequest=prepare_exact_cope(dir.path,roundedDoc,1,2,roundedOptions);
+    check(roundedRequest.error.empty() && roundedRequest.boolean.primitiveB.kind==ExactPrimitive::Kind::RoundedBox &&
+          near(roundedRequest.boolean.primitiveB.radius,0.007,1e-12) &&
+          near(roundedRequest.boolean.primitiveB.size[1],0.082,1e-12) &&
+          near(roundedRequest.boolean.primitiveB.size[2],0.042,1e-12),
+          "rounded cutter gap expands its cross-section and corner radius");
+
+    // Supplied B is an actual B-rep: no reconstructed fixed-size primitive or implicit gap.
+    EditorDocument solidDoc("Solid cutter");
+    solidDoc.add_object(tube_object(1, "Branch", round_spec(0.06, 0.003, 0.3, 'y'), dir.path, "a.brep"));
+    auto supplied = tube_object(2, "Taper envelope", round_spec(0.06, 0.003, 0.4, 'x'), dir.path, "b.brep");
+    supplied.components.pop_back(); // a general exact CAD object need not be a tube
+    solidDoc.add_object(std::move(supplied));
+    auto solidRequest = prepare_exact_cope_to_solid(dir.path, solidDoc, 1, 2);
+    check(solidRequest.error.empty() && solidRequest.boolean.primitiveB.kind == ExactPrimitive::Kind::Absent &&
+              solidRequest.boolean.brepB.filename() == "b.brep" && !solidRequest.tangentRetry,
+          "solid cope uses B's actual B-rep, with no reconstructed envelope or tangent retry");
+    StandIn solidStand{{}, dir.path / "cube.glb"};
+    auto solidCut = run_exact_tube_cut(dir.path, solidRequest, fake_settings(), solidStand.runner());
+    check(bool(solidCut) && solidStand.count("primitive") == 0 && solidStand.count("boolean") == 1 &&
+              solidCut.record.find("supplied exact solid") != std::string::npos,
+          "solid cope runs the actual B-rep difference and identifies the cutter");
 
     // Retry switched off: a clean refusal, nothing applied.
     ExactCopeOptions strict; strict.retryTangent = false;
@@ -670,6 +744,74 @@ void real_tubes(RealWorld& w) {
             if (f.type == "plane" && std::abs(f.normal[std::size_t(axes[0])]) > 1 - 1e-9 && near(std::abs(f.origin[std::size_t(axes[0])]), c.spec.length / 2, 1e-12)) ++ends;
         check(ends == 2, c.name + ": two end planes at +-length/2");
     }
+    TubeSpec rounded=rect; rounded.outerCornerRadius=0.006;
+    auto made = create_exact_tube(w.root, rounded, id++, w.settings);
+    check(bool(made), "create rounded rectangular tube: " + made.error);
+    if (made) {
+        check(near_rel(made.exactVolume,tube_volume(rounded),1e-8), "rounded tube exact volume agrees with analytic rounded sections");
+        check(closed(made.mesh), "rounded tube mesh is watertight");
+        auto desc=describe_exact_cad(w.root,made.source,w.settings);
+        bool outer=false,inner=false;
+        for (const auto& f:desc.faces) if(f.type=="cylinder") {
+            outer = outer || near(f.radius,0.006,1e-10);
+            inner = inner || near(f.radius,0.003,1e-10);
+        }
+        check(bool(desc) && outer && inner,"rounded tube contains true circular outer and inner corner faces");
+    }
+}
+
+// Real exact-edge fillets, with a classifier check independent of the fillet construction.
+void real_edge_fillets(RealWorld& w) {
+    auto args=w.settings.command;
+    const auto input=w.root/"fillet-fixture.brep", report=w.root/"fillet-fixture.json";
+    args.insert(args.end(),{"primitive","box","--size","0.1","0.1","0.1","-o",input.string(),"--report",report.string()});
+    auto generated=run_exact_cad_process(args,std::chrono::seconds(120),1U<<20U);
+    check(generated.launched && generated.exitCode==0 && fs::is_regular_file(input),"construct real fillet fixture: "+generated.output);
+    if(!generated.launched || generated.exitCode!=0 || !fs::is_regular_file(input)) return;
+    auto imported=import_exact_cad(w.root,input,401,w.settings);
+    check(bool(imported),"import exact fillet fixture: "+imported.error);if(!imported) return;
+    EditorDocument scene("CAD fillet");EditorObject object(401,"Box");object.polygon=imported.mesh;
+    auto exact=make_exact_brep_component(imported.source);exact.id=1;object.components.push_back(exact);scene.add_object(std::move(object));
+    const std::array<double,3> start={-.05,-.05,-.05}, end={-.05,.05,-.05};
+    const auto constant=prepare_exact_edge_fillet(w.root,scene,401,start,end,.005,.005);
+    auto c=run_exact_edge_fillet(w.root,constant,w.settings);
+    check(bool(c),"constant exact edge fillet: "+c.error);
+    if(c) {
+        const auto desc=describe_exact_cad(w.root,c.imported.source,w.settings);bool cylinder=false;
+        for(const auto& f:desc.faces) if(f.type=="cylinder" && near(f.radius,.005,1e-10)) cylinder=true;
+        check(bool(desc) && cylinder,"constant fillet produces a genuine 5 mm cylindrical face");
+        check(closed(c.imported.mesh),"constant fillet display mesh is watertight");
+    }
+    auto variable=prepare_exact_edge_fillet(w.root,scene,401,start,end,.005,.010);
+    auto v=run_exact_edge_fillet(w.root,variable,w.settings);
+    check(bool(v),"variable exact edge fillet: "+v.error);
+    if(v) {
+        check(closed(v.imported.mesh),"variable fillet display mesh is watertight");
+        const std::string script=
+            "from OCP.BRepTools import BRepTools\nfrom OCP.TopoDS import TopoDS_Shape\n"
+            "from OCP.BRep import BRep_Builder\nfrom OCP.BRepClass3d import BRepClass3d_SolidClassifier\n"
+            "from OCP.TopAbs import TopAbs_IN,TopAbs_OUT\nfrom OCP.gp import gp_Pnt\nimport sys\n"
+            "s=TopoDS_Shape();assert BRepTools.Read_s(s,sys.argv[1],BRep_Builder())\n"
+            "assert BRepClass3d_SolidClassifier(s,gp_Pnt(-.048,-.049,-.048),1e-8).State()==TopAbs_IN\n"
+            "assert BRepClass3d_SolidClassifier(s,gp_Pnt(-.048,.049,-.048),1e-8).State()==TopAbs_OUT\n";
+#ifdef _WIN32
+        const std::string python="python";
+#else
+        const std::string python="python3";
+#endif
+        const auto classified=run_exact_cad_process({python,"-c",script,(w.root/v.imported.source.relativePath).string()},std::chrono::seconds(90),1U<<20U);
+        check(classified.launched && classified.exitCode==0,"independent classifier confirms radius increases toward second endpoint: "+classified.output);
+    }
+    auto face=run_exact_edge_fillet(w.root,prepare_exact_face_fillet(w.root,scene,401,0,2,.005),w.settings);
+    check(bool(face),"adjacent face fillet: "+face.error);
+    if(face) check(closed(face.imported.mesh),"face fillet display mesh is watertight");
+    auto opposite=run_exact_edge_fillet(w.root,prepare_exact_face_fillet(w.root,scene,401,0,1,.005),w.settings);
+    check(!opposite,"nonadjacent faces are refused");
+    auto bad=prepare_exact_edge_fillet(w.root,scene,401,start,start,.005,.005);
+    check(!bad.error.empty(),"coincident edge endpoints are rejected before spawning");
+    auto missing=prepare_exact_edge_fillet(w.root,scene,401,{0,0,0},{.1,.1,.1},.005,.005);
+    auto refused=run_exact_edge_fillet(w.root,missing,w.settings);
+    check(!refused && refused.error.find("exactly one")!=std::string::npos,"missing exact edge is refused explicitly: "+refused.error);
 }
 
 // Plane cut: the cut face lies on the plane through both walls.
@@ -812,6 +954,49 @@ void real_cope(RealWorld& w) {
         check(exactB, "round 90: an exact cylinder face of B's outer radius about B's axis:" + faces);
         check(outerA && innerA, "round 90: A's outer and inner cylinders (wall thickness) preserved");
     }
+    // A true taper: an externally supplied solid cone with radius changing along its axis.
+    // The independent oracle integrates removed axial length through the branch wall.
+    {
+        const fs::path conePath = w.root / "sources/exact/test-taper-solid.brep";
+        fs::create_directories(conePath.parent_path());
+        const std::string script =
+            "from OCP.BRepPrimAPI import BRepPrimAPI_MakeCone\n"
+            "from OCP.BRepTools import BRepTools\n"
+            "from OCP.gp import gp_Ax2,gp_Dir,gp_Pnt\n"
+            "import sys\n"
+            "s=BRepPrimAPI_MakeCone(gp_Ax2(gp_Pnt(-.2,-.15,0),gp_Dir(1,0,0)),.02,.05,.4).Shape()\n"
+            "BRepTools.Write_s(s,sys.argv[1])\n";
+#ifdef _WIN32
+        const std::string python = "python";
+#else
+        const std::string python = "python3";
+#endif
+        const auto generated = run_exact_cad_process({python,"-c",script,conePath.string()},std::chrono::seconds(90),1U<<20U);
+        check(generated.launched && generated.exitCode==0 && fs::is_regular_file(conePath), "construct real tapered solid: "+generated.output);
+        if (generated.launched && generated.exitCode==0 && fs::is_regular_file(conePath)) {
+            EditorDocument scene("Tapered cope");
+            auto a=make_real_tube(w,1,"Branch",branch,{0,0,0});
+            EditorObject b(2,"Tapered envelope"); b.polygon=make_editor_polygon_cube(2);
+            auto exact=make_exact_brep_component({"sources/exact/test-taper-solid.brep","cone-fixture","taper fixture"});exact.id=1;b.components.push_back(exact);
+            scene.add_object(std::move(a));scene.add_object(std::move(b));
+            auto request=prepare_exact_cope_to_solid(w.root,scene,1,2);
+            auto tapered=run_exact_tube_cut(w.root,request,w.settings);
+            check(bool(tapered),"tapered solid cope: "+tapered.boolean.edit.error);
+            if(tapered) {
+                constexpr int n=800; constexpr double dx=.06/n; double expected=0.0;
+                for(int ix=0;ix<n;++ix) {const double x=-.03+(ix+.5)*dx; const double radius=.02+.03*(x+.2)/.4;
+                    for(int iz=0;iz<n;++iz) {const double z=-.03+(iz+.5)*dx; const double r2=x*x+z*z;
+                        if(r2>=.027*.027 && r2<=.03*.03) expected+=(.3-std::sqrt((std::max)(0.0,radius*radius-z*z)))*dx*dx;
+                    }
+                }
+                check(near_rel(tapered.boolean.exactVolume,expected,0.015), "tapered cope agrees with independent volume integral");
+                check(closed(tapered.boolean.edit.mesh), "tapered cope mesh watertight");
+                const auto desc=describe_exact_cad(w.root,tapered.boolean.source,w.settings);
+                bool cone=false;for(const auto& face:desc.faces) cone=cone || face.type=="cone";
+                check(bool(desc) && cone,"tapered cope keeps an exact cone face");
+            }
+        }
+    }
     // 2. other angles between the axes: 60 and 30 degrees (the branch leans in the xy plane)
     for (const double degrees : {60.0, 30.0}) {
         const double phi = (degrees - 90.0) * kDeg;     // mesh y axis -> (-sin phi, cos phi, 0)
@@ -935,7 +1120,7 @@ void type_and_enter(NativeEditorController& c, const std::string& text) {
 void native_always(const fs::path& root) {
     auto owner = make_native(root);
     NativeEditorController& c = *owner;
-    for (const char* id : {"polygon.create_exact_tube", "mesh.exact_cope", "mesh.exact_miter"}) {
+    for (const char* id : {"polygon.create_exact_tube", "mesh.exact_cope", "mesh.exact_cope_solid", "mesh.exact_miter", "mesh.exact_resize_tube", "mesh.exact_edge_fillet", "mesh.exact_variable_fillet", "mesh.exact_face_fillet"}) {
         const MenuAction* action = menu_action(c, id);
         check(action != nullptr, std::string("menu action exists: ") + id);
         check(action && !action->description.empty(), std::string("menu action is described for the command palette: ") + id);
@@ -988,6 +1173,34 @@ void native_always(const fs::path& root) {
     check(c.exact_tube_summary(tubeId).find("Round tube") != std::string::npos && c.exact_tube_summary(tubeId).find("1 cut") != std::string::npos,
           "inspector summary: " + c.exact_tube_summary(tubeId));
     check(menu_action(c, "mesh.exact_miter")->enabled, "miter is available for one tube");
+    check(menu_action(c,"mesh.exact_edge_fillet")->enabled && menu_action(c,"mesh.exact_variable_fillet")->enabled,
+          "both exact edge fillet menu actions are available on a CAD object");
+    check(menu_action(c,"mesh.exact_face_fillet")->enabled,"face fillet menu action is available");
+    check(c.dispatch_action("mesh.exact_face_fillet") && c.text_edit().kind==TextEditKind::ExactFaceFillet,"face fillet opens field");
+    type_and_enter(c,"5 0 -1");
+    check(c.status().error && c.workspace().commands().size()==steps,"invalid face index is refused");
+    check(c.dispatch_action("mesh.exact_edge_fillet") && c.text_edit().kind==TextEditKind::ExactEdgeFillet,
+          "constant edge fillet opens field");
+    type_and_enter(c,"1 0 0");
+    check(c.status().error && c.workspace().commands().size()==steps,"incomplete fillet input is refused");
+    check(c.dispatch_action("mesh.exact_variable_fillet") && c.text_edit().kind==TextEditKind::ExactVariableFillet,
+          "variable edge fillet opens field");
+    type_and_enter(c,"1 nan 0 0 0 1 0 0");
+    check(c.status().error && c.workspace().commands().size()==steps,"non-finite fillet input is refused");
+
+    check(!menu_action(c, "mesh.exact_resize_tube")->enabled &&
+              menu_action(c, "mesh.exact_resize_tube")->disabledReason.find("cuts") != std::string::npos,
+          "resize refuses a cut tube whose feature history cannot be replayed");
+    c.workspace().document().find_object(tubeId)->components[1] = make_exact_tube_component(spec);
+    c.workspace().document().find_object(tubeId)->components[1].id = 2;
+    check(menu_action(c, "mesh.exact_resize_tube")->enabled, "resize accepts uncut exact stock");
+    check(c.dispatch_action("mesh.exact_resize_tube") && c.text_edit().kind == TextEditKind::ExactTubeResize,
+          "resize opens the tube specification field");
+    check(c.text_edit().objectId == tubeId && c.text_edit().buffer == format_tube_spec(spec),
+          "resize prefills the source tube dimensions");
+    type_and_enter(c, "round 50 30 600 y");
+    check(c.status().error && c.workspace().commands().size() == steps, "invalid resize leaves the original intact");
+
     check(!menu_action(c, "mesh.exact_cope")->enabled, "cope still needs a second tube");
     const auto edited = c.set_component_property_text_on_primary(2, "wall", "0.01");
     check(!edited.success && edited.message.find("Create Exact Tube") != std::string::npos, "the tube record cannot be edited by hand: " + edited.message);
@@ -1011,6 +1224,8 @@ void native_always(const fs::path& root) {
         const MenuAction* cope = menu_action(c, "mesh.exact_cope");
         check(cope && !cope->enabled && cope->disabledReason.find("(B)") != std::string::npos && cope->disabledReason.find("tube record") != std::string::npos,
               "B without a tube record is refused: " + (cope ? cope->disabledReason : ""));
+        check(menu_action(c, "mesh.exact_cope_solid")->enabled,
+              "supplied exact solid B is accepted without a tube record");
     }
     check(c.workspace().document().find_object(plateId) != nullptr && c.workspace().commands().size() == steps + 0,
           "no undo steps were added by refusals");
@@ -1119,6 +1334,67 @@ void native_real(const fs::path& root) {
         check(text.find("clearance") != std::string::npos || c.status().error, "equal diameters: the clearance (or a refusal) is stated: " + text);
         if (!c.status().error) check(text.find("0.01") != std::string::npos, "the clearance amount is stated: " + text);
     }
+    // Uncut stock resize creates an exact, undoable copy at the same pose; the source remains.
+    {
+        select_one(a);
+        auto* original = document.find_object(a);
+        original->transform.position = {0.23F, 0.42F, -0.11F};
+        original->voxelScale = {1.5F, 1.5F, 1.5F};
+        const auto beforeCount = document.objects().size();
+        const auto beforeSteps = c.workspace().commands().size();
+        check(c.dispatch_action("mesh.exact_resize_tube") && c.text_edit().kind == TextEditKind::ExactTubeResize,
+              "resize stock opens field: " + c.status().text);
+        type_and_enter(c, "round 70 4 500 y");
+        check(!c.status().error && document.objects().size() == beforeCount + 1 && c.workspace().commands().size() == beforeSteps + 1,
+              "resize creates one exact copy in one undo step: " + c.status().text);
+        const auto resizedId = *c.workspace().selected_object();
+        const auto* resized = document.find_object(resizedId);
+        const auto record = resized ? exact_tube_record(*resized) : std::nullopt;
+        check(resized && resizedId != a && record && near(record->spec.width, 0.07, 1e-12) && near(record->spec.length, 0.5, 1e-12),
+              "resized copy carries its new dimensions");
+        check(resized && near(resized->transform.position.x,0.23,1e-6) && near(resized->voxelScale.x,1.5,1e-6) && document.find_object(a),
+              "resized copy preserves source placement and source survives");
+        check(c.dispatch_action("edit.undo") && !document.find_object(resizedId) && document.find_object(a), "undo resize removes only the copy");
+        check(c.dispatch_action("edit.redo") && document.find_object(resizedId), "redo restores the resized copy");
+    }
+
+    // Native exact-edge fillet commands create a separate CAD object in one undo step.
+    {
+        auto settings=ExactCadSettings::from_environment();settings.exactCollision=false;
+        const auto path=root/"native-fillet-box.brep", report=root/"native-fillet-box.json";
+        auto args=settings.command;args.insert(args.end(),{"primitive","box","--size","0.1","0.1","0.1","-o",path.string(),"--report",report.string()});
+        const auto generated=run_exact_cad_process(args,std::chrono::seconds(120),1U<<20U);
+        check(generated.launched && generated.exitCode==0,"native fillet fixture: "+generated.output);
+        if(generated.launched && generated.exitCode==0) {
+            const auto boxId=document.allocate_object_id();auto imported=import_exact_cad(root,path,boxId,settings);
+            check(bool(imported),"native fillet import: "+imported.error);
+            if(imported) {
+                EditorObject box(boxId,"Fillet box");box.polygon=std::move(imported.mesh);
+                auto exact=make_exact_brep_component(imported.source);exact.id=1;box.components.push_back(exact);
+                document.add_object(std::move(box));select_one(boxId);
+                const auto count=document.objects().size();
+                check(c.dispatch_action("mesh.exact_edge_fillet") && c.text_edit().kind==TextEditKind::ExactEdgeFillet,
+                      "native constant fillet opens field");
+                type_and_enter(c,"5 -50 -50 -50 -50 50 -50");
+                check(!c.status().error && document.objects().size()==count+1,"native constant exact fillet: "+c.status().text);
+                const auto resultId=*c.workspace().selected_object();
+                const auto* resultObject=document.find_object(resultId);
+                check(resultId!=boxId && resultObject && exact_brep_source(*resultObject).has_value(),"fillet copy has an exact source");
+                check(c.dispatch_action("edit.undo") && !document.find_object(resultId) && document.find_object(boxId),"fillet undo preserves source");
+                check(c.dispatch_action("edit.redo") && document.find_object(resultId),"fillet redo restores result");
+                select_one(boxId);
+                check(c.dispatch_action("mesh.exact_variable_fillet") && c.text_edit().kind==TextEditKind::ExactVariableFillet,
+                      "native variable fillet opens field");
+                type_and_enter(c,"5 10 -50 -50 -50 -50 50 -50");
+                check(!c.status().error && document.objects().size()==count+2,"native variable exact fillet: "+c.status().text);
+                select_one(boxId);
+                check(c.dispatch_action("mesh.exact_face_fillet") && c.text_edit().kind==TextEditKind::ExactFaceFillet,"native face fillet opens field");
+                type_and_enter(c,"5 0 2");
+                check(!c.status().error && document.objects().size()==count+3,"native adjacent-face fillet: "+c.status().text);
+            }
+        }
+    }
+
     // Save and load: the exact source and the record survive a scene round trip.
     {
         const auto before = exact_tube_record(*document.find_object(mitered));
@@ -1176,6 +1452,7 @@ int main(int argc, char** argv) {
         if (brepkernel_runs(world.settings, dir.path, why)) {
             try {
                 if (wanted("tubes")) real_tubes(world);
+                if (wanted("fillet")) real_edge_fillets(world);
                 if (wanted("miter")) real_miter(world);
                 if (wanted("cope")) real_cope(world);
                 if (wanted("equal")) real_equal_diameter(world);

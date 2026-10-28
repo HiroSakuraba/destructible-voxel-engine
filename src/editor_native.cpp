@@ -3541,7 +3541,7 @@ void NativeEditorController::commit_text_edit() {
         (void)commit_cad_detail_text();
         return;
     }
-    if (kind == TextEditKind::ExactTube || kind == TextEditKind::ExactCopeGap || kind == TextEditKind::ExactMiter) {
+    if (kind == TextEditKind::ExactTube || kind == TextEditKind::ExactTubeResize || kind == TextEditKind::ExactEdgeFillet || kind == TextEditKind::ExactVariableFillet || kind == TextEditKind::ExactFaceFillet || kind == TextEditKind::ExactCopeGap || kind == TextEditKind::ExactMiter) {
         (void)commit_exact_tube_text();
         return;
     }

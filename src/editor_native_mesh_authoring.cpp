@@ -833,7 +833,8 @@ void NativeEditorController::draw_mesh_authoring(const IEditorCanvas& canvas,UiR
         const auto x=s.uvGeometric[mesh.indices[c]],y=s.uvGeometric[mesh.indices[other]];
         const auto edge=(std::uint64_t(std::min(x,y))<<32U)|std::max(x,y);
         const bool seam=s.uvFlagsValid && s.uvFlags.enabled && s.uvFlags.seams[s.channel].contains(edge);
-        const auto tint=selected.contains(c)?color(255,175,55):seam?color(235,95,85):color(105,210,190);
+        // A seam must remain identifiable even when that edge is selected.
+        const auto tint=seam?color(255,100,90):selected.contains(c)?color(255,175,55):color(105,210,190);
         painter.line(int(std::clamp(a.x,-100000.0F,100000.0F)),int(std::clamp(a.y,-100000.0F,100000.0F)),
             int(std::clamp(b.x,-100000.0F,100000.0F)),int(std::clamp(b.y,-100000.0F,100000.0F)),
             tint,seam?3:selected.contains(c)?2:1);
@@ -841,13 +842,21 @@ void NativeEditorController::draw_mesh_authoring(const IEditorCanvas& canvas,UiR
             int(std::clamp(a.y,-100000.0F,100000.0F))-3,7,7},
             s.uvFlagsValid && s.uvFlags.enabled && s.uvFlags.pins[s.channel].contains(c)?color(230,110,245):tint);
     }
-    if(s.uvMode==0 && s.uvFlagsValid && s.uvFlags.enabled) for(const auto corner : s.uvFlags.pins[s.channel]) {
+    // Pins remain visible in Vertex, Edge, Face and Island modes. Otherwise an
+    // automatic layout can refuse because of hidden pins the artist cannot see.
+    if(s.uvFlagsValid && s.uvFlags.enabled) for(const auto corner : s.uvFlags.pins[s.channel]) {
         if(corner>=mesh.indices.size() || corner>=60000)continue;
         const auto point=screen_uv(texcoord(mesh.vertices[mesh.indices[corner]],s.channel),s,viewport);
-        painter.fill({int(std::clamp(point.x,-100000.0F,100000.0F))-3,
-            int(std::clamp(point.y,-100000.0F,100000.0F))-3,7,7},color(230,110,245));
+        const int px=int(std::clamp(point.x,-100000.0F,100000.0F));
+        const int py=int(std::clamp(point.y,-100000.0F,100000.0F));
+        painter.fill({px-5,py-5,11,11},color(20,27,36));
+        painter.fill({px-3,py-3,7,7},color(230,110,245));
     }
     if(s.selecting)painter.outline({std::min(s.startX,s.lastX),std::min(s.startY,s.lastY),std::abs(s.lastX-s.startX)+1,std::abs(s.lastY-s.startY)+1},color(255,190,65));
+    canvas.text(panel.x+12,panel.y+panel.height-50,
+        "Red: UV seams ("+std::to_string(s.uvFlagsValid?s.uvFlags.seams[s.channel].size():0)+
+        ")  Purple: saved pins ("+std::to_string(s.uvFlagsValid?s.uvFlags.pins[s.channel].size():0)+
+        ") | UV"+std::to_string(s.channel),color(215,195,240));
     canvas.text(panel.x+12,panel.y+panel.height-28,"Target "+std::to_string(s.uvDensityTarget)+" texels/m | Shift+B capture | C/Shift+C straighten",color(205,220,235));canvas.text(panel.x+12,panel.y+panel.height-8,s.typed.empty()?(s.uvFlagsValid?"P saved pin | M seam / Shift+M clear | J stitch | Esc close":"Saved UV flags need Reset UV Flags (or Undo topology edit)"):("Value: "+s.typed+" | Enter apply | Esc cancel"),color(255,205,145));
 }
 } // namespace dve::editor

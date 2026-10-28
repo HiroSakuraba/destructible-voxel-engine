@@ -653,6 +653,13 @@ void test_repeated_same_brick_cuts_update_physics_collision() {
         CHECK(!cast(2.5F, 2.5F));
         CHECK(!cast(5.5F, 5.5F));
         CHECK(cast(0.5F, 0.5F)); // unaffected island still collides
+        // All 64 columns are compared with an independent occupancy oracle.
+        // This catches stale physics boxes elsewhere in the same edited brick.
+        for (int x = 0; x < 8; ++x)
+            for (int y = 0; y < 8; ++y) {
+                const bool occupied = !(x == 2 && y == 2) && !(x == 5 && y == 5);
+                CHECK(cast(static_cast<float>(x) + 0.5F, static_cast<float>(y) + 0.5F) == occupied);
+            }
     }
 }
 

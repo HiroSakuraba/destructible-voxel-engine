@@ -129,7 +129,7 @@ void gap_parsing() {
     for (const char* bad : {"", "-1", "wide", "1 2", "1e", "nan", "inf"}) check(!gap(bad).meters && !gap(bad).error.empty(), std::string("gap refused: '") + bad + "'");
     // The prompt refuses an out-of-range gap itself (it used to close and fail later), with the same words.
     check(gap("100").meters && near(*gap("100").meters, 0.1, 1e-12), "100 mm is the largest gap");
-    for (const char* bad : {"100.1", "101", "5cm", "1m", "1e9"})
+    for (const char* bad : {"100.1", "101", "11cm", "1m", "1e9"})
         check(!gap(bad).meters && gap(bad).error == "The fit-up gap must be between 0 and 100 mm", std::string("gap out of range: '") + bad + "'");
     // "-0" is zero, not a negative zero that prints as -0.
     check(gap("-0").meters && !std::signbit(*gap("-0").meters), "-0 is a plain zero gap");

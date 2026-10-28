@@ -909,7 +909,8 @@ std::vector<std::string> wrap_text_to_width(const IEditorCanvas& canvas, std::st
         const std::size_t take = lo == 0U ? cuts.front() : cuts[lo - 1U];
         // Prefer to break after a space or a separator inside the fitting prefix.
         std::size_t breakAt = take;
-        if (take < rest.size()) {
+        // A space right after the fitting prefix means the prefix ends on a whole word already.
+        if (take < rest.size() && rest[take] != ' ') {
             for (std::size_t i = take; i > 0U; --i) {
                 const char c = rest[i - 1U];
                 if (c == ' ' || c == ',' || c == ';' || c == ':' || c == '/' || c == ')') {

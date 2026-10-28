@@ -382,6 +382,43 @@ void test_box_collision_proxy() {
     CHECK(validate_box_proxy(object, boxes));
 }
 
+void test_collision_proxy_progress_and_cancel() {
+    using namespace dve;
+    VoxelObject object(81021);
+    // Three bricks and an interior hole: the progress path must match Play's
+    // canonical exact merged boxes rather than collapsing to an enclosing AABB.
+    for (int x = 0; x < 24; ++x)
+        for (int y = 0; y < 4; ++y)
+            for (int z = 0; z < 3; ++z)
+                if (!(x == 12 && y == 1 && z == 1))
+                    (void)object.set_voxel({x, y, z}, 1);
+    const auto expected = build_merged_object_box_proxy(object);
+    std::vector<VoxelBox> actual{{{91, 91, 91}, {92, 92, 92}}};
+    std::vector<std::size_t> updates;
+    const bool completed = build_merged_object_box_proxy_progress(object, actual,
+        [&](std::size_t done, std::size_t total) {
+            CHECK(total == object.bricks().size());
+            if (!updates.empty()) CHECK(done >= updates.back());
+            updates.push_back(done);
+            return true;
+        });
+    CHECK(completed);
+    CHECK(actual == expected);
+    CHECK(validate_box_proxy(object, actual));
+    CHECK(updates.size() >= object.bricks().size());
+    CHECK(updates.back() == object.bricks().size());
+    const auto good = actual;
+    std::size_t callbacks = 0;
+    const bool cancelled = build_merged_object_box_proxy_progress(object, actual,
+        [&](std::size_t done, std::size_t) {
+            ++callbacks;
+            return done < 2U;
+        });
+    CHECK(!cancelled);
+    CHECK(callbacks >= 3U);
+    CHECK(actual == good); // no partial collision publication on cancellation
+}
+
 void test_work_debt_governor() {
     using namespace dve;
     WorkDebtGovernor governor(64);
@@ -1133,6 +1170,7 @@ int main() {
         test_damage_workspace_growth_telemetry();
         test_stale_split_rejected();
         test_box_collision_proxy();
+        test_collision_proxy_progress_and_cancel();
         test_fragment_mass_properties_and_solver_package();
         test_rigid_body_validation_and_split_velocity();
         test_rigid_body_adapter();

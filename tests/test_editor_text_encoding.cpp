@@ -85,6 +85,38 @@ void test_font_without_glyph() {
     require(utf8_to_single_byte_font_text("\u00E9", asciiOnly) == "?", "unmapped Latin-1 letter becomes ?");
 }
 
+void test_keysym_text() {
+    require(utf8_from_keysym(0x61UL) == "a" && utf8_from_keysym(0x41UL) == "A", "ASCII keysyms");
+    require(utf8_from_keysym(0xE9UL) == "\xC3\xA9", "eacute (Latin-1 keysym) is U+00E9");
+    require(utf8_from_keysym(0xFCUL) == "\xC3\xBC", "udiaeresis is U+00FC");
+    require(utf8_from_keysym(0x01000416UL) == "\xD0\x96", "Unicode keysym U+0416");
+    require(utf8_from_keysym(0x010020ACUL) == "\xE2\x82\xAC", "Unicode keysym U+20AC");
+    require(utf8_from_keysym(0x0100F600UL).empty() == false, "private-use code point is still text");
+    require(utf8_from_keysym(0xFFB5UL) == "5" && utf8_from_keysym(0xFFAEUL) == ".", "keypad digits and point");
+    for (const unsigned long keysym : {0xFF0DUL /* Return */, 0xFF08UL /* BackSpace */, 0xFFE1UL /* Shift_L */,
+                                       0xFF51UL /* Left */, 0xFFBEUL /* F1 */, 0x0UL, 0x1FUL, 0x7FUL, 0x80UL, 0x9FUL})
+        require(utf8_from_keysym(keysym).empty(), "non-text keysym types nothing");
+    require(utf8_from_keysym(0x01000000UL + 0xD800UL).empty(), "surrogate keysym types nothing");
+    require(utf8_from_keysym(0x01110000UL).empty(), "beyond U+10FFFF types nothing");
+
+    std::string text;
+    require(append_utf8_code_point(text, U'a') && append_utf8_code_point(text, U'\u00E9') &&
+            append_utf8_code_point(text, U'\u20AC') && append_utf8_code_point(text, U'\U0001F600'),
+            "append 1..4 byte code points");
+    require(text == "a\xC3\xA9\xE2\x82\xAC\xF0\x9F\x98\x80", "encoded bytes");
+    require(!append_utf8_code_point(text, 0xD800U) && !append_utf8_code_point(text, 0x110000U) &&
+            text.size() == 10U, "invalid code points append nothing");
+    std::size_t offset = 0;
+    require(decode_utf8_code_point(text, offset) == U'a' && decode_utf8_code_point(text, offset) == U'\u00E9' &&
+            decode_utf8_code_point(text, offset) == U'\u20AC' && decode_utf8_code_point(text, offset) == U'\U0001F600' &&
+            offset == text.size(), "round trip");
+
+    require(is_printable_utf8("Tube-A \xC3\xA9 \xC3\xBC <b>"), "mixed ASCII and accents are printable");
+    require(!is_printable_utf8("") && !is_printable_utf8("\n") && !is_printable_utf8("a\tb") && !is_printable_utf8("\x7F") &&
+            !is_printable_utf8("\xC2\x85") && !is_printable_utf8("\xC3") && !is_printable_utf8("\xEF\xBF\xBD"),
+            "controls, DEL, C1, truncated and replacement characters are not text");
+}
+
 void test_canvas_measure_and_draw() {
     FixedLatin1Canvas canvas;
     require(canvas.text_width("15.0\u00B0") == 5 * FixedLatin1Canvas::kCell, "\"15.0°\" measures as 5 glyphs");
@@ -106,6 +138,7 @@ int main() {
         test_decode();
         test_latin1_font();
         test_font_without_glyph();
+        test_keysym_text();
         test_canvas_measure_and_draw();
     } catch (const std::exception& error) {
         std::cerr << "FAILED: " << error.what() << '\n';

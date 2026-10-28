@@ -159,6 +159,7 @@ enum class EditorLogLevel : std::uint8_t { Info, Warning, Error };
 struct EditorLogEntry {
     EditorLogLevel level{EditorLogLevel::Info};
     std::string text;
+    std::size_t repeats{1};  // consecutive identical messages collapsed into this entry
 };
 
 // Backs the Console panel. Status messages (NativeEditorController::set_status) are
@@ -169,6 +170,9 @@ struct EditorLogEntry {
 class EditorLogStore {
 public:
     explicit EditorLogStore(std::size_t capacity = 200) : capacity_(capacity) {}
+    // A message identical to the previous one (same level and text) is not appended again: that
+    // entry's `repeats` goes up, so a status that is re-announced every frame or click ("1 polygon
+    // triangle faces selected") does not push everything else out of the Console.
     void add(EditorLogLevel level, std::string text);
     void clear() noexcept { entries_.clear(); }
     [[nodiscard]] const std::deque<EditorLogEntry>& entries() const noexcept { return entries_; }

@@ -16,6 +16,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <clocale>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -350,6 +351,13 @@ PointerButton map_button(unsigned button) {
     return PointerButton::NoButton;
 }
 
+// Shift, Ctrl and Alt of an X11 event state as the controller's pointer modifier bits. The pointer
+// handlers used to forward only Shift, which made Alt+drag (orbit) and Ctrl+click (deselect) act
+// as plain drags and clicks; the wheel path already forwarded all three.
+std::uint32_t pointer_modifiers(unsigned int state) {
+    return pointer_modifier_mask((state & ShiftMask) != 0U, (state & ControlMask) != 0U, (state & Mod1Mask) != 0U);
+}
+
 std::string key_name(KeySym symbol) {
     if (symbol == XK_Escape) return "escape";
     if (symbol == XK_Tab || symbol == XK_ISO_Left_Tab) return "tab";
@@ -592,6 +600,12 @@ int main(int argc, char** argv) {
                 throw std::runtime_error(accessibilityError);
         }
 
+        // Typed text: the locale and an input method (when the session has one) turn key presses into
+        // UTF-8, including accented letters, dead keys and compose sequences. Without one the keysym
+        // of the press is converted instead, which still types accented and non-Latin letters that
+        // have a key (or that xdotool maps onto one).
+        std::setlocale(LC_CTYPE, "");
+        if (XSupportsLocale()) XSetLocaleModifiers("");
         Display* display = XOpenDisplay(nullptr);
         if (!display) throw std::runtime_error("could not open X11 display");
         const int screen = DefaultScreen(display);
@@ -601,8 +615,25 @@ int main(int argc, char** argv) {
                                             static_cast<unsigned>(initialWidth), static_cast<unsigned>(initialHeight), 0,
                                             BlackPixel(display, screen), BlackPixel(display, screen));
         XStoreName(display, window, "DVE Native Editor v2.22");
+        {
+            // The editor lays out for at least 640x480 (the controller and the ConfigureNotify clamp
+            // below). Ask the window manager not to shrink the window under that, or the panels
+            // overlap and the toolbar is cut off.
+            XSizeHints hints{};
+            hints.flags = PMinSize;
+            hints.min_width = 640;
+            hints.min_height = 480;
+            XSetWMNormalHints(display, window, &hints);
+        }
         XSelectInput(display, window, ExposureMask | StructureNotifyMask | KeyPressMask | KeyReleaseMask |
-                                      ButtonPressMask | ButtonReleaseMask | PointerMotionMask);
+                                      ButtonPressMask | ButtonReleaseMask | PointerMotionMask | FocusChangeMask);
+        XIM inputMethod = XSupportsLocale() ? XOpenIM(display, nullptr, nullptr, nullptr) : nullptr;
+        XIC inputContext = nullptr;
+        if (inputMethod) {
+            inputContext = XCreateIC(inputMethod, XNInputStyle, XIMPreeditNothing | XIMStatusNothing,
+                                     XNClientWindow, window, XNFocusWindow, window, nullptr);
+            if (!inputContext) { XCloseIM(inputMethod); inputMethod = nullptr; }
+        }
         Atom wmDelete = XInternAtom(display, "WM_DELETE_WINDOW", False);
         XSetWMProtocols(display, window, &wmDelete, 1);
         XMapWindow(display, window);
@@ -616,6 +647,9 @@ int main(int argc, char** argv) {
 #if DVE_HAVE_XFT
         XftDraw* xftDraw = XftDrawCreate(display, backBuffer, visual, DefaultColormap(display, screen));
 #endif
+        // This host sends every printable key press as key_down() and as text_input(); the controller
+        // must not type the key twice (the Command Center did: "exact" became "eexxaacctt").
+        controller.set_host_supplies_text_input(true);
         bool running = true;
         bool screenshotWritten = false;
         int frames = 0;
@@ -625,7 +659,14 @@ int main(int argc, char** argv) {
             while (XPending(display)) {
                 XEvent event{};
                 XNextEvent(display, &event);
+                if (XFilterEvent(&event, 0)) continue;  // consumed by the input method (dead key, compose)
                 switch (event.type) {
+                    case FocusIn:
+                        if (inputContext) XSetICFocus(inputContext);
+                        break;
+                    case FocusOut:
+                        if (inputContext) XUnsetICFocus(inputContext);
+                        break;
                     case ClientMessage:
                         if (static_cast<Atom>(event.xclient.data.l[0]) == wmDelete) controller.request_quit();
                         break;
@@ -643,24 +684,21 @@ int main(int argc, char** argv) {
                         break;
                     case MotionNotify:
                         controller.pointer_move(logical(event.xmotion.x), logical(event.xmotion.y),
-                                                (event.xmotion.state & ShiftMask) ? 1U : 0U);
+                                                pointer_modifiers(event.xmotion.state));
                         break;
                     case ButtonPress:
                         if (event.xbutton.button == Button4 || event.xbutton.button == Button5) {
-                            std::uint32_t wheelModifiers = 0U;
-                            if ((event.xbutton.state & ShiftMask) != 0U) wheelModifiers |= 1U;
-                            if ((event.xbutton.state & ControlMask) != 0U) wheelModifiers |= 2U;
-                            if ((event.xbutton.state & Mod1Mask) != 0U) wheelModifiers |= 4U;
                             controller.pointer_wheel(event.xbutton.button == Button4 ? 1.0F : -1.0F,
-                                                     logical(event.xbutton.x), logical(event.xbutton.y), wheelModifiers);
+                                                     logical(event.xbutton.x), logical(event.xbutton.y),
+                                                     pointer_modifiers(event.xbutton.state));
                         } else {
                             controller.pointer_down(map_button(event.xbutton.button), logical(event.xbutton.x), logical(event.xbutton.y),
-                                                    (event.xbutton.state & ShiftMask) ? 1U : 0U);
+                                                    pointer_modifiers(event.xbutton.state));
                         }
                         break;
                     case ButtonRelease:
                         controller.pointer_up(map_button(event.xbutton.button), logical(event.xbutton.x), logical(event.xbutton.y),
-                                              (event.xbutton.state & ShiftMask) ? 1U : 0U);
+                                              pointer_modifiers(event.xbutton.state));
                         break;
                     case KeyRelease: {
                         KeySym symbol = XLookupKeysym(&event.xkey, 0);
@@ -671,9 +709,21 @@ int main(int argc, char** argv) {
                         break;
                     }
                     case KeyPress: {
-                        char typedBuffer[8] = {};
                         KeySym symbol{};
-                        const int typedLength = XLookupString(&event.xkey, typedBuffer, sizeof(typedBuffer) - 1, &symbol, nullptr);
+                        std::string typed;
+                        if (inputContext) {
+                            char buffer[64] = {};
+                            Status status = 0;
+                            const int length = Xutf8LookupString(inputContext, &event.xkey, buffer, static_cast<int>(sizeof buffer) - 1,
+                                                                 &symbol, &status);
+                            if ((status == XLookupChars || status == XLookupBoth) && length > 0)
+                                typed.assign(buffer, static_cast<std::size_t>(length));
+                            else if (status == XLookupKeySym) typed = utf8_from_keysym(symbol);
+                        } else {
+                            char buffer[16] = {};
+                            (void)XLookupString(&event.xkey, buffer, static_cast<int>(sizeof buffer) - 1, &symbol, nullptr);
+                            typed = utf8_from_keysym(symbol);
+                        }
                         // Ctrl+= / Ctrl+- / Ctrl+0 (UI zoom) are handled inside key_down and
                         // update the shared `editor.ui_scale` setting; sync_zoom picks it up below.
                         controller.key_down(key_name(symbol),
@@ -685,10 +735,8 @@ int main(int argc, char** argv) {
                         // so renaming an object or typing a filter string preserves case rather
                         // than forcing everything to lowercase the way command-palette search
                         // input does (where case does not matter).
-                        if (typedLength == 1 && !(event.xkey.state & ControlMask) && !(event.xkey.state & Mod1Mask) &&
-                            std::isprint(static_cast<unsigned char>(typedBuffer[0]))) {
-                            controller.text_input(typedBuffer[0]);
-                        }
+                        if (!(event.xkey.state & ControlMask) && !(event.xkey.state & Mod1Mask) && is_printable_utf8(typed))
+                            controller.text_input(typed);
                         if (symbol == XK_q && (event.xkey.state & ControlMask)) controller.request_quit();
                         break;
                     }
@@ -749,6 +797,8 @@ int main(int argc, char** argv) {
         XftDrawDestroy(xftDraw);
 #endif
         fontCache.release();
+        if (inputContext) XDestroyIC(inputContext);
+        if (inputMethod) XCloseIM(inputMethod);
         XFreePixmap(display, backBuffer);
         if (font) XFreeFont(display, font);
         XFreeGC(display, gc);

@@ -24,6 +24,19 @@ inline constexpr char32_t kUtf8ReplacementCodePoint = U'\uFFFD';
 // one byte so decoding always makes progress.
 [[nodiscard]] char32_t decode_utf8_code_point(std::string_view value, std::size_t& offset) noexcept;
 
+// Appends `codePoint` as UTF-8. Surrogates and values above U+10FFFF append nothing and return false.
+bool append_utf8_code_point(std::string& out, char32_t codePoint);
+
+// UTF-8 for the character a key press types, from an X11 keysym (Latin-1 keysyms are their own
+// code point, 0x01000000 + U+XXXX keysyms carry a Unicode value, KP_0..KP_9 and a few keypad
+// symbols are ASCII). Empty for keysyms that type nothing (modifiers, arrows, function keys) and
+// for control characters.
+[[nodiscard]] std::string utf8_from_keysym(unsigned long keysym);
+
+// True when `text` is well-formed UTF-8 made only of printable code points (no C0/C1 controls,
+// no DEL, no U+FFFE/U+FFFF, no surrogates). The hosts only forward such text to text_input().
+[[nodiscard]] bool is_printable_utf8(std::string_view text) noexcept;
+
 // Number of code points (glyphs, for the editor's fixed-pitch fonts) in a UTF-8 string.
 [[nodiscard]] std::size_t utf8_code_point_count(std::string_view value) noexcept;
 

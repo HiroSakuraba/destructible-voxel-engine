@@ -954,7 +954,11 @@ std::vector<CommandPaletteResult> NativeEditorController::build_command_palette_
     const auto commandResult = [&](const MenuAction& action, int score) {
         const std::string breadcrumb = action.menu +
             (action.section.empty() ? std::string{} : " > " + action.section);
-        append(score + (action.enabled ? 0 : 500),
+        // An unavailable command sinks below the available ones when browsing (empty query), but not
+        // below unrelated fuzzy hits when it was searched for by name: "cope tube" must find the
+        // greyed-out Cope command (with its reason) ahead of "Create Subdivision Plane", whose letters
+        // merely occur in order. Enter on a greyed-out result never runs anything.
+        append(score + (action.enabled ? 0 : (query.empty() ? 500 : 30)),
                {CommandPaletteResultKind::Command, action.id, action.label, breadcrumb,
                 action.description, action.shortcut, action.disabledReason, action.enabled,
                 favoriteCommandIds_.contains(action.id)});
@@ -1240,14 +1244,24 @@ void NativeEditorController::record_command_use(std::string_view actionId) {
 
 bool NativeEditorController::activate_command_palette_selection() {
     const auto results = command_palette_results(64);
-    if (results.empty()) return false;
+    if (results.empty()) {
+        // Nothing to run: say so inside the palette (the status bar is hidden behind it) and keep it
+        // open so the query can be corrected; nothing the user typed next is a viewport shortcut.
+        commandPaletteMessage_ = "Nothing matches this search, so nothing was run";
+        set_status(commandPaletteMessage_, true, 6.0F);
+        return false;
+    }
     const std::size_t index = std::min(commandPaletteSelection_, results.size() - 1U);
     const CommandPaletteResult selected = results[index];
     if (!selected.enabled) {
-        set_status(selected.disabledReason.empty() ? "That command is not available in the current context"
-                                                   : selected.disabledReason, true, 6.0F);
+        // An unavailable command never runs, and Enter never falls through to another result.
+        const std::string reason = selected.disabledReason.empty() ? "That command is not available in the current context"
+                                                                   : selected.disabledReason;
+        commandPaletteMessage_ = selected.label + " is unavailable: " + reason;
+        set_status(reason, true, 6.0F);
         return false;
     }
+    commandPaletteMessage_.clear();
     commandPaletteOpen_ = false;
     commandPaletteQuery_.clear();
     commandPaletteSelection_ = 0U;
@@ -2556,6 +2570,18 @@ bool NativeEditorController::dispatch_shortcut_gesture(const ShortcutGesture& ge
 }
 
 
+std::uint64_t NativeEditorController::scene_object_signature() const noexcept {
+    std::uint64_t hash = 1469598103934665603ULL;
+    const auto mix = [&hash](std::uint64_t value) { hash = (hash ^ value) * 1099511628211ULL; };
+    const auto& objects = workspace_.document().objects();
+    mix(objects.size());
+    for (const auto& [id, object] : objects) {
+        mix(id);
+        mix(object.parent ? *object.parent + 1U : 0U);
+    }
+    return hash;
+}
+
 void NativeEditorController::resize(int width, int height) {
     width_ = std::max(640, width);
     height_ = std::max(480, height);
@@ -2563,6 +2589,7 @@ void NativeEditorController::resize(int width, int height) {
 }
 
 void NativeEditorController::recompute_layout() {
+    layoutObjectSignature_ = scene_object_signature();
     const float scale = kLogicalLayoutScale;
     const int menuHeight = static_cast<int>(28.0F * scale);
     const int toolbarHeight = static_cast<int>(40.0F * scale);
@@ -2960,6 +2987,9 @@ void NativeEditorController::update(float elapsedSeconds) {
     poll_nurbs_tessellation();
     autosave_tick(elapsedSeconds);
     poll_long_job();
+    // An object added or removed by a route that did not re-lay out the panels (Create > Polygon Cube
+    // did not) must still get its Hierarchy row now, not after the next unrelated operation.
+    if (layoutObjectSignature_ != scene_object_signature()) recompute_layout();
     poll_cad_descriptions();
     voxel_boolean_tick();
     prune_voxel_selection();
@@ -3166,8 +3196,13 @@ double NativeEditorController::idle_update_seconds() const noexcept {
 }
 
 void NativeEditorController::set_status(std::string text, bool error, float seconds) {
-    status_ = {std::move(text), error, seconds};
+    status_ = {std::move(text), error, seconds, false};
     workspace_.log().add(error ? EditorLogLevel::Error : EditorLogLevel::Info, status_.text);
+}
+
+void NativeEditorController::set_status_warning(std::string text, float seconds) {
+    status_ = {std::move(text), false, seconds, true};
+    workspace_.log().add(EditorLogLevel::Warning, status_.text);
 }
 
 std::string_view NativeEditorController::pending_confirmation_message() const noexcept {
@@ -3758,6 +3793,7 @@ void NativeEditorController::text_input(std::string_view text) {
     }
     if (commandPaletteOpen_ && !text.empty()) {
         commandPaletteQuery_.append(text);
+        commandPaletteMessage_.clear();
         commandPaletteSelection_ = 0U;
         return;
     }
@@ -3769,6 +3805,7 @@ void NativeEditorController::text_input(std::string_view text) {
         textEdit_.replaceOnNextInput = false;
     }
     textEdit_.buffer.append(text);
+    textEdit_.error.clear();  // a refused value is being corrected
     if (textEdit_.kind == TextEditKind::HierarchyFilter) {
         hierarchyFilter_ = textEdit_.buffer;
         hierarchyScroll_ = 0;
@@ -5693,7 +5730,13 @@ void NativeEditorController::pointer_wheel(float steps, int x, int y, std::uint3
     if (!layout_.viewport.contains(x, y)) return;
     const ShortcutGesture gesture = wheel_shortcut(steps > 0.0F, (modifiers & 2U) != 0U,
                                                     (modifiers & 1U) != 0U, (modifiers & 4U) != 0U);
-    if (dispatch_shortcut_gesture(gesture)) return;
+    // A wheel over the 3D view is a view gesture whichever panel last took keyboard focus: after a
+    // click in the Hierarchy the viewport shortcut contexts were inactive and the wheel did nothing
+    // until the viewport was clicked. The keyboard focus itself is left where it was.
+    const EditorFocusRegion keyboardFocus = focusRegion_;
+    focusRegion_ = EditorFocusRegion::Viewport;
+    (void)dispatch_shortcut_gesture(gesture);
+    focusRegion_ = keyboardFocus;
 }
 
 const EditorToolInfo& editor_tool_info(EditorToolId tool) noexcept {
@@ -6379,7 +6422,7 @@ void NativeEditorController::finish_placement(bool cancel) {
     placementMode_ = PlacementTarget::NoTarget;
 }
 
-std::vector<GizmoScreenAxis> NativeEditorController::gizmo_axes() const {
+std::vector<GizmoScreenAxis> NativeEditorController::gizmo_axes(bool followDrag) const {
     if(nurbs_control_mode()&&nurbsSelected_.empty())return {};
     std::vector<GizmoScreenAxis> axes;
     if (voxelSlice_.active() || (selectionDomain_==SelectionDomain::Polygons && polygonSelection_.components.empty())) return axes;
@@ -6397,7 +6440,11 @@ std::vector<GizmoScreenAxis> NativeEditorController::gizmo_axes() const {
     if ((activeTool_ != EditorToolId::Translate && activeTool_ != EditorToolId::Rotate &&
          activeTool_ != EditorToolId::Scale) ||
         workspace_.selected_objects().empty()) return axes;
-    const Float3 origin = gizmoDragging_ ? gizmoPivot_ : selection_pivot();
+    // The drag maths measures against the axis at the drag start (gizmoPivot_); what is drawn follows
+    // the selection during a Move drag, so the handles stay on the object instead of lagging behind.
+    const bool followSelection = followDrag && activeTool_ == EditorToolId::Translate &&
+                                 !polygonDragBefore_ && !nurbsDragBefore_;
+    const Float3 origin = gizmoDragging_ && !followSelection ? gizmoPivot_ : selection_pivot();
     const float distance = std::max(0.5F, length(subtract(camera_.position, origin)) * 0.12F);
     for (int axis = 1; axis <= 3; ++axis) {
         const ScreenPoint start = project_world_to_screen(camera_, layout_.viewport, origin);
@@ -7814,6 +7861,7 @@ camera_menu_dispatch_complete:
         selectionDomain_ = SelectionDomain::Objects;
         workspace_.commands().set_last_selection_transition(before, capture_selection_snapshot());
         frame_selection();
+        recompute_layout();  // list the new object in the Hierarchy now
         refresh_menu_state();
         set_status(plane ? "Created a polygon plane" : "Created a polygon cube");
         return true;
@@ -7955,9 +8003,10 @@ camera_menu_dispatch_complete:
     if (actionId == "help.command_palette") {
         commandPaletteOpen_ = true;
         commandPaletteQuery_.clear();
+        commandPaletteMessage_.clear();
         commandPaletteSelection_ = 0U;
         close_top_level_menu();
-        set_status("Type to search commands; Enter runs the first result", false, 6.0F);
+        set_status("Type to search commands; Enter runs the highlighted result", false, 6.0F);
         return true;
     }
     if (actionId == "help.shortcuts") {
@@ -9163,6 +9212,7 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
                        (static_cast<unsigned char>(textEdit_.buffer[erase]) & 0xC0U) == 0x80U) --erase;
                 textEdit_.buffer.erase(erase);
             }
+            textEdit_.error.clear();
             if (textEdit_.kind == TextEditKind::HierarchyFilter) {
                 hierarchyFilter_ = textEdit_.buffer;
                 hierarchyScroll_ = 0;
@@ -9187,10 +9237,13 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
         if (normalized == "escape") {
             commandPaletteOpen_ = false;
             commandPaletteQuery_.clear();
+            commandPaletteMessage_.clear();
             commandPaletteSelection_ = 0U;
             return;
         }
         const auto results = command_palette_results(64);
+        if (normalized == "up" || normalized == "down" || normalized == "home" || normalized == "end")
+            commandPaletteMessage_.clear();  // it described the previously highlighted result
         if (normalized == "up") {
             if (!results.empty()) commandPaletteSelection_ =
                 commandPaletteSelection_ == 0U ? results.size() - 1U : commandPaletteSelection_ - 1U;
@@ -9207,7 +9260,13 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
             return;
         }
         if (normalized == "backspace") {
-            if (!commandPaletteQuery_.empty()) commandPaletteQuery_.pop_back();
+            // Remove a whole character: the query can hold UTF-8 typed through text_input().
+            while (!commandPaletteQuery_.empty()) {
+                const bool continuation = (static_cast<unsigned char>(commandPaletteQuery_.back()) & 0xC0U) == 0x80U;
+                commandPaletteQuery_.pop_back();
+                if (!continuation) break;
+            }
+            commandPaletteMessage_.clear();
             commandPaletteSelection_ = 0U;
             return;
         }
@@ -9225,14 +9284,19 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
             }
             return;
         }
-        // Native hosts normally supply printable text through text_input(), but accepting a
-        // one-character key here keeps headless hosts and tests usable without duplicate text.
+        // Native hosts supply printable text through text_input() and say so with
+        // set_host_supplies_text_input(): their key press is both a key_down() and a text_input(),
+        // and typing it here too doubled every character ("exact" became "eexxaacctt"). Headless
+        // callers that only send key_down() still type here.
+        if (hostSuppliesTextInput_) return;
         if (!control && !alt && normalized.size() == 1U &&
             std::isprint(static_cast<unsigned char>(normalized.front()))) {
             commandPaletteQuery_.push_back(normalized.front());
+            commandPaletteMessage_.clear();
             commandPaletteSelection_ = 0U;
         } else if (!control && !alt && normalized == "space") {
             commandPaletteQuery_.push_back(' ');
+            commandPaletteMessage_.clear();
             commandPaletteSelection_ = 0U;
         }
         return;
@@ -9696,7 +9760,12 @@ bool NativeEditorController::set_number_field(NumberFieldId field, int axis, std
                 if (!parsed.ok) { set_status(std::string("Scale ") + axis_name(a) + ": " + parsed.error, true); return false; }
                 const double spacing = parsed.value * object->voxelSizeMeters;
                 if (!(parsed.value > 0.0) || !(spacing >= 0.001 && spacing <= 10.0)) {
-                    set_status(std::string("Scale ") + axis_name(a) + ": a cell must stay between 1 mm and 10 m (scale above 0)", true);
+                    // Say the allowed factors; "a cell must stay..." made no sense for a polygon object,
+                    // which has no cells (its unit size is the same 0.1 m default).
+                    char range[112]{};
+                    std::snprintf(range, sizeof range, " must be between %g and %g (a unit stays between 1 mm and 10 m)",
+                                  0.001 / static_cast<double>(object->voxelSizeMeters), 10.0 / static_cast<double>(object->voxelSizeMeters));
+                    set_status(std::string("Scale ") + axis_name(a) + range, true);
                     return false;
                 }
                 axis_of(scale, a) = static_cast<float>(parsed.value);
@@ -10590,6 +10659,17 @@ const std::vector<EditorVoxelDrawItem>& NativeEditorController::draw_items() con
     const auto poses = playSession_.presentation_transforms();
     return drawListCache_.get(workspace_.document(), materials_, camera_, layout_.viewport, viewportSettings_,
                               workspace_.selected_objects(), editor_scene_render_fingerprint(workspace_.document()), &poses);
+}
+
+std::vector<EditorPolygonDrawTriangle> NativeEditorController::camera_preview_polygon_items(
+    const EditorCamera& previewCamera, UiRect previewRect) const {
+    const auto poses = playSession_.presentation_transforms();
+    // No selection highlight in the preview: it shows the shot, not the editing state.
+    auto items = build_editor_polygon_draw_list(workspace_.document(), previewCamera, previewRect, {},
+                                                viewportSettings_.isolatedObjects, 25000, &poses);
+    const auto hidden = mesh_authoring_hidden_objects();
+    std::erase_if(items, [&](const auto& item) { return hidden.contains(item.object); });
+    return items;
 }
 
 const std::vector<EditorVoxelDrawItem>& NativeEditorController::camera_preview_draw_items(

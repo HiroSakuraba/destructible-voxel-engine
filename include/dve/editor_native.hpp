@@ -253,6 +253,11 @@ struct DuplicatePanelLayout {
     if ((modifiers & 1U) != 0U) return SelectionOperation::Add;
     return SelectionOperation::Replace;
 }
+// Pointer modifier bits as the controller reads them: 1 Shift, 2 Ctrl, 4 Alt. Hosts build the
+// mask with this so no host drops a key the navigation, selection and gizmo code looks at.
+[[nodiscard]] constexpr std::uint32_t pointer_modifier_mask(bool shift, bool control, bool alt) noexcept {
+    return (shift ? 1U : 0U) | (control ? 2U : 0U) | (alt ? 4U : 0U);
+}
 enum class InspectorFlagState : std::uint8_t { Off, On, Mixed };
 struct InspectorSelectionSummary {
     std::size_t count{};
@@ -560,6 +565,7 @@ struct EditorStatusMessage {
     std::string text;
     bool error{};
     float secondsRemaining{};
+    bool warning{};  // succeeded, with something the user should read (drawn amber, not red)
 };
 
 struct GizmoScreenAxis {
@@ -697,6 +703,14 @@ public:
     [[nodiscard]] const EditorAutosaveStatus& autosave_status() const noexcept { return autosaveStatus_; }
     [[nodiscard]] bool command_palette_open() const noexcept { return commandPaletteOpen_; }
     [[nodiscard]] std::string_view command_palette_query() const noexcept { return commandPaletteQuery_; }
+    // Why Enter did nothing (the selected command is unavailable, or nothing matched); shown in
+    // the palette itself because the status bar is hidden behind it. Cleared by the next edit.
+    [[nodiscard]] std::string_view command_palette_message() const noexcept { return commandPaletteMessage_; }
+    // A host that delivers typed characters through text_input() (the X11 and SDL hosts do)
+    // sets this, so key_down() does not also type the same key into the command palette. Headless
+    // callers that only call key_down() keep the older behaviour.
+    void set_host_supplies_text_input(bool value) noexcept { hostSuppliesTextInput_ = value; }
+    [[nodiscard]] bool host_supplies_text_input() const noexcept { return hostSuppliesTextInput_; }
     [[nodiscard]] std::vector<MenuAction> menu_actions(std::string_view menuName) const;
     [[nodiscard]] bool show_advanced_menus() const noexcept { return showAdvancedMenus_; }
     [[nodiscard]] bool command_is_favorite(std::string_view actionId) const noexcept {
@@ -856,9 +870,12 @@ public:
     // runs brepkernel as a background job and makes ONE undo step (a new object; operands unchanged).
     bool start_exact_tube(const TubeSpec& spec, EditorObjectId resizeSource = 0);
     bool start_exact_edge_fillet(const ExactEdgeFilletRequest& request);
-    bool start_exact_cope(EditorObjectId a, EditorObjectId b, const ExactCopeOptions& options);
+    // When `refusal` is given, a request the kernel layer refuses before any job starts (a gap on a
+    // stretched tube, a plane that misses the tube) is returned there instead of being reported,
+    // so the typed prompt can stay open with the reason.
+    bool start_exact_cope(EditorObjectId a, EditorObjectId b, const ExactCopeOptions& options, std::string* refusal = nullptr);
     bool start_exact_cope_solid(EditorObjectId a, EditorObjectId b);
-    bool start_exact_miter(EditorObjectId a, const ExactMiterSpec& spec);
+    bool start_exact_miter(EditorObjectId a, const ExactMiterSpec& spec, std::string* refusal = nullptr);
     // "Round tube Ø50.8 x 3 mm wall, 600 mm long, along Y; 2 cuts" for a tube object, empty otherwise.
     [[nodiscard]] std::string exact_tube_summary(EditorObjectId id) const;
     // Why `polygon.create_exact_tube` / `mesh.exact_cope` / `mesh.exact_miter` cannot run now ("" = they can).
@@ -1144,6 +1161,9 @@ public:
     bool import_exact_cad_model(const std::filesystem::path&);
     [[nodiscard]] std::size_t draw_item_count() const { return draw_items().size(); }
     // Cached draw list for the selected camera rig's picture-in-picture preview.
+    // Polygon objects (cubes, planes, CAD tubes) as seen from a camera rig, for its preview window.
+    [[nodiscard]] std::vector<EditorPolygonDrawTriangle> camera_preview_polygon_items(
+        const EditorCamera& previewCamera, UiRect previewRect) const;
     [[nodiscard]] const std::vector<EditorVoxelDrawItem>& camera_preview_draw_items(
         const EditorCamera& previewCamera, UiRect previewRect,
         const EditorViewportSettings& previewSettings) const;
@@ -1388,7 +1408,9 @@ public:
     [[nodiscard]] std::vector<GizmoScreenRing> voxel_slice_rotate_handles() const;
     [[nodiscard]] bool voxel_slice_snap() const noexcept { return sliceSnap_; }
     [[nodiscard]] int voxel_slice_drag_handle() const noexcept { return sliceDrag_; }
-    [[nodiscard]] std::vector<GizmoScreenAxis> gizmo_axes() const;
+    // `followDrag`: while a Move drag is running, place the handles on the selection as it moves
+    // instead of at the drag start (what the viewport draws; the drag maths keeps the start).
+    [[nodiscard]] std::vector<GizmoScreenAxis> gizmo_axes(bool followDrag = false) const;
     // View-only isolation (View > Isolate Selection): toggles between showing only the
     // selection (with its children) and showing everything. Authored flags are untouched.
     bool toggle_isolation();
@@ -1414,6 +1436,8 @@ private:
     void navigate_pointer(float deltaX, float deltaY);
     void finish_gizmo_drag(bool cancel);
     void set_status(std::string text, bool error = false, float seconds = 3.0F);
+    // A success that carries a caveat to read: amber in the status bar and a Warning in the Console.
+    void set_status_warning(std::string text, float seconds = 8.0F);
     void create_new_project_now();
     void create_new_scene_now();
     [[nodiscard]] Float3 gizmo_axis_world(int axis) const noexcept;
@@ -1789,6 +1813,13 @@ private:
     std::size_t menuScrollOffset_{};
     bool commandPaletteOpen_{};
     std::string commandPaletteQuery_;
+    std::string commandPaletteMessage_;
+    // Which objects (and parents) the Hierarchy rows were laid out for; update() re-lays them out when
+    // an object appears or goes by a route that did not ask for it (a new polygon cube listed only after
+    // the next unrelated operation).
+    std::uint64_t layoutObjectSignature_{};
+    [[nodiscard]] std::uint64_t scene_object_signature() const noexcept;
+    bool hostSuppliesTextInput_{};
     std::size_t commandPaletteSelection_{};
     std::deque<std::string> recentCommandIds_;
     std::set<std::string, std::less<>> favoriteCommandIds_;

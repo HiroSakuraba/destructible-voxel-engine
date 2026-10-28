@@ -174,7 +174,9 @@ ExactGapParse parse_fit_up_gap(std::string_view text) {
     const auto value = parse_length(words[0]);
     if (!value) { out.error = "Cannot read '" + words[0] + "' as a length (mm by default; units mm, cm, m, in)"; return out; }
     if (!(*value >= 0.0)) { out.error = "The fit-up gap cannot be negative"; return out; }
-    out.meters = *value;
+    // The same limit prepare_exact_cope enforces, so the prompt can refuse it before it closes.
+    if (!(*value <= kMaxFitUpGapMeters)) { out.error = "The fit-up gap must be between 0 and 100 mm"; return out; }
+    out.meters = *value == 0.0 ? 0.0 : *value;  // "-0" is a zero gap, not a negative zero
     return out;
 }
 
@@ -377,7 +379,7 @@ ExactTubeCutRequest prepare_exact_cope(const std::filesystem::path& projectRoot,
     const auto tubeB = exact_tube_record(*objectB);
     if (!tubeB) return fail(objectB->name + " has no tube record: make it with Polygon > Create Exact Tube (it gives the outer body that is cut away)");
     out.tubeA = exact_tube_record(*objectA);
-    if (!(options.gapWorldMeters >= 0.0) || !std::isfinite(options.gapWorldMeters) || options.gapWorldMeters > 0.1)
+    if (!(options.gapWorldMeters >= 0.0) || !std::isfinite(options.gapWorldMeters) || options.gapWorldMeters > kMaxFitUpGapMeters)
         return fail("The fit-up gap must be between 0 and 100 mm");
     double gapMesh = 0.0;
     if (options.gapWorldMeters > 0.0) {
@@ -456,12 +458,21 @@ ExactMiterParse parse_miter_spec(std::string_view text) {
     const auto [end, ec] = std::from_chars(angle.data(), angle.data() + angle.size(), value);
     if (ec != std::errc{} || end != angle.data() + angle.size() || !std::isfinite(value)) { out.error = "Cannot read '" + words[0] + "' as an angle in degrees"; return out; }
     spec.angleDegrees = value;
+    // Each option once: "45 high low" used to keep whichever came last without saying so.
+    bool keepGiven = false, tiltGiven = false, positionGiven = false;
     for (std::size_t i = 1; i < words.size(); ++i) {
         const std::string w = lower_copy(words[i]);
-        if (w == "high" || w == "+") spec.keep = MiterKeep::High;
-        else if (w == "low" || w == "-") spec.keep = MiterKeep::Low;
-        else if (w == "u" || w == "v") spec.tilt = w[0];
-        else if (w == "at" && i + 1 < words.size()) {
+        if (w == "high" || w == "+" || w == "low" || w == "-") {
+            if (keepGiven) { out.error = "Give high or low once, not '" + words[i] + "' as well"; return out; }
+            keepGiven = true;
+            spec.keep = (w == "high" || w == "+") ? MiterKeep::High : MiterKeep::Low;
+        } else if (w == "u" || w == "v") {
+            if (tiltGiven) { out.error = "Give u or v once, not '" + words[i] + "' as well"; return out; }
+            tiltGiven = true;
+            spec.tilt = w[0];
+        } else if (w == "at" && i + 1 < words.size()) {
+            if (positionGiven) { out.error = "Give the position (at <mm>) once"; return out; }
+            positionGiven = true;
             const auto length = parse_length(words[++i]);
             if (!length) { out.error = "Cannot read '" + words[i] + "' as a position (mm from the tube centre)"; return out; }
             spec.positionWorldMeters = *length;
@@ -574,6 +585,8 @@ ExactTubeCutResult run_exact_tube_cut(const std::filesystem::path& projectRoot, 
         // with a tiny documented clearance; the result is certified for that geometry and says so.
         out.firstRefusal = out.boolean.edit.error;
         ExactBooleanRequest retry = request.boolean;
+        // The saved provenance records the automatic clearance too, not only the typed gap.
+        retry.origin += ":auto_clearance_mm=" + mm_text(request.tangentClearanceMeters * request.cutterScale);
         const double gap = request.gapMeters + request.tangentClearanceMeters;
         retry.primitiveB = tube_outer_primitive(*request.cutterTube, gap);
         auto second = run_exact_boolean(projectRoot, retry, settings, runner);

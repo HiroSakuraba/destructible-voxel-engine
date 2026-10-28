@@ -32,6 +32,13 @@ public:
 // empty string when not even the ellipsis fits.
 [[nodiscard]] std::string elide_text_to_width(const IEditorCanvas& canvas, std::string_view value, int maxWidth);
 
+// Splits `value` into lines no wider than maxWidth, breaking after a space or separator where one is
+// near the end of a line and on a UTF-8 code point boundary otherwise. At most `maxLines` lines are
+// returned; when the text does not fit in them the last line ends in the canvas ellipsis. Never
+// returns a line wider than maxWidth (a width too small for one glyph gives one elided line).
+[[nodiscard]] std::vector<std::string> wrap_text_to_width(const IEditorCanvas& canvas, std::string_view value,
+                                                          int maxWidth, std::size_t maxLines = 64U);
+
 // Glyph extent of editor text around its baseline, in logical pixels, for the 11 px UI font
 // (kUiBaseTextPixels; DejaVu Sans Mono ink reaches about 8.5 px above and 2.6 px below the
 // baseline). Canvases cannot clip glyphs, so clipping canvases use these to decide whether a

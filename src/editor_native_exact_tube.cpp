@@ -32,6 +32,23 @@ std::string mm_label(double metres) {
     return buffer;
 }
 
+// `base`, or `base #2`, `base #3` ... when an object of that name already exists, so repeated cuts of
+// the same tubes are told apart in the Hierarchy.
+std::string unique_object_name(const EditorDocument& document, const std::string& base) {
+    const auto taken = [&](const std::string& name) {
+        for (const auto& [id, object] : document.objects()) {
+            (void)id;
+            if (object.name == name) return true;
+        }
+        return false;
+    };
+    if (!taken(base)) return base;
+    for (int n = 2;; ++n) {
+        std::string candidate = base + " #" + std::to_string(n);
+        if (!taken(candidate)) return candidate;
+    }
+}
+
 bool tube_target_ok(const EditorObject& object) {
     return object.polygon && object.flags.visible && !object.flags.locked && !object.prefabLink;
 }
@@ -133,32 +150,43 @@ bool NativeEditorController::dispatch_exact_tube_action(std::string_view action)
     return false;
 }
 
+// Enter in one of the typed prompts. A value the prompt cannot use (unreadable, out of range, a gap
+// the tubes cannot take, a plane that misses the tube) keeps the prompt open with the reason under
+// it, so the value can be corrected; Esc cancels. Nothing typed afterwards can reach the viewport
+// shortcuts, because the open prompt owns the keyboard. Every message starts with the command name.
 bool NativeEditorController::commit_exact_tube_text() {
     const TextEditKind kind = textEdit_.kind;
     const std::string text = textEdit_.buffer;
     const EditorObjectId resizeSource = textEdit_.objectId;
-    textEdit_ = {};
+    const auto retry = [this](const std::string& message) {
+        textEdit_.error = message;
+        textEdit_.replaceOnNextInput = false;  // the typed text stays; editing continues from it
+        set_status(message, true, 8.0F);
+        return false;
+    };
     if (kind == TextEditKind::ExactTube) {
         const auto parsed = parse_tube_spec(text);
-        if (!parsed.spec) { set_status("Create Exact Tube: " + parsed.error, true, 8.0F); return false; }
+        if (!parsed.spec) return retry("Create Exact Tube: " + parsed.error);
+        textEdit_ = {};
         return start_exact_tube(*parsed.spec);
     }
     if (kind == TextEditKind::ExactFaceFillet) {
         std::istringstream input(text);std::string rtext,atext,btext,extra;
-        if (!(input>>rtext>>atext>>btext) || input>>extra) {set_status("Face fillet needs radius in local mm and two zero-based face numbers",true);return false;}
+        if (!(input>>rtext>>atext>>btext) || input>>extra) return retry("Face fillet needs radius in local mm and two zero-based face numbers");
         double radius{};int a{},b{};
         const auto [re,rec]=std::from_chars(rtext.data(),rtext.data()+rtext.size(),radius);
         const auto [ae,aec]=std::from_chars(atext.data(),atext.data()+atext.size(),a);
         const auto [be,bec]=std::from_chars(btext.data(),btext.data()+btext.size(),b);
         if (rec!=std::errc{} || re!=rtext.data()+rtext.size() || !std::isfinite(radius) ||
             aec!=std::errc{} || ae!=atext.data()+atext.size() || bec!=std::errc{} || be!=btext.data()+btext.size()) {
-            set_status("Face fillet needs a finite radius and integer face numbers",true);return false;
+            return retry("Face fillet needs a finite radius and integer face numbers");
         }
-        if (workspace_.selected_object()!=resizeSource || workspace_.selection_count()!=1) {set_status("Face fillet: select the original exact object again",true);return false;}
+        if (workspace_.selected_object()!=resizeSource || workspace_.selection_count()!=1) {textEdit_={};set_status("Face fillet: select the original exact object again",true);return false;}
         const auto* object=workspace_.document().find_object(resizeSource);
-        if (!object || !tube_target_ok(*object) || is_isolated_out(resizeSource)) {set_status("Face fillet: source is unavailable",true);return false;}
+        if (!object || !tube_target_ok(*object) || is_isolated_out(resizeSource)) {textEdit_={};set_status("Face fillet: source is unavailable",true);return false;}
         auto request=prepare_exact_face_fillet(projectRoot_,workspace_.document(),resizeSource,a,b,radius*0.001);
-        if (!request.error.empty()) {set_status(request.error,true,8.0F);return false;}
+        if (!request.error.empty()) return retry(request.error);
+        textEdit_={};
         return start_exact_edge_fillet(request);
     }
     if (kind == TextEditKind::ExactEdgeFillet || kind == TextEditKind::ExactVariableFillet) {
@@ -168,53 +196,68 @@ bool NativeEditorController::commit_exact_tube_text() {
         while (input >> token) {
             double value{}; const auto [end, ec] = std::from_chars(token.data(), token.data()+token.size(), value);
             if (ec != std::errc{} || end != token.data()+token.size() || !std::isfinite(value)) {
-                set_status("Edge fillet: enter plain finite numbers in mesh-local millimetres", true); return false;
+                return retry("Edge fillet: enter plain finite numbers in mesh-local millimetres");
             }
             numbers.push_back(value * 0.001);
         }
         if (numbers.size()!=expected) {
-            set_status(variable ? "Variable fillet needs two radii and six endpoint coordinates in mm" : "Edge fillet needs one radius and six endpoint coordinates in mm", true); return false;
+            return retry(variable ? "Variable fillet needs two radii and six endpoint coordinates in mm" : "Edge fillet needs one radius and six endpoint coordinates in mm");
         }
         if (workspace_.selected_object()!=resizeSource || workspace_.selection_count()!=1) {
-            set_status("Edge fillet: select the original exact object again", true);return false;
+            textEdit_={};set_status("Edge fillet: select the original exact object again", true);return false;
         }
         const auto* object=workspace_.document().find_object(resizeSource);
-        if (!object || !tube_target_ok(*object) || is_isolated_out(resizeSource)) {set_status("Edge fillet: source is unavailable",true);return false;}
+        if (!object || !tube_target_ok(*object) || is_isolated_out(resizeSource)) {textEdit_={};set_status("Edge fillet: source is unavailable",true);return false;}
         const std::size_t base=variable?2U:1U;
         auto request=prepare_exact_edge_fillet(projectRoot_,workspace_.document(),resizeSource,
             {numbers[base],numbers[base+1],numbers[base+2]}, {numbers[base+3],numbers[base+4],numbers[base+5]},
             numbers[0],variable?numbers[1]:numbers[0]);
-        if (!request.error.empty()) {set_status(request.error,true,8.0F);return false;}
+        if (!request.error.empty()) return retry(request.error);
+        textEdit_={};
         return start_exact_edge_fillet(request);
     }
     if (kind == TextEditKind::ExactTubeResize) {
         const auto parsed = parse_tube_spec(text);
-        if (!parsed.spec) { set_status("Resize Exact Tube: " + parsed.error, true, 8.0F); return false; }
+        if (!parsed.spec) return retry("Resize Exact Tube: " + parsed.error);
         if (workspace_.selected_object() != resizeSource || workspace_.selection_count() != 1) {
-            set_status("Resize Exact Tube: select the original stock tube again", true); return false;
+            textEdit_ = {}; set_status("Resize Exact Tube: select the original stock tube again", true); return false;
         }
-        if (const auto reason = exact_tube_disabled_reason("mesh.exact_resize_tube"); !reason.empty()) { set_status(reason, true); return false; }
+        if (const auto reason = exact_tube_disabled_reason("mesh.exact_resize_tube"); !reason.empty()) { textEdit_ = {}; set_status(reason, true); return false; }
+        textEdit_ = {};
         return start_exact_tube(*parsed.spec, resizeSource);
     }
     if (kind == TextEditKind::ExactCopeGap) {
         const auto gap = parse_fit_up_gap(text);
-        if (!gap.meters) { set_status("Cope: " + gap.error, true, 8.0F); return false; }
+        if (!gap.meters) return retry("Cope: " + gap.error);
         const auto selected = workspace_.selected_objects();
         const auto primary = workspace_.selected_object();
-        if (!primary || selected.size() != 2) { set_status("Cope: select two tubes (A active)", true); return false; }
+        if (!primary || selected.size() != 2) { textEdit_ = {}; set_status("Cope: select two tubes (A active)", true); return false; }
         EditorObjectId other = 0;
         for (const EditorObjectId id : selected) if (id != *primary) other = id;
         ExactCopeOptions options;
         options.gapWorldMeters = *gap.meters;
-        return start_exact_cope(*primary, other, options);
+        const TextEditState prompt = textEdit_;
+        textEdit_ = {};
+        std::string refusal;
+        if (start_exact_cope(*primary, other, options, &refusal)) return true;
+        if (refusal.empty()) return false;  // already reported (a job is running, Play is active, ...)
+        textEdit_ = prompt;
+        return retry("Cope: " + refusal);
     }
     if (kind == TextEditKind::ExactMiter) {
         const auto parsed = parse_miter_spec(text);
-        if (!parsed.spec) { set_status("Plane cut: " + parsed.error, true, 8.0F); return false; }
+        if (!parsed.spec) return retry("Plane cut: " + parsed.error);
         const auto primary = workspace_.selected_object();
-        if (!primary || workspace_.selection_count() != 1) { set_status("Plane cut: select one tube", true); return false; }
-        return start_exact_miter(*primary, *parsed.spec);
+        if (!primary || workspace_.selection_count() != 1) { textEdit_ = {}; set_status("Plane cut: select one tube", true); return false; }
+        const TextEditState prompt = textEdit_;
+        textEdit_ = {};
+        std::string refusal;
+        if (start_exact_miter(*primary, *parsed.spec, &refusal)) return true;
+        if (refusal.empty()) return false;
+        textEdit_ = prompt;
+        return retry("Plane cut: " + refusal);
     }
+    textEdit_ = {};
     return false;
 }
 
@@ -255,8 +298,10 @@ bool NativeEditorController::start_exact_tube(const TubeSpec& spec, EditorObject
             auto& result = **created;
             const auto before = capture_selection_snapshot();
             const std::string profile = spec.profile == TubeProfile::Round ? "Round" : spec.profile == TubeProfile::Square ? "Square" : "Rect";
-            EditorObject object(id, profile + " tube " + mm_label(spec.width) + (spec.profile == TubeProfile::Rectangular ? "x" + mm_label(spec.height) : std::string()) +
-                                        "x" + mm_label(spec.wall));
+            // Two tubes of one size would be indistinguishable in the Hierarchy: the second is "... #2".
+            EditorObject object(id, unique_object_name(workspace_.document(), profile + " tube " + mm_label(spec.width) +
+                                        (spec.profile == TubeProfile::Rectangular ? "x" + mm_label(spec.height) : std::string()) +
+                                        "x" + mm_label(spec.wall)));
             object.voxelSizeMeters = 1.0F;
             object.polygon = std::move(result.mesh);
             object.polygon->objectId = id;
@@ -286,6 +331,7 @@ bool NativeEditorController::start_exact_tube(const TubeSpec& spec, EditorObject
             selectionDomain_ = SelectionDomain::Objects;
             workspace_.commands().set_last_selection_transition(before, capture_selection_snapshot());
             frame_selection();
+            recompute_layout();
             refresh_menu_state();
             set_status(result.summary + "; exact source kept at " + result.source.relativePath.generic_string() +
                        (resizeSource ? "; resized copy created; original unchanged; reassign materials if needed" : ""));
@@ -293,10 +339,15 @@ bool NativeEditorController::start_exact_tube(const TubeSpec& spec, EditorObject
         });
 }
 
-bool NativeEditorController::start_exact_cope(EditorObjectId a, EditorObjectId b, const ExactCopeOptions& options) {
+bool NativeEditorController::start_exact_cope(EditorObjectId a, EditorObjectId b, const ExactCopeOptions& options,
+                                              std::string* refusal) {
     if (const std::string reason = exact_tube_disabled_reason("mesh.exact_cope"); !reason.empty()) { set_status(reason, true); return false; }
     auto request = prepare_exact_cope(projectRoot_, workspace_.document(), a, b, options);
-    if (!request.error.empty()) { set_status(request.error, true, 8.0F); return false; }
+    if (!request.error.empty()) {
+        if (refusal != nullptr) *refusal = request.error;
+        else set_status("Cope: " + request.error, true, 8.0F);
+        return false;
+    }
     return start_exact_tube_cut(std::move(request), " (Coped to " + workspace_.document().find_object(b)->name + ")");
 }
 
@@ -344,10 +395,14 @@ bool NativeEditorController::start_exact_cope_solid(EditorObjectId a, EditorObje
     return start_exact_tube_cut(std::move(request), " (Coped to supplied solid " + workspace_.document().find_object(b)->name + ")");
 }
 
-bool NativeEditorController::start_exact_miter(EditorObjectId a, const ExactMiterSpec& spec) {
+bool NativeEditorController::start_exact_miter(EditorObjectId a, const ExactMiterSpec& spec, std::string* refusal) {
     if (const std::string reason = exact_tube_disabled_reason("mesh.exact_miter"); !reason.empty()) { set_status(reason, true); return false; }
     auto request = prepare_exact_miter(projectRoot_, workspace_.document(), a, spec);
-    if (!request.error.empty()) { set_status(request.error, true, 8.0F); return false; }
+    if (!request.error.empty()) {
+        if (refusal != nullptr) *refusal = request.error;
+        else set_status("Plane cut: " + request.error, true, 8.0F);
+        return false;
+    }
     char angle[32];
     std::snprintf(angle, sizeof angle, "%g", spec.angleDegrees);
     return start_exact_tube_cut(std::move(request), std::string(" (Plane cut ") + angle + ")");
@@ -386,7 +441,7 @@ bool NativeEditorController::start_exact_tube_cut(ExactTubeCutRequest request, s
             }
             const auto before = capture_selection_snapshot();
             const auto id = document.allocate_object_id();
-            EditorObject result(id, objectA->name + suffix);
+            EditorObject result(id, unique_object_name(document, objectA->name + suffix));
             result.polygon = std::move(r.boolean.edit.mesh);
             result.polygon->objectId = id;
             refresh_editor_polygon(*result.polygon);
@@ -417,7 +472,11 @@ bool NativeEditorController::start_exact_tube_cut(ExactTubeCutRequest request, s
             workspace_.commands().set_last_selection_transition(before, capture_selection_snapshot());
             recompute_layout();
             refresh_menu_state();
-            set_status(r.boolean.summary + "; the operands are unchanged", !r.warning.empty() || r.clearanceApplied, 14.0F);
+            // A success with a caveat (clearance, several pieces) is a warning: amber, not the red of a failure.
+            const std::string summary = r.boolean.summary + "; the operands are unchanged and stay visible where they are, "
+                "overlapping the result (untick Visible on an operand to compare)";
+            if (!r.warning.empty() || r.clearanceApplied) set_status_warning(summary, 14.0F);
+            else set_status(summary, false, 14.0F);
             return true;
         });
 }

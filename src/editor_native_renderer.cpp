@@ -878,6 +878,59 @@ std::string elide_text_to_width(const IEditorCanvas& canvas, std::string_view va
     return candidate;
 }
 
+std::vector<std::string> wrap_text_to_width(const IEditorCanvas& canvas, std::string_view value, int maxWidth,
+                                            std::size_t maxLines) {
+    std::vector<std::string> lines;
+    if (maxLines == 0U) return lines;
+    if (value.empty()) { lines.emplace_back(); return lines; }
+    // Even a single glyph must fit, or no amount of wrapping helps: fall back to one elided line.
+    std::size_t firstEnd = 0;
+    (void)decode_utf8_code_point(value, firstEnd);
+    if (maxWidth <= 0 || canvas.text_width(value.substr(0, firstEnd)) > maxWidth) {
+        lines.push_back(elide_text_to_width(canvas, value, std::max(0, maxWidth)));
+        return lines;
+    }
+    std::size_t begin = 0;
+    while (begin < value.size()) {
+        while (begin < value.size() && value[begin] == ' ' && !lines.empty()) ++begin;  // no leading blank on a continuation
+        if (begin >= value.size()) break;
+        const std::string_view rest = value.substr(begin);
+        if (canvas.text_width(rest) <= maxWidth) { lines.emplace_back(rest); break; }
+        // Largest prefix (on a code point boundary) that fits, found by binary search over the cuts.
+        std::vector<std::size_t> cuts;
+        cuts.reserve(rest.size());
+        for (std::size_t i = 1; i <= rest.size(); ++i)
+            if (i == rest.size() || !utf8_continuation(static_cast<unsigned char>(rest[i]))) cuts.push_back(i);
+        std::size_t lo = 0, hi = cuts.size();  // afterwards lo is how many prefixes fit
+        while (lo < hi) {
+            const std::size_t mid = (lo + hi) / 2U;
+            if (canvas.text_width(rest.substr(0, cuts[mid])) <= maxWidth) lo = mid + 1U; else hi = mid;
+        }
+        const std::size_t take = lo == 0U ? cuts.front() : cuts[lo - 1U];
+        // Prefer to break after a space or a separator inside the fitting prefix.
+        std::size_t breakAt = take;
+        // A space right after the fitting prefix means the prefix ends on a whole word already.
+        if (take < rest.size() && rest[take] != ' ') {
+            for (std::size_t i = take; i > 0U; --i) {
+                const char c = rest[i - 1U];
+                if (c == ' ' || c == ',' || c == ';' || c == ':' || c == '/' || c == ')') {
+                    if (i > take / 2U) breakAt = i;  // do not leave a very short first line
+                    break;
+                }
+            }
+        }
+        lines.emplace_back(rest.substr(0, breakAt));
+        while (!lines.back().empty() && lines.back().back() == ' ') lines.back().pop_back();
+        begin += breakAt;
+        if (lines.size() == maxLines && begin < value.size()) {
+            // Out of lines: the last one ends in the ellipsis.
+            lines.back() = elide_text_to_width(canvas, std::string(lines.back()) + std::string(value.substr(begin)), maxWidth);
+            return lines;
+        }
+    }
+    return lines;
+}
+
 CellFitCanvas::CellFitCanvas(const IEditorCanvas& inner, UiRect bounds, UiRect screen, int hoverX, int hoverY)
     : inner_(inner), bounds_(bounds), screen_(screen), hoverX_(hoverX), hoverY_(hoverY) {
     cells_.reserve(512);
@@ -3346,8 +3399,13 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                     painter.text(disclosure.x + 1, row.y + row.height - 7, collapsed ? ">" : "v", muted);
                 }
             }
-            painter.text(row.x + 24 + indent, row.y + row.height - 7,
-                         elide_text_to_width(painter, label, std::max(0, row.width - 28 - indent)), rowColor);
+            const int labelRoom = std::max(0, row.width - 28 - indent);
+            const std::string shownLabel = elide_text_to_width(painter, label, labelRoom);
+            painter.text(row.x + 24 + indent, row.y + row.height - 7, shownLabel, rowColor);
+            // A row cut short shows its whole name when hovered (cope results differ only at the end
+            // of a long name).
+            if (!renaming && shownLabel != label && chromeHoverAllowed && row.contains(controller.hover_x(), controller.hover_y()))
+                tooltips.push_back({row, wrap_text_to_width(painter, object->name, 300, 4U)});
         }
         if (controller.hierarchy_drag().active && !controller.hierarchy_drag().hoverTarget) {
             painter.text(layout.hierarchy.x + 10, layout.hierarchy.y + layout.hierarchy.height - 10,
@@ -4206,7 +4264,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
     // ending in square handles. The hovered or dragged axis is drawn thicker
     // and brighter so the grab target reads clearly.
     {
-        const std::vector<GizmoScreenAxis> gizmoAxes = controller.gizmo_axes();
+        const std::vector<GizmoScreenAxis> gizmoAxes = controller.gizmo_axes(true);
         const std::vector<GizmoScreenRing> gizmoRings = controller.gizmo_rings();
         const bool rotateMode = !gizmoRings.empty();
         const bool scaleMode = controller.active_tool() == EditorToolId::Scale;
@@ -4549,12 +4607,15 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                                          static_cast<int>(b.x), static_cast<int>(b.y), rgb(255,190,80));
             }
         }
-        if (rig && settingBool("camera.preview_selected", true)) {
+        // In a narrow viewport (a small window) the preview sat on top of the tool options at the top
+        // left (the "Click select" hint and the Surface offset field); it moves below them there.
+        const int previewTop = viewport.width < 560 ? 56 : 14;
+        if (rig && settingBool("camera.preview_selected", true) && viewport.height - previewTop - 14 >= 60) {
             const float ratio = std::clamp(settingFloat("camera.preview_size", 0.25F), 0.1F, 0.75F);
             const int previewWidth = std::max(180, static_cast<int>(static_cast<float>(viewport.width) * ratio));
             const int previewHeight = std::max(110, previewWidth * 9 / 16);
-            const UiRect preview{viewport.x + viewport.width - previewWidth - 14, viewport.y + 14,
-                                 previewWidth, std::min(previewHeight, viewport.height - 28)};
+            const UiRect preview{viewport.x + viewport.width - previewWidth - 14, viewport.y + previewTop,
+                                 previewWidth, std::min(previewHeight, viewport.height - previewTop - 14)};
             viewportPainter.fill(preview, rgb(12,16,22));
             EditorCamera previewCamera;
             apply_camera_pose(previewCamera, rig->authoredPose);
@@ -4563,7 +4624,39 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             const auto& previewItems = controller.camera_preview_draw_items(previewCamera, preview, previewSettings);
             // The preview list has the same 1.2x margin around the preview rect.
             const RectClipCanvas previewPainter(viewportPainter, preview);
+            // Polygon objects (cubes, planes, CAD tubes) are not voxels: without this the preview of a
+            // scene made only of them was an empty box. They are painted far to near, interleaved with
+            // the voxel squares by depth like the main viewport does.
+            const auto previewPolygons = controller.camera_preview_polygon_items(previewCamera, preview);
+            std::size_t previewPolygonCursor = 0;
+            const auto paintPreviewPolygon = [&](const EditorPolygonDrawTriangle& triangle) {
+                const auto& p = triangle.points;
+                const float low = std::max(float(preview.y), std::min({p[0].y, p[1].y, p[2].y}));
+                const float high = std::min(float(preview.y + preview.height - 1), std::max({p[0].y, p[1].y, p[2].y}));
+                const float polygonShade = std::clamp(1.1F - triangle.depth * .018F, .42F, 1.0F) * (0.45F + 0.55F * triangle.facing);
+                const auto color = rgb(byte(triangle.color.x * polygonShade), byte(triangle.color.y * polygonShade),
+                                       byte(triangle.color.z * polygonShade));
+                if (!(low <= high)) return;
+                for (int y = int(std::ceil(low)); y <= int(std::floor(high)); ++y) {
+                    const float scan = float(y) + .5F;
+                    float xs[3]{};
+                    int crossings = 0;
+                    for (int edge = 0; edge < 3 && crossings < 3; ++edge) {
+                        const auto& a = p[std::size_t(edge)];
+                        const auto& b = p[std::size_t((edge + 1) % 3)];
+                        if ((a.y <= scan && b.y > scan) || (b.y <= scan && a.y > scan))
+                            xs[crossings++] = a.x + (scan - a.y) * (b.x - a.x) / (b.y - a.y);
+                    }
+                    if (crossings != 2) continue;
+                    const float left = std::max(float(preview.x), std::min(xs[0], xs[1]));
+                    const float right = std::min(float(preview.x + preview.width - 1), std::max(xs[0], xs[1]));
+                    if (left <= right)
+                        previewPainter.fill({int(std::ceil(left)), y, std::max(1, int(std::floor(right)) - int(std::ceil(left)) + 1), 1}, color);
+                }
+            };
             for (const EditorVoxelDrawItem& item : previewItems) {
+                while (previewPolygonCursor < previewPolygons.size() && previewPolygons[previewPolygonCursor].depth >= item.depth)
+                    paintPreviewPolygon(previewPolygons[previewPolygonCursor++]);
                 const auto* paletteObject = controller.workspace().document().find_object(item.objectId);
                 const auto owned = paletteObject ? paletteObject->voxelMaterials.find(item.material) :
                     std::map<MaterialId,VoxelMaterialDefinition>::const_iterator{};
@@ -4575,6 +4668,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                                      radius * 2 + 1, radius * 2 + 1},
                                     rgb(byte(base.x * shade), byte(base.y * shade), byte(base.z * shade)));
             }
+            while (previewPolygonCursor < previewPolygons.size()) paintPreviewPolygon(previewPolygons[previewPolygonCursor++]);
             viewportPainter.outline(preview, accent);
             const UiRect titleBar{preview.x, preview.y, preview.width, 22};
             viewportPainter.fill(titleBar, rgb(28,43,63));
@@ -4799,7 +4893,13 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                     return;
                 }
             }
-            inspectorPainter.text(x,y+extra,elide_text_to_width(inspectorPainter,value,available),color);
+            const std::string shownValue = elide_text_to_width(inspectorPainter, value, available);
+            inspectorPainter.text(x, y + extra, shownValue, color);
+            // Cut-short Inspector text shows in full as a tooltip while hovered.
+            if (shownValue != value && chromeHoverAllowed &&
+                UiRect{x, y + extra - 13, available, 17}.contains(controller.hover_x(), controller.hover_y()) &&
+                layout.inspector.contains(controller.hover_x(), controller.hover_y()))
+                tooltips.push_back({{x, y + extra - 13, available, 17}, wrap_text_to_width(painter, value, 300, 5U)});
         };
         if (controller.duplicate_special_active()) {
             // Duplicate Special panel: the numbers are NumberFieldRects; choices and buttons below.
@@ -5039,12 +5139,27 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                         drawInspectorText(layout.inspector.x + 12, inspectorTop + 157, "Scale", muted);
                         drawNumberBoxes(NumberFieldId::Scale);
                     }
+                    // Mass: a polygon with no volume model has an unknown mass, not 0 kg; the old
+                    // substr(0,6) of std::to_string also cut 1234567.0 to "123456".
+                    std::string massText = "n/a";
+                    if (diagnostics.massKilograms > 0.0 || diagnostics.objectsWithoutMass == 0U) {
+                        char formatted[32]{};
+                        std::snprintf(formatted, sizeof formatted, "%.4g", diagnostics.massKilograms);
+                        massText = formatted;
+                        if (diagnostics.objectsWithoutMass > 0U) massText += "+";
+                        massText += " kg";
+                    }
                     drawInspectorText(layout.inspector.x + 12, inspectorTop + 179,
-                                 "Mass " + std::to_string(diagnostics.massKilograms).substr(0,6) + " kg   Parts " +
+                                 "Mass " + massText + "   Parts " +
                                  std::to_string(diagnostics.connectedComponents) +
                                  "   Detached " + std::to_string(diagnostics.detachedComponents), muted);
                     drawInspectorText(layout.inspector.x + 12, inspectorTop + 201,
-                                 "Collision boxes " + std::to_string(diagnostics.collisionBoxes), muted);
+                                 diagnostics.collisionConvexPieces > 0U && diagnostics.collisionBoxes == 0U ?
+                                     "Collision " + std::to_string(diagnostics.collisionConvexPieces) + " exact piece" +
+                                         (diagnostics.collisionConvexPieces == 1U ? "" : "s") :
+                                     "Collision boxes " + std::to_string(diagnostics.collisionBoxes) +
+                                         (diagnostics.collisionConvexPieces > 0U ?
+                                              "   Exact pieces " + std::to_string(diagnostics.collisionConvexPieces) : std::string{}), muted);
                     drawInspectorText(layout.inspector.x + 12, inspectorTop + 223,
                                  "Material " + std::to_string(controller.active_material()) + "  " +
                                  (controller.materials().find(controller.active_material()) ?
@@ -5144,18 +5259,32 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             break;
         }
         case BottomPanelTab::Console: {
+            // Long messages (a cope result with its clearance and collision notes, a refusal with its
+            // advice) wrap onto continuation lines instead of running off the panel edge; the newest
+            // messages that fit are shown, newest at the bottom.
             const auto& entries = controller.workspace().log().entries();
-            std::size_t shown = 0;
-            const std::size_t maxLines = 6;
-            const std::size_t start = entries.size() > maxLines ? entries.size() - maxLines : 0;
-            for (std::size_t i = start; i < entries.size(); ++i) {
+            constexpr int kLineStep = 20;
+            constexpr int kContinuationIndent = 14;
+            const int panelBottom = layout.bottomPanel.y + layout.bottomPanel.height - 4;
+            const std::size_t availableRows = static_cast<std::size_t>(std::max(1, (panelBottom - bottomY) / kLineStep + 1));
+            const int wrapWidth = std::max(40, layout.bottomPanel.width - 28 - kContinuationIndent);
+            struct ConsoleRow { std::string text; EditorColor color; int indent; };
+            std::vector<ConsoleRow> rows;  // built newest first
+            for (std::size_t i = entries.size(); i-- > 0U && rows.size() < availableRows;) {
                 const EditorColor logColor = entries[i].level == EditorLogLevel::Error ? rgb(255,95,95) :
                                                entries[i].level == EditorLogLevel::Warning ? rgb(255,190,80) : muted;
-                painter.text(layout.bottomPanel.x + 14, bottomY, entries[i].text, logColor);
-                bottomY += 20;
-                ++shown;
+                const std::string shown = entries[i].repeats > 1U
+                    ? entries[i].text + "  (x" + std::to_string(entries[i].repeats) + ")" : entries[i].text;
+                auto lines = wrap_text_to_width(painter, shown, wrapWidth, availableRows);
+                if (!rows.empty() && rows.size() + lines.size() > availableRows) break;  // never half of an older entry
+                for (std::size_t line = lines.size(); line-- > 0U;)
+                    rows.push_back({std::move(lines[line]), logColor, line == 0U ? 0 : kContinuationIndent});
             }
-            if (shown == 0) painter.text(layout.bottomPanel.x + 14, bottomY, "(no messages yet)", muted);
+            for (std::size_t i = rows.size(); i-- > 0U;) {
+                painter.text(layout.bottomPanel.x + 14 + rows[i].indent, bottomY, rows[i].text, rows[i].color);
+                bottomY += kLineStep;
+            }
+            if (rows.empty()) painter.text(layout.bottomPanel.x + 14, bottomY, "(no messages yet)", muted);
             break;
         }
         case BottomPanelTab::Profiler: {
@@ -5292,7 +5421,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
     painter.text(summaryX, layout.statusBar.y + layout.statusBar.height - 6, summary, muted);
     painter.text(10, layout.statusBar.y + layout.statusBar.height - 6,
                  elide_text_to_width(painter, status.text, std::max(0, summaryX - 24)),
-                 status.error ? rgb(255,105,105) : text);
+                 status.error ? rgb(255,105,105) : status.warning ? rgb(255,190,80) : text);
 
     if (controller.open_menu()) {
         const auto actions = controller.menu_actions(*controller.open_menu());
@@ -5323,7 +5452,11 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             else if (rightText.empty()) rightText = actions[i].section;
             // Label and right column get separate space: the right text keeps its width (up to
             // half the row) and the label is elided before it, with the full label in a tooltip.
-            const int rowRight = popup.x + popup.width - 8;
+            // The scroll arrows sit in the right margin of the first and last visible rows; keep the
+            // right column clear of them (the arrow used to be drawn over the "Unavailable" text).
+            const bool arrowOnRow = (visible == 0U && popupLayout.canScrollUp) ||
+                                    (visible + 1U == popupLayout.rows.size() && popupLayout.canScrollDown);
+            const int rowRight = popup.x + popup.width - 8 - (arrowOnRow ? 16 : 0);
             if (!rightText.empty())
                 rightText = elide_text_to_width(painter, rightText, std::max(0, (rowRight - labelX) / 2));
             const int rightX = rightText.empty() ? rowRight : rowRight - painter.text_width(rightText);
@@ -5506,6 +5639,17 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         const int labelWidth = painter.text_width(label);
         painter.text(field.x + 10 + labelWidth, field.y + 20,
                      elide_text_to_width(painter, controller.text_edit().buffer + "|", field.width - 20 - labelWidth), text);
+        // A refused value: the reason under the field, wrapped (it can be a full sentence), while the
+        // field stays open for the correction.
+        if (!controller.text_edit().error.empty()) {
+            const auto lines = wrap_text_to_width(painter, controller.text_edit().error, field.width - 20, 5U);
+            const UiRect note{field.x, field.y + field.height + 2, field.width,
+                              static_cast<int>(lines.size()) * 17 + 10};
+            painter.fill(note, panel2);
+            painter.outline(note, rgb(255,105,105));
+            for (std::size_t i = 0; i < lines.size(); ++i)
+                painter.text(note.x + 10, note.y + 18 + static_cast<int>(i) * 17, lines[i], rgb(255,150,120));
+        }
     }
     render_synth_panel(painter, controller, panel, panel2, border, text, muted, accent);
     render_chiptune_panel(painter, controller, panel, panel2, border, text, muted, accent);
@@ -5883,9 +6027,15 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             painter.text(paletteLayout.searchBox.x, paletteLayout.searchBox.y + 68,
                          "No command-center result matches this search.", muted);
         painter.fill(paletteLayout.hintBar, panel2);
-        painter.text(paletteLayout.hintBar.x + 8,
-                     paletteLayout.hintBar.y + paletteLayout.hintBar.height - 9,
-                     "Up/Down select  Enter open/run  Ctrl+D favorite command  Prefix filters available  Esc close", muted);
+        if (!controller.command_palette_message().empty()) {
+            painter.text(paletteLayout.hintBar.x + 8, paletteLayout.hintBar.y + paletteLayout.hintBar.height - 9,
+                         elide_text_to_width(painter, controller.command_palette_message(),
+                                             std::max(0, paletteLayout.hintBar.width - 16)), rgb(255,150,120));
+        } else {
+            painter.text(paletteLayout.hintBar.x + 8,
+                         paletteLayout.hintBar.y + paletteLayout.hintBar.height - 9,
+                         "Up/Down select  Enter open/run  Ctrl+D favorite command  Prefix filters available  Esc close", muted);
+        }
     }
 
     if (controller.file_picker().open) {

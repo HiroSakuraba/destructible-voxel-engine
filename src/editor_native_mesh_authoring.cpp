@@ -27,6 +27,7 @@ struct NativeMeshAuthoringState {
     MeshDisplacementBakeSettings displace;PolygonDisplacementStats displaceStats{};
     std::uint64_t displaceSourceHash{};int displaceField{};bool displaceReplaceTyped{true},displaceInputValid{true};
     std::uint32_t channel{},uvMode{};std::set<std::uint32_t> corners;Float2 center{.5F,.5F};float zoom{1};bool uvFocus{true},texture{};
+    float uvDensityTarget{512.0F};std::string uvDensityText;bool uvDensityTyping{};
     int tool{},axis{};bool dragging{},panning{},selecting{};int startX{},startY{},lastX{},lastY{};Float2 startUv{},pivot{},panStart{};
     PolygonUvAuthoring uvFlags;
     bool uvFlagsValid{},showUvSeams{},uvFlagsEnabled{true};
@@ -86,7 +87,7 @@ void update_displace(NativeMeshAuthoringState& state,const EditorObject& object)
     state.result=std::move(baked.polygon);
 }
 UiRect uv_panel(UiRect view){int width=std::max(1,view.width/2);return {view.x+view.width-width,view.y,width,view.height};}
-UiRect uv_canvas(UiRect view){auto p=uv_panel(view);return {p.x+8,p.y+70,std::max(1,p.width-16),std::max(1,p.height-116)};}
+UiRect uv_canvas(UiRect view){auto p=uv_panel(view);return {p.x+8,p.y+94,std::max(1,p.width-16),std::max(1,p.height-140)};}
 Float2 texcoord(const PolygonVertex& v,unsigned channel){return channel?v.texcoord1:v.texcoord;}
 ScreenPoint screen_uv(Float2 uv,const NativeMeshAuthoringState& s,UiRect view){auto r=uv_canvas(view);float scale=float(std::min(r.width,r.height))*.8F*s.zoom;return {float(r.x)+r.width*.5F+(uv.x-s.center.x)*scale,float(r.y)+r.height*.5F-(uv.y-s.center.y)*scale,0,true};}
 Float2 from_screen(int x,int y,const NativeMeshAuthoringState& s,UiRect view){auto r=uv_canvas(view);float scale=std::max(1.0F,float(std::min(r.width,r.height))*.8F*s.zoom);return {s.center.x+(float(x)-r.x-r.width*.5F)/scale,s.center.y-(float(y)-r.y-r.height*.5F)/scale};}
@@ -543,6 +544,24 @@ bool NativeEditorController::mesh_authoring_key(std::string_view key,bool contro
         return false;
     }
     if(s.kind!=NativeMeshAuthoringState::Kind::Uv||!s.uvFocus)return false;
+    if(s.uvDensityTyping) {
+        if(key=="escape"){s.uvDensityTyping=false;s.uvDensityText.clear();return true;}
+        if(key=="return"||key=="enter"){
+            char* end{};
+            const float density=std::strtof(s.uvDensityText.c_str(),&end);
+            if(s.uvDensityText.empty()||end!=s.uvDensityText.c_str()+s.uvDensityText.size()||
+               !std::isfinite(density)||!(density>0)||density>1000000.0F)
+               {set_status("Density target must be a number in (0, 1,000,000] texels/m",true);return true;}
+            s.uvDensityTarget=density;s.uvDensityTyping=false;s.uvDensityText.clear();
+            set_status("UV density target: "+std::to_string(density)+" texels per metre");return true;
+        }
+        if(key=="backspace"){if(!s.uvDensityText.empty())s.uvDensityText.pop_back();return true;}
+        const bool digit=key.size()==1&&(key[0]>='0'&&key[0]<='9');
+        if(digit||key=="period"||key=="."){
+            if(s.uvDensityText.size()<14)s.uvDensityText+=key=="period"?".":std::string(key);
+        }
+        return true;
+    }
     (void)refresh_uv_flags(s,*object);
     std::erase_if(s.corners,[&](auto c){return c>=object->polygon->indices.size();});
     if(control&&key=="z"){cancel_mesh_authoring_drag();return false;}
@@ -566,6 +585,59 @@ bool NativeEditorController::mesh_authoring_key(std::string_view key,bool contro
         s.center={minimum.x*.5F+maximum.x*.5F,minimum.y*.5F+maximum.y*.5F};s.zoom=std::clamp(1.0F/std::max(.05F,std::max(maximum.x-minimum.x,maximum.y-minimum.y)),.05F,64.0F);return true;
     }
     if(key=="x"||key=="y"){s.axis=key=="x"?1:2;return true;}
+    const auto uvSettings=[&] {
+        UvEditSettings settings;settings.channel=s.channel;settings.objectScale=object->voxelScale;
+        settings.targetTexelsPerMeter=s.uvDensityTarget;
+        if(!refresh_uv_flags(s,*object))return settings;
+        if(s.uvFlags.enabled) {
+            settings.seams=s.uvFlags.seams[s.channel];
+            for(const auto corner:s.uvFlags.pins[s.channel])
+                if(corner<object->polygon->indices.size())
+                    settings.pins[corner]=texcoord(object->polygon->vertices[object->polygon->indices[corner]],s.channel);
+        }
+        if(!object->polygon->materialBindings.empty()){
+            const auto texture=object->polygon->materialBindings[0].baseColor.texture;
+            if(texture && *texture<object->polygon->textures.size()) {
+                const auto image=object->polygon->textures[*texture].imageIndex;
+                if(image<object->polygon->images.size()) {
+                    const auto& picture=object->polygon->images[image];
+                    if(picture.width && picture.height) {
+                        settings.textureWidth=picture.width;settings.textureHeight=picture.height;
+                    }
+                }
+            }
+        }
+        return settings;
+    };
+    if(key=="i") {
+        if(s.uvBefore){set_status("Apply/cancel UV preview before editing density target",true);return true;}
+        s.uvDensityTyping=true;s.uvDensityText.clear();
+        set_status("Type target density in texels per metre, Enter confirm, Esc cancel");return true;
+    }
+    if(key=="b") {
+        if(s.uvBefore){set_status("Apply/cancel UV preview before measuring density",true);return true;}
+        const auto density=measure_polygon_uv_density(*object->polygon,s.corners,uvSettings());
+        if(!density){set_status(density.error,true);return true;}
+        if(shift)s.uvDensityTarget=float(density.texelsPerMeter);
+        set_status("UV"+std::to_string(s.channel)+": "+
+            std::to_string(density.texelsPerMeter)+" texels/m across "+
+            std::to_string(density.charts.size())+" selected islands"+
+            (shift?" | captured as match target":""),false,8.0F);return true;
+    }
+    if(key=="n"||key=="o"||key=="l"||key=="c") {
+        if(s.corners.empty()){set_status("Select UV corners/islands first",true);return true;}
+        if(s.uvBefore){set_status("Apply/cancel UV preview before a new operation",true);return true;}
+        if(!refresh_uv_flags(s,*object)){set_status(s.uvFlagsError,true);return true;}
+        const auto operation=key=="n"?UvEdit::MatchDensity:
+            key=="o"?UvEdit::AlignIslandU:key=="l"?UvEdit::AlignIslandV:
+            shift?UvEdit::StraightenV:UvEdit::StraightenU;
+        const auto before=*object->polygon;
+        const auto result=edit_polygon_uv(before,s.corners,operation,uvSettings());
+        if(!result){set_status(result.error,true);return true;}
+        s.uvBefore=before;*object->polygon=result.mesh;
+        set_status("UV preview: Enter apply one Undo step, Esc cancel; target "+
+            std::to_string(s.uvDensityTarget)+" texels/m");return true;
+    }
     auto commit=[&](PolygonEditResult edited,const CookedPolygonAsset& before){if(!edited){set_status(edited.error,true);return false;}auto snapshot=capture_selection_snapshot();auto result=workspace_.commands().execute(workspace_.document(),std::make_unique<ReplacePolygonCommand>(object->id,before,std::move(edited.mesh),"Edit UV coordinates"));if(result.success)workspace_.commands().set_last_selection_transition(snapshot,capture_selection_snapshot());set_status(result.success?"Edited UV coordinates":result.message,!result.success);return result.success;};
     if(key=="u"||key=="k"||key=="h"||key=="v"||key=="j"||key=="d"){
         cancel_mesh_authoring_drag();UvEditSettings settings;settings.channel=s.channel;

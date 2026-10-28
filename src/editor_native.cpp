@@ -12302,7 +12302,6 @@ std::string NativeEditorController::collision_diagnostic_summary() const {
     const EditorDocument& document = workspace_.document();
     const auto failure = [](const EditorObject& obj) -> std::string {
         if (!obj.flags.collisionEnabled) return "Collision disabled in Inspector";
-        if (!obj.flags.visible) return "Art hidden (collision may still be enabled)";
         if (obj.voxels && obj.voxels->occupied_voxel_count() == 0)
             return "Empty voxel geometry: no collider";
         if (!obj.voxels && !obj.polygon) return "No solid geometry";
@@ -12314,13 +12313,15 @@ std::string NativeEditorController::collision_diagnostic_summary() const {
         if (const std::string problem = failure(*a); !problem.empty())
             return "Collision " + std::to_string(a->id) + ": " + problem;
         const auto cache = collisionProxyCache_.find(a->id);
-        if (a->voxels && (cache == collisionProxyCache_.end() ||
-            cache->second.revision != a->voxels->revision()))
-            return "Collision " + std::to_string(a->id) + ": proxy revision stale/not built; query rebuilds it";
+        // A stale or not-yet-built proxy is a note, not a reason to hide the class/layer explanation.
+        const bool proxyStale = a->voxels && (cache == collisionProxyCache_.end() ||
+            cache->second.revision != a->voxels->revision());
         return "Collision " + std::to_string(a->id) + ": " +
             (a->flags.anchored ? "static" : "dynamic") +
             (a->flags.structural ? ", Full (all categories)" : ", DebrisNoSelf (other debris masked)") +
-            "; editor scene layer " + std::to_string(a->layer) + " (not a physics mask)";
+            "; editor scene layer " + std::to_string(a->layer) + " (not a physics mask)" +
+            (a->flags.visible ? "" : "; art hidden, collision still active") +
+            (proxyStale ? "; proxy revision stale/not built (a collision query rebuilds it)" : "");
     }
     if (ids.size() == 2) {
         auto it = ids.begin();

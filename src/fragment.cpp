@@ -216,13 +216,14 @@ bool build_merged_object_box_proxy_progress(
     const auto& bricks = object.bricks();
     const std::size_t total = bricks.size();
     if (progress && !progress(0, total)) return false;
-    for (std::size_t index = 0; index < total; ++index) {
-        const BrickKey key = bricks[index].first;
-        if (!bricks[index].second.empty()) {
-            std::vector<VoxelBox> boxes = build_brick_box_proxy(object, key);
+    std::size_t index = 0;
+    for (const auto& entry : bricks) {
+        if (!entry.second.empty()) {
+            std::vector<VoxelBox> boxes = build_brick_box_proxy(object, entry.first);
             staged.insert(staged.end(), boxes.begin(), boxes.end());
         }
-        if (progress && !progress(index + 1, total)) return false;
+        ++index;
+        if (progress && !progress(index, total)) return false;
     }
     // This is the same merge algorithm used by Play and the non-progress API.
     staged = merge_adjacent_voxel_boxes(std::move(staged));

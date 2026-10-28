@@ -1987,16 +1987,41 @@ std::optional<std::uint64_t> GameWorld::damage_sphere(GameObjectId id, Float3 wo
     const Float3 localVoxelUnits = divide_components(localMeters,multiply(object.voxelScale,object.voxelSizeMeters));
     const float radiusVoxelUnits = radius / object.voxelSizeMeters;
 
+    // Keep a complete pre-carve copy so a failed replacement in the common
+    // non-fragmenting case does not publish collision that disagrees with art.
+    std::unique_ptr<VoxelObject> originalVoxels =
+        object.visualOnly ? nullptr : clone_game_voxels(object.voxels.get());
+    const RigidTransform originalAuthoredTransform = object.authoredTransform;
     const SphereDamageCommand command{localVoxelUnits, radiusVoxelUnits, 0,object.voxelScale};
     const DamageApplyReport report = apply_damage_commands(*object.voxels, {command});
     if (report.removedVoxelCount == 0) return 0U;
 
     const bool destroyed = object.voxels->occupied_voxel_count() == 0;
-    // The crater's mark, before fragmenting so the pieces that break off keep it.
-    if (!destroyed) (void)surfaceMarks_.add_crater(id, localMeters, radius);
     std::vector<GameObjectId> newFragmentIds;
-    // Visual-only voxels are carved but never split into (physical) debris.
-    if (!destroyed && !object.visualOnly) newFragmentIds = fragment_after_damage(id, object);
+    if (!destroyed && !object.visualOnly) {
+        const ConnectivitySnapshot connectivity = build_connectivity_snapshot(*object.voxels);
+        if (connectivity.components.size() == 1U) {
+            // Rebuilding a one-piece collider is an all-or-nothing edit. Stage
+            // the body, then publish geometry/mark/event only after success.
+            std::optional<RigidBodyState> oldState;
+            if (object.hasBody && object.dynamic) oldState = physics_->state(object.bodyHandle);
+            if (object.hasBody && object.dynamic) object.authoredTransform = current;
+            if (!rebuild_primary_body(object, oldState)) {
+                object.voxels = std::move(originalVoxels);
+                object.authoredTransform = originalAuthoredTransform;
+                return std::nullopt;
+            }
+            (void)surfaceMarks_.add_crater(id, localMeters, radius);
+        } else {
+            // Fragment copies require the crater mark to exist before split.
+            // Multi-fragment publication still has a separate rollback gate.
+            (void)surfaceMarks_.add_crater(id, localMeters, radius);
+            newFragmentIds = fragment_after_damage(id, object);
+        }
+    } else if (!destroyed) {
+        // Visual-only geometry never allocates a physics body.
+        (void)surfaceMarks_.add_crater(id, localMeters, radius);
+    }
 
     GameDamageEvent event{id, worldCenter, radius, report.removedVoxelCount, destroyed, std::move(newFragmentIds)};
     for (const DamageListener& listener : damageListeners_) listener(event);

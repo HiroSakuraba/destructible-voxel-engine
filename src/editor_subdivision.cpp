@@ -854,9 +854,69 @@ SubdivisionSettings remap_subdivision_topology(const CookedPolygonAsset& before,
     return result;
 }
 
+namespace {
+// Optional face-varying UV relaxation on the evaluated mesh only. Vertices that
+// coincide in position AND UV are considered continuous; all chart boundary
+// vertices are fixed. UV0 and UV1 are evaluated independently.
+void relax_subdivision_uv_interior(CookedPolygonAsset& mesh,std::uint32_t channel) {
+    using Key=std::tuple<float,float,float,float,float>;
+    struct Node {
+        Float2 uv{};
+        std::vector<std::uint32_t> vertices;
+        std::set<std::uint32_t> neighbors;
+        bool boundary{};
+    };
+    std::map<Key,std::uint32_t> keyToId;
+    std::vector<Node> nodes;
+    std::vector<std::uint32_t> id(mesh.vertices.size());
+    const auto channel_uv=[&](const PolygonVertex& v){return channel==0?v.texcoord:v.texcoord1;};
+    for(std::uint32_t index=0;index<mesh.vertices.size();++index) {
+        const auto& v=mesh.vertices[index];
+        const Float2 uv=channel_uv(v);
+        const Key key{v.position.x,v.position.y,v.position.z,uv.x,uv.y};
+        auto [it,newNode]=keyToId.emplace(key,static_cast<std::uint32_t>(nodes.size()));
+        if(newNode){Node node;node.uv=uv;nodes.push_back(std::move(node));}
+        id[index]=it->second;
+        nodes[it->second].vertices.push_back(index);
+    }
+    std::map<Edge,std::uint32_t> edgeUse;
+    for(std::size_t i=0;i+2<mesh.indices.size();i+=3)for(unsigned k=0;k<3;++k){
+        const std::uint32_t a=id[mesh.indices[i+k]],b=id[mesh.indices[i+(k+1)%3]];
+        if(a==b)continue;
+        const Edge e=edge(a,b);
+        ++edgeUse[e];nodes[a].neighbors.insert(b);nodes[b].neighbors.insert(a);
+    }
+    for(const auto& [e,uses]:edgeUse)if(uses!=2){
+        nodes[e.first].boundary=true;nodes[e.second].boundary=true;
+    }
+    // Conservative single-step relaxation; preserves chart boundaries and
+    // does not alter geometry, normals, tangents or the other UV channel.
+    std::vector<Float2> next(nodes.size());
+    for(std::size_t i=0;i<nodes.size();++i) {
+        next[i]=nodes[i].uv;
+        if(nodes[i].boundary||nodes[i].neighbors.size()<3)continue;
+        Float2 average{};
+        for(auto j:nodes[i].neighbors){
+            average.x+=nodes[j].uv.x;average.y+=nodes[j].uv.y;
+        }
+        const float weight=.25F/float(nodes[i].neighbors.size());
+        next[i].x=nodes[i].uv.x*.75F+average.x*weight;
+        next[i].y=nodes[i].uv.y*.75F+average.y*weight;
+    }
+    for(std::size_t i=0;i<nodes.size();++i)
+        for(auto vertex:nodes[i].vertices)
+            if(channel==0)mesh.vertices[vertex].texcoord=next[i];
+            else mesh.vertices[vertex].texcoord1=next[i];
+}
+} // namespace
+
 SubdivisionEvaluation evaluate_subdivision(const CookedPolygonAsset& control,const SubdivisionSettings& settings) {
     SubdivisionEvaluation result;
     if (settings.level>kMaxSubdivisionLevel) {result.error="Choose subdivision level 0..4";return result;}
+    if (settings.uvMode!=SubdivisionUvMode::Linear &&
+        settings.uvMode!=SubdivisionUvMode::SmoothInterior) {
+        result.error="Unknown subdivision UV smoothing mode";return result;
+    }
     if (const auto valid=validate_polygon_asset(control);!valid) {result.error=valid.message;return result;}
     if (control.indices.size()/3>kMaxSubdivisionControlTriangles || control.vertices.size()>100'000) {
         result.error="Control cage exceeds 50000 triangles / 100000 vertices";return result;
@@ -948,6 +1008,10 @@ SubdivisionEvaluation evaluate_subdivision(const CookedPolygonAsset& control,con
         for (const auto& [triangle,origin] : triangles) {
             mesh.indices.insert(mesh.indices.end(),triangle.begin(),triangle.end());result.controlTriangles.push_back(origin);
         }
+    }
+    if(settings.uvMode==SubdivisionUvMode::SmoothInterior) {
+        relax_subdivision_uv_interior(mesh,0);
+        relax_subdivision_uv_interior(mesh,1);
     }
     refresh_editor_polygon(mesh,false);
     if (const auto valid=validate_polygon_asset(mesh);!valid) {result.error=valid.message;return result;}

@@ -1992,6 +1992,7 @@ std::optional<std::uint64_t> GameWorld::damage_sphere(GameObjectId id, Float3 wo
     std::unique_ptr<VoxelObject> originalVoxels =
         object.visualOnly ? nullptr : clone_game_voxels(object.voxels.get());
     const RigidTransform originalAuthoredTransform = object.authoredTransform;
+    const GameObjectId originalNextId = nextId_;
     const SphereDamageCommand command{localVoxelUnits, radiusVoxelUnits, 0,object.voxelScale};
     const DamageApplyReport report = apply_damage_commands(*object.voxels, {command});
     if (report.removedVoxelCount == 0) return 0U;
@@ -2009,6 +2010,7 @@ std::optional<std::uint64_t> GameWorld::damage_sphere(GameObjectId id, Float3 wo
             if (!rebuild_primary_body(object, oldState)) {
                 object.voxels = std::move(originalVoxels);
                 object.authoredTransform = originalAuthoredTransform;
+                nextId_ = originalNextId;
                 return std::nullopt;
             }
             (void)surfaceMarks_.add_crater(id, localMeters, radius);
@@ -2017,6 +2019,7 @@ std::optional<std::uint64_t> GameWorld::damage_sphere(GameObjectId id, Float3 wo
             if (!fragments) {
                 object.voxels = std::move(originalVoxels);
                 object.authoredTransform = originalAuthoredTransform;
+                nextId_ = originalNextId;
                 return std::nullopt;
             }
             newFragmentIds = *fragments;
@@ -2100,7 +2103,7 @@ std::optional<std::vector<GameObjectId>> GameWorld::fragment_after_damage(GameOb
         auto desc = build_dynamic_body_desc(
             *voxels, object.authoredTransform, object.voxelSizeMeters,
             object.massTable, object.densityQuantumKilogramsPerCubicMeter,
-            object.structural, &localCenter, &buildError, object.voxelScale);
+            false, &localCenter, &buildError, object.voxelScale);
         if (!desc) { rollbackBodies(); return std::nullopt; }
         if (parentState) {
             desc->linearVelocity = inherited_child_center_of_mass_velocity(

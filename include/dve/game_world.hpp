@@ -750,8 +750,9 @@ private:
     // (visually disconnected) body rather than risk creating an unbounded number of bodies
     // from one call, matching the same budget-over-precision tradeoff the editor's own
     // collision-proxy pipeline makes elsewhere in this codebase.
-    std::vector<GameObjectId> fragment_after_damage(GameObjectId id, Object& object);
-    void rebuild_primary_body(Object& object, const std::optional<RigidBodyState>& parentState);
+    [[nodiscard]] std::optional<std::vector<GameObjectId>> fragment_after_damage(GameObjectId id, Object& object);
+    // Create replacement before destroying the old collider; false leaves old body intact.
+    [[nodiscard]] bool rebuild_primary_body(Object& object, const std::optional<RigidBodyState>& parentState);
 
     std::unique_ptr<IRigidBodyWorld> physics_;
     std::set<std::pair<RigidBodyHandle, RigidBodyHandle>> attachmentCollisionFilters_;

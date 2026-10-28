@@ -1390,6 +1390,14 @@ public:
     // voxel objects and reports the box count. View > Collision Shapes draws these boxes.
     bool rebuild_collision_proxies();
     [[nodiscard]] const std::vector<VoxelBox>& collision_proxy(EditorObjectId id) const;
+    // Collision shading is a dedicated pick domain: art visibility does not
+    // prevent selection of a collidable, hidden voxel proxy.
+    [[nodiscard]] const std::optional<EditorCollisionPick>& selected_collision() const noexcept {
+        return selectedCollision_;
+    }
+    // Human-readable diagnostics for Play/Simulate: never claim scene layer is
+    // a physics mask, or absence of a contact in the reference solver means separation.
+    [[nodiscard]] std::string collision_diagnostic_summary() const;
     // Build > Validate Project: lists problems (missing files, broken references, empty or
     // invalid objects, stale assets) in the Problems panel; returns how many were found.
     std::size_t validate_project();
@@ -1715,6 +1723,8 @@ private:
     std::optional<Float3> followAnchor_;
     struct CachedCollisionProxy { std::uint64_t revision{}; std::uint64_t objectStamp{}; std::vector<VoxelBox> boxes; };
     mutable std::map<EditorObjectId, CachedCollisionProxy> collisionProxyCache_;
+    std::optional<EditorCollisionPick> selectedCollision_;
+    int selectedCollisionX_{-10000}, selectedCollisionY_{-10000};
     bool handle_voxel_join_key(std::string_view normalized, bool control, bool shift, bool alt);
     bool scatterActive_{};
     struct DuplicateSpecialState {

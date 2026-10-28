@@ -1,4 +1,5 @@
 #pragma once
+#include <functional>
 
 #include <array>
 #include <cstddef>
@@ -57,6 +58,13 @@ struct FragmentMassProperties {
 // other two axes. Coverage remains exact; no empty voxel is added.
 [[nodiscard]] std::vector<VoxelBox> merge_adjacent_voxel_boxes(std::vector<VoxelBox> boxes);
 [[nodiscard]] std::vector<VoxelBox> build_merged_object_box_proxy(const VoxelObject& object);
+// Builds the exact same merged proxy, reporting progress after every brick.
+// The callback returns false to cancel; output remains unchanged on cancellation.
+// This lets the editor display progress for one very large object (ART-050).
+[[nodiscard]] bool build_merged_object_box_proxy_progress(
+    const VoxelObject& object, std::vector<VoxelBox>& output,
+    const std::function<bool(std::size_t completed, std::size_t total)>& progress);
+
 
 struct SolverBox {
     Float3 center{};      // relative to the rigid body's center of mass

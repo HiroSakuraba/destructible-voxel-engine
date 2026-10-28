@@ -4,6 +4,9 @@
 //   Inspector count matches Play), shading modes, X-Ray Selection, Follow Selection, Validate
 //   Project, File > Open Scene / Open Project / Save As / Import Model, and the honest fallbacks.
 #include "dve/editor_native.hpp"
+#include "dve/collision_convex_set.hpp"
+#include "dve/editor_polygon.hpp"
+#include <array>
 #include "dve/editor_native_renderer.hpp"
 #include "dve/editor_project.hpp"
 #include "dve/fragment.hpp"
@@ -157,6 +160,74 @@ void test_collision() {
     check(shown.lines - plain.lines >= static_cast<int>(controller.collision_proxy(1).size()) * 8,
           "the proxy boxes are drawn (" + std::to_string(shown.lines - plain.lines) + " more lines)");
     check(!controller.dispatch_action("voxel.rebuild_brickmaps"), "Rebuild Brickmaps no longer pretends");
+}
+
+void test_hidden_collision_picker_and_pair_diagnostics() {
+    EditorDocument document;
+    for (EditorObjectId id : {901U, 902U}) {
+        EditorObject object(id, "Hidden collider");
+        object.flags.visible = false;
+        object.voxelSizeMeters = 1.0F;
+        object.voxelScale = {2.0F, 1.0F, 1.0F};
+        object.voxels = std::make_unique<VoxelObject>(id);
+        (void)object.voxels->set_voxel({0, 0, 0}, 1);
+        document.add_object(std::move(object));
+    }
+    const ViewportRay ray{{1.5F, 0.5F, -4.0F}, {0.0F, 0.0F, 1.0F}};
+    const auto hidden = pick_editor_collision_boxes_all(document, ray, 20.0F, nullptr, true);
+    check(hidden.size() == 2U, "collision picker sees overlapping hidden proxies");
+    if (hidden.size() == 2U) {
+        check(hidden[0].objectId == 901U && hidden[1].objectId == 902U,
+              "overlapping collider cycle order is deterministic");
+        check(near(hidden[0].worldDistance, 4.0F),
+              "axis-scaled collision ray retains world distance");
+    }
+    check(pick_editor_collision_boxes_all(document, ray, 20.0F, nullptr, false).empty(),
+          "non-collision picking does not target hidden geometry");
+    document.find_object(901)->flags.collisionEnabled = false;
+    const auto active = pick_editor_collision_boxes_all(document, ray, 20.0F, nullptr, true);
+    check(active.size() == 1U && active[0].objectId == 902U,
+          "disabled collision proxy is never selectable");
+    const std::set<EditorObjectId> excluded{901U};
+    check(pick_editor_collision_boxes_all(document, ray, 20.0F, &excluded, true).empty(),
+          "isolation filter remains effective with hidden proxies");
+    auto owner = make_controller(std::move(document));
+    owner->workspace().select_object(901U);
+    check(owner->collision_diagnostic_summary().find("disabled") != std::string::npos,
+          "collision diagnostics explain disabled collision");
+    owner->workspace().select_object(902U);
+    check(owner->collision_diagnostic_summary().find("scene layer") != std::string::npos,
+          "collision diagnostics distinguish scene layer from physics mask");
+}
+
+void test_convex_piece_collider_picking() {
+    EditorDocument document;
+    EditorObject object(903U,"Exact collision");
+    object.polygon = make_editor_polygon_cube(903U,3.0F);
+    object.flags.visible = false;
+    object.voxelScale = {2.0F, 1.0F, 1.0F};
+    ConvexPrism prism;
+    prism.bottom = {{0,0,0}, {1,0,0}, {1,1,0}, {0,1,0}};
+    prism.top = {{0,0,1}, {1,0,1}, {1,1,1}, {0,1,1}};
+    Component component;
+    component.id = 1U;
+    component.type = std::string(kConvexSetComponent);
+    const std::array<ConvexPrism,1> pieces{prism};
+    component.properties["pieces"] = encode_convex_set(pieces);
+    object.components.push_back(std::move(component));
+    document.add_object(std::move(object));
+    const auto center = pick_editor_collision_boxes_all(
+        document, {{1.0F,0.5F,-3.0F},{0,0,1}}, 10.0F);
+    check(center.size() == 1U && center[0].kind == EditorColliderKind::ConvexPrism,
+          "collision picker uses the certified convex piece (not the art mesh)");
+    const auto outside = pick_editor_collision_boxes_all(
+        document, {{5.0F,0.5F,-3.0F},{0,0,1}}, 10.0F);
+    check(outside.empty(), "convex piece picking rejects a ray through the art mesh but outside the collider");
+    document.find_object(903U)->components.clear();
+    const auto fallback = pick_editor_collision_boxes_all(
+        document, {{5.0F,0.5F,-3.0F},{0,0,1}}, 10.0F);
+    check(fallback.size() == 1U && fallback[0].kind == EditorColliderKind::PolygonBounds,
+          "polygon fallback picks the actual collision bounds when no convex piece exists");
 }
 
 void test_shading_and_xray() {
@@ -575,6 +646,8 @@ int main() {
     test_flood_fill();
     test_drop_to_surface();
     test_collision();
+    test_hidden_collision_picker_and_pair_diagnostics();
+    test_convex_piece_collider_picking();
     test_shading_and_xray();
     test_follow_selection();
     test_validate_project();

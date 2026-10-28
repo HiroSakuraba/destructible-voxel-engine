@@ -209,6 +209,29 @@ std::vector<VoxelBox> build_merged_object_box_proxy(const VoxelObject& object) {
     return merge_adjacent_voxel_boxes(build_object_box_proxy(object));
 }
 
+bool build_merged_object_box_proxy_progress(
+    const VoxelObject& object, std::vector<VoxelBox>& output,
+    const std::function<bool(std::size_t, std::size_t)>& progress) {
+    std::vector<VoxelBox> staged;
+    const auto& bricks = object.bricks();
+    const std::size_t total = bricks.size();
+    if (progress && !progress(0, total)) return false;
+    std::size_t index = 0;
+    for (const auto& entry : bricks) {
+        if (!entry.second.empty()) {
+            std::vector<VoxelBox> boxes = build_brick_box_proxy(object, entry.first);
+            staged.insert(staged.end(), boxes.begin(), boxes.end());
+        }
+        ++index;
+        if (progress && !progress(index, total)) return false;
+    }
+    // This is the same merge algorithm used by Play and the non-progress API.
+    staged = merge_adjacent_voxel_boxes(std::move(staged));
+    if (progress && !progress(total, total)) return false;
+    output = std::move(staged);
+    return true;
+}
+
 FragmentSolverPackage build_fragment_solver_package(
     const VoxelObject& object,
     const RigidTransform& voxelObjectWorldTransform,

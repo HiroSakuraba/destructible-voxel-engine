@@ -5247,6 +5247,51 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
         }
         if (measureActive_) { (void)measure_at(x, y); return; }
         update_hover(x, y);
+        // Collision shading selects solver proxy boxes rather than visible art
+        // surfaces. Clicking the same pixel again cycles overlapping and hidden
+        // colliders, with deterministic depth / object / box ordering.
+        if (selectionDomain_ == SelectionDomain::Objects &&
+            activeTool_ == EditorToolId::Select) {
+            const SettingValue shadingValue = workspace_.settings().value("viewport.shading_mode");
+            const auto* shadingName = std::get_if<std::string>(&shadingValue);
+            if (shadingName && *shadingName == "collision") {
+                const auto hits = pick_editor_collision_boxes_all(
+                    workspace_.document(),
+                    make_viewport_ray(camera_, layout_.viewport, static_cast<float>(x), static_cast<float>(y)),
+                    10000.0F, &viewportSettings_.isolatedObjects, true);
+                if (!hits.empty()) {
+                    std::size_t chosen = 0U;
+                    if (selectedCollision_ && std::abs(x - selectedCollisionX_) <= 3 &&
+                        std::abs(y - selectedCollisionY_) <= 3) {
+                        const auto it = std::find_if(hits.begin(), hits.end(), [&](const EditorCollisionPick& hit) {
+                            return hit.objectId == selectedCollision_->objectId &&
+                                hit.kind == selectedCollision_->kind &&
+                                hit.boxIndex == selectedCollision_->boxIndex &&
+                                hit.box == selectedCollision_->box;
+                        });
+                        if (it != hits.end())
+                            chosen = (static_cast<std::size_t>(it - hits.begin()) + 1U) % hits.size();
+                    }
+                    selectedCollision_ = hits[chosen];
+                    selectedCollisionX_ = x; selectedCollisionY_ = y;
+                    workspace_.select_object(selectedCollision_->objectId);
+                    refresh_menu_state();
+                    const std::string colliderType =
+                        selectedCollision_->kind == EditorColliderKind::VoxelBox ? "box" :
+                        selectedCollision_->kind == EditorColliderKind::ConvexPrism ? "convex piece" :
+                        selectedCollision_->kind == EditorColliderKind::AuthoredHull ? "authored hull" :
+                        "polygon bounds";
+                    set_status("Collision " + colliderType + " " + std::to_string(selectedCollision_->boxIndex + 1U) +
+                        " of object " + std::to_string(selectedCollision_->objectId) +
+                        " (depth " + std::to_string(chosen + 1U) + "/" + std::to_string(hits.size()) +
+                        "; click again to cycle overlapping colliders)");
+                } else {
+                    selectedCollision_.reset();
+                    set_status("No enabled voxel collider under pointer (including hidden proxies)", true);
+                }
+                return;
+            }
+        }
         const bool selectLikeTool = activeTool_ == EditorToolId::Select || activeTool_ == EditorToolId::Translate ||
                                     activeTool_ == EditorToolId::Rotate || activeTool_ == EditorToolId::Scale;
         if (activeTool_ == EditorToolId::Select && begin_shape_selection(x, y, modifiers)) return;
@@ -12273,6 +12318,54 @@ const std::vector<VoxelBox>& NativeEditorController::collision_proxy(EditorObjec
     return cached.boxes;
 }
 
+std::string NativeEditorController::collision_diagnostic_summary() const {
+    const auto& ids = workspace_.selected_objects();
+    if (ids.empty()) return "Collision: select one or two objects for diagnostics";
+    const EditorDocument& document = workspace_.document();
+    const auto failure = [](const EditorObject& obj) -> std::string {
+        if (!obj.flags.collisionEnabled) return "Collision disabled in Inspector";
+        if (obj.voxels && obj.voxels->occupied_voxel_count() == 0)
+            return "Empty voxel geometry: no collider";
+        if (!obj.voxels && !obj.polygon) return "No solid geometry";
+        return {};
+    };
+    if (ids.size() == 1) {
+        const EditorObject* a = document.find_object(*ids.begin());
+        if (!a) return "Collision: selected object missing";
+        if (const std::string problem = failure(*a); !problem.empty())
+            return "Collision " + std::to_string(a->id) + ": " + problem;
+        const auto cache = collisionProxyCache_.find(a->id);
+        // A stale or not-yet-built proxy is a note, not a reason to hide the class/layer explanation.
+        const bool proxyStale = a->voxels && (cache == collisionProxyCache_.end() ||
+            cache->second.revision != a->voxels->revision());
+        return "Collision " + std::to_string(a->id) + ": " +
+            (a->flags.anchored ? "static" : "dynamic") +
+            (a->flags.structural ? ", Full (all categories)" : ", DebrisNoSelf (other debris masked)") +
+            "; editor scene layer " + std::to_string(a->layer) + " (not a physics mask)" +
+            (a->flags.visible ? "" : "; art hidden, collision still active") +
+            (proxyStale ? "; proxy revision stale/not built (a collision query rebuilds it)" : "");
+    }
+    if (ids.size() == 2) {
+        auto it = ids.begin();
+        const EditorObject* a = document.find_object(*it++);
+        const EditorObject* b = document.find_object(*it);
+        if (!a || !b) return "Collision pair: one object missing";
+        if (!a->flags.collisionEnabled || !b->flags.collisionEnabled)
+            return "No collision: one or both objects have collision disabled";
+        if ((!a->flags.structural && !b->flags.structural) &&
+            !a->flags.anchored && !b->flags.anchored)
+            return "No collision: DebrisNoSelf vs DebrisNoSelf is filtered by physics class";
+        if (a->flags.anchored && b->flags.anchored)
+            return "No dynamic contact: both bodies are static";
+        if ((a->attachment && a->parent == b->id) ||
+            (b->attachment && b->parent == a->id))
+            return "No collision: parent-child attachment pair is filtered";
+        return "Pair " + std::to_string(a->id) + "/" + std::to_string(b->id) +
+            ": eligible by authored collision class; check spatial overlap/contact normals";
+    }
+    return "Collision: select exactly two objects to explain pair filtering";
+}
+
 bool NativeEditorController::rebuild_collision_proxies() {
     if (longJob_) { set_status(long_job_busy_reason(), true); return false; }
     const EditorDocument& document = workspace_.document();
@@ -12308,14 +12401,28 @@ bool NativeEditorController::rebuild_collision_proxies() {
                                    : std::shared_ptr<const VoxelObject>(&live, [](const VoxelObject*) {});
     }
     auto shared = std::make_shared<std::vector<Target>>(std::move(targets));
+    std::size_t totalBricks = 0;
+    for (const Target& target : *shared) totalBricks += target.voxels->bricks().size();
     return start_long_job(
         LongJobKind::RebuildCollision, "Rebuild Collision", voxelTotal,
-        [shared](LongJob& job) {
+        [shared, totalBricks](LongJob& job) {
+            std::size_t finishedBricks = 0;
             for (std::size_t i = 0; i < shared->size(); ++i) {
                 if (job.cancelled()) return;
-                job.report(static_cast<float>(i) / static_cast<float>(shared->size()),
-                           "Object " + std::to_string(i + 1) + " of " + std::to_string(shared->size()));
-                (*shared)[i].boxes = build_merged_object_box_proxy(*(*shared)[i].voxels);
+                const std::size_t offset = finishedBricks;
+                const bool complete = build_merged_object_box_proxy_progress(
+                    *(*shared)[i].voxels, (*shared)[i].boxes,
+                    [&](std::size_t done, std::size_t total) {
+                        if (job.cancelled()) return false;
+                        const float fraction = totalBricks == 0U ? 1.0F
+                            : static_cast<float>(offset + done) / static_cast<float>(totalBricks);
+                        job.report(fraction, "Object " + std::to_string(i + 1) + " of " +
+                            std::to_string(shared->size()) + " - brick " +
+                            std::to_string(done) + " of " + std::to_string(total));
+                        return true;
+                    });
+                if (!complete) return;  // cancellation never publishes partial output
+                finishedBricks += (*shared)[i].voxels->bricks().size();
                 (*shared)[i].voxels.reset();
             }
             job.report(1.0F, "Done");

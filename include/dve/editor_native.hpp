@@ -1392,6 +1392,9 @@ public:
     [[nodiscard]] const std::optional<EditorCollisionPick>& selected_collision() const noexcept {
         return selectedCollision_;
     }
+    // Human-readable diagnostics for Play/Simulate: never claim scene layer is
+    // a physics mask, or absence of a contact in the reference solver means separation.
+    [[nodiscard]] std::string collision_diagnostic_summary() const;
     // Build > Validate Project: lists problems (missing files, broken references, empty or
     // invalid objects, stale assets) in the Problems panel; returns how many were found.
     std::size_t validate_project();

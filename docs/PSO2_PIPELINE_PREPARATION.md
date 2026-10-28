@@ -63,17 +63,49 @@ queue.discard_epoch(epoch);
 - Dedicated `.github/workflows/pso2-pipelines.yml` demands Lavapipe rather
   than silently succeeding when no GPU is available.
 
-## What PSO-2A does **not** do yet
+## PSO-2B: opt-in region-streaming publication gate
+
+`RegionStreamingRuntimeConfig::pipelinesReadyForPublication` accepts an
+optional authority-thread callback `bool(objectId)`. When a deferred object
+finishes CPU staging, the runtime retains its completed staging and counts
+`RegionStreamingTickStats::waitingForPipelines` instead of publishing if
+the callback returns false. Future ticks recheck readiness without submitting
+the asset job again or consuming its future twice.
+
+To connect a pipeline queue:
+
+```cpp
+config.pipelinesReadyForPublication = [&](std::uint64_t objectId) {
+    const std::uint64_t epoch = sceneEpochForObject(objectId);
+    return pipelineQueue.ready_to_publish(epoch);
+};
+```
+
+The hosting renderer must own the prepared pipeline handles (take/attach them)
+before making the object drawable. A mere ready callback does not install a
+pipeline into a material table. In particular, client code must not destroy
+or discard a prepared epoch before the renderer has adopted its handles.
+
+Ready CPU staging remains reserved against the existing staging memory
+backpressure; it can be cancelled when the camera moves out of region or
+the scene unloads, and then the reservation is released. No publication
+gate means unchanged R2 behavior.
+
+The new `pipeline_gate_defers_without_restage` test covers two ticks of
+deferred publication, later release, no worker resubmission, and cancellation
+with retained reservation cleanup.
+
+## What PSO-2A/B does **not** do yet
 
 This is the generic, explicit preparation and resource-ownership layer.
 Existing Live Environment and DASHR renderer initialization already compiles
 their fixed pipeline families outside draw recording. This PR does **not**
 replace those renderers' pipeline creation, add a background Vulkan compiler,
 or automatically scan every material from a streamed scene.
-A production host must still stage exactly the needed descriptors, call
-`pump` during loading, and gate scene publication on `ready_to_publish`.
-That host integration plus material/scene variant inventory belongs to
-**PSO-2B**, after this core is verified. In particular, PSO-2A alone makes
+A production host must still inventory the needed exact descriptors, call
+`pump` during loading, and attach prepared pipeline handles before the
+streaming readiness callback releases CPU staging. Automatic variant inventory
+and player renderer adoption belong to **PSO-2C**, following this tranche. In particular, PSO-2A alone makes
 no claim of lower p99 frame time.
 
 PSO-3 then records real variant usage for replay; it must not use unstable

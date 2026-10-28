@@ -12327,8 +12327,8 @@ std::string NativeEditorController::collision_diagnostic_summary() const {
             return "No collision: DebrisNoSelf vs DebrisNoSelf is filtered by physics class";
         if (a->flags.anchored && b->flags.anchored)
             return "No dynamic contact: both bodies are static";
-        if ((a->attachment && a->attachment->parent == b->id) ||
-            (b->attachment && b->attachment->parent == a->id))
+        if ((a->attachment && a->parent == b->id) ||
+            (b->attachment && b->parent == a->id))
             return "No collision: parent-child attachment pair is filtered";
         return "Pair " + std::to_string(a->id) + "/" + std::to_string(b->id) +
             ": eligible by authored collision class; check spatial overlap/contact normals";

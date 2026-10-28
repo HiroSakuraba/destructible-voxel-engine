@@ -307,6 +307,81 @@ std::vector<std::set<std::uint32_t>> polygon_uv_islands(const CookedPolygonAsset
     std::set<std::uint32_t> remaining;for(std::uint32_t f=0;f<neighbors.size();++f)remaining.insert(f);std::vector<std::set<std::uint32_t>> islands;
     while(!remaining.empty()){std::queue<std::uint32_t> q;std::set<std::uint32_t> faces;q.push(*remaining.begin());remaining.erase(remaining.begin());while(!q.empty()){auto f=q.front();q.pop();faces.insert(f);for(auto next:neighbors[f])if(remaining.erase(next))q.push(next);}islands.push_back(std::move(faces));}return islands;
 }
+namespace {
+// Area in the *authored object frame* with axis scaling applied; rotation
+// preserves area, so no world transform is needed. Return double to avoid
+// thin-chart rounding when measuring large meshes.
+double triangle_metric_area(Float3 a,Float3 b,Float3 c,Float3 scale) {
+    const auto u=subtract(multiply_components(b,scale),multiply_components(a,scale));
+    const auto v=subtract(multiply_components(c,scale),multiply_components(a,scale));
+    const double x=double(u.y)*v.z-double(u.z)*v.y;
+    const double y=double(u.z)*v.x-double(u.x)*v.z;
+    const double z=double(u.x)*v.y-double(u.y)*v.x;
+    return .5*std::sqrt(x*x+y*y+z*z);
+}
+double triangle_uv_area(Float2 a,Float2 b,Float2 c) {
+    return .5*std::abs((double(b.x)-a.x)*(double(c.y)-a.y)-
+                         (double(b.y)-a.y)*(double(c.x)-a.x));
+}
+bool valid_density_settings(const UvEditSettings& s) {
+    return s.channel<2 && s.textureWidth>0 && s.textureHeight>0 &&
+           s.textureWidth<=16384 && s.textureHeight<=16384 &&
+           std::isfinite(s.objectScale.x) && std::isfinite(s.objectScale.y) &&
+           std::isfinite(s.objectScale.z) && s.objectScale.x>0 &&
+           s.objectScale.y>0 && s.objectScale.z>0;
+}
+} // namespace
+
+UvDensityReport measure_polygon_uv_density(const CookedPolygonAsset& mesh,
+        const std::set<std::uint32_t>& corners,const UvEditSettings& settings) {
+    UvDensityReport result;
+    const auto fail=[&](std::string message) {
+        result.charts.clear();result.error=std::move(message);return result;
+    };
+    if(!validate_polygon_asset(mesh) || corners.empty() || !valid_density_settings(settings))
+        return fail("Select UV faces with a valid channel, object metric and texture size");
+    std::set<std::uint32_t> selectedFaces;
+    for(auto corner:corners) {
+        if(corner>=mesh.indices.size())return fail("UV corner selection is stale");
+        selectedFaces.insert(corner/3);
+    }
+    for(auto face:selectedFaces)for(unsigned i=0;i<3;++i)
+        if(!corners.contains(face*3+i))
+            return fail("Density works on complete UV faces; select an island or all corners");
+    const auto islands=polygon_uv_islands(mesh,settings.channel,settings.seams);
+    const double texels=double(settings.textureWidth)*settings.textureHeight;
+    for(const auto& island:islands) {
+        const bool selected=std::any_of(island.begin(),island.end(),
+            [&](std::uint32_t face){return selectedFaces.contains(face);});
+        if(!selected)continue;
+        if(std::any_of(island.begin(),island.end(),
+            [&](std::uint32_t face){return !selectedFaces.contains(face);}))
+            return fail("Select whole UV islands for density measurement/matching");
+        UvDensityChart chart;chart.faces=island.size();
+        for(auto face:island) {
+            const auto a=mesh.vertices[mesh.indices[face*3]];
+            const auto b=mesh.vertices[mesh.indices[face*3+1]];
+            const auto c=mesh.vertices[mesh.indices[face*3+2]];
+            chart.geometricAreaSquareMeters+=triangle_metric_area(
+                a.position,b.position,c.position,settings.objectScale);
+            chart.uvArea+=triangle_uv_area(
+                settings.channel==0?a.texcoord:a.texcoord1,
+                settings.channel==0?b.texcoord:b.texcoord1,
+                settings.channel==0?c.texcoord:c.texcoord1);
+        }
+        if(!(chart.geometricAreaSquareMeters>1e-16) || !(chart.uvArea>1e-16))
+            return fail("UV chart is collapsed or has zero physical area; unwrap it first");
+        chart.texelsPerMeter=std::sqrt(texels*chart.uvArea/chart.geometricAreaSquareMeters);
+        if(!std::isfinite(chart.texelsPerMeter))return fail("UV density exceeds finite range");
+        result.geometricAreaSquareMeters+=chart.geometricAreaSquareMeters;
+        result.uvArea+=chart.uvArea;
+        result.charts.push_back(chart);
+    }
+    if(result.charts.empty())return fail("No selected UV islands");
+    result.texelsPerMeter=std::sqrt(texels*result.uvArea/result.geometricAreaSquareMeters);
+    return result;
+}
+
 PolygonEditResult edit_polygon_uv(const CookedPolygonAsset& source,const std::set<std::uint32_t>& corners,UvEdit operation,const UvEditSettings& settings){
     PolygonEditResult r;r.mesh=source;r.selection={source.objectId,PolygonSelectionMode::Face,{}};
     auto fail=[&](std::string e){r.mesh=source;r.error=std::move(e);return r;};
@@ -318,13 +393,25 @@ PolygonEditResult edit_polygon_uv(const CookedPolygonAsset& source,const std::se
         const auto edges=polygon_all_components(source,PolygonSelectionMode::Edge);
         for(const auto edge : settings.seams) if(!edges.contains(edge)) return fail("UV seam selection is stale");
     }
-    if((operation==UvEdit::Unwrap||operation==UvEdit::Pack)&&corners.size()>60000)return fail("Select at most 20,000 UV faces per unwrap/pack operation");
+    if((operation==UvEdit::Unwrap||operation==UvEdit::Pack||operation==UvEdit::MatchDensity||
+        operation==UvEdit::AlignIslandU||operation==UvEdit::AlignIslandV)&&corners.size()>60000)return fail("Select at most 20,000 UV faces per unwrap/pack operation");
     if(operation==UvEdit::Scale&&(!(settings.vector.x>0)||!(settings.vector.y>0)))return fail("UV scale factors must be positive");
     auto& m=r.mesh;std::set<std::uint32_t> outside;for(std::uint32_t c=0;c<source.indices.size();++c)if(!corners.contains(c))outside.insert(source.indices[c]);std::map<std::uint32_t,std::uint32_t> remap;
     for(auto c:corners){auto old=source.indices[c];auto [it,added]=remap.emplace(old,old);if(added&&outside.contains(old)){it->second=std::uint32_t(m.vertices.size());m.vertices.push_back(source.vertices[old]);}m.indices[c]=it->second;r.selection.components.insert(c/3);}
     std::set<std::uint32_t> selected;for(auto c:corners)selected.insert(m.indices[c]);
-    if(operation==UvEdit::Unwrap||operation==UvEdit::Pack){
+    if(operation==UvEdit::Unwrap||operation==UvEdit::Pack||operation==UvEdit::MatchDensity||
+       operation==UvEdit::AlignIslandU||operation==UvEdit::AlignIslandV){
         std::set<std::uint32_t> faces;for(auto c:corners)faces.insert(c/3);for(auto f:faces)for(unsigned j=0;j<3;++j)if(!corners.contains(f*3+j))return fail("Select complete faces/islands for Unwrap or Pack");
+        // Density and per-island alignment intentionally reject partial islands.
+        if(operation==UvEdit::MatchDensity||operation==UvEdit::AlignIslandU||operation==UvEdit::AlignIslandV){
+            const auto report=measure_polygon_uv_density(m,corners,settings);
+            if(!report)return fail(report.error);
+            if(operation==UvEdit::MatchDensity && (!(settings.targetTexelsPerMeter>0)||
+               !std::isfinite(settings.targetTexelsPerMeter)))
+               return fail("Target density must be a finite positive texels-per-metre value");
+            for(const auto& [corner,pin] : settings.pins)
+                if(corners.contains(corner))return fail("Selected UV island contains saved pins; clear pins before automatic layout");
+        }
         std::vector<std::set<std::uint32_t>> charts;for(auto island:polygon_uv_islands(m,settings.channel,settings.seams)){std::set<std::uint32_t> chart;std::set_intersection(island.begin(),island.end(),faces.begin(),faces.end(),std::inserter(chart,chart.end()));if(!chart.empty())charts.push_back(std::move(chart));}
         std::map<std::uint32_t,std::size_t> owner;
         for(std::size_t chartIndex=0;chartIndex<charts.size();++chartIndex){std::map<std::uint32_t,std::uint32_t> copies;
@@ -335,7 +422,49 @@ PolygonEditResult edit_polygon_uv(const CookedPolygonAsset& source,const std::se
                 for(auto face:chart){for(unsigned j=0;j<3;++j){auto c=face*3+j;auto v=m.vertices[m.indices[c]];m.indices[c]=std::uint32_t(m.vertices.size());m.vertices.push_back(v);}std::string triangleError;
                     if(!unwrap_chart(m,{face},settings.channel,triangleError,pinsCopy,settings.seams))return fail(triangleError);}
             }else m=std::move(temporary);}}
-        else {
+        else if(operation==UvEdit::MatchDensity||operation==UvEdit::AlignIslandU||operation==UvEdit::AlignIslandV) {
+            for(const auto& chart:charts){
+                std::set<std::uint32_t> indices;
+                Float2 centre{};
+                for(auto face:chart)for(unsigned i=0;i<3;++i)indices.insert(m.indices[face*3+i]);
+                for(auto index:indices){auto p=uv(m.vertices[index],settings.channel);centre.x+=p.x;centre.y+=p.y;}
+                centre.x/=float(indices.size());centre.y/=float(indices.size());
+                double angle=0.0,scale=1.0;
+                if(operation==UvEdit::MatchDensity){
+                    std::set<std::uint32_t> chartCorners;
+                    for(auto face:chart)for(unsigned i=0;i<3;++i)chartCorners.insert(face*3+i);
+                    const auto density=measure_polygon_uv_density(m,chartCorners,settings);
+                    if(!density)return fail(density.error);
+                    scale=double(settings.targetTexelsPerMeter)/density.texelsPerMeter;
+                    if(!(scale>0.0)||!std::isfinite(scale)||scale>1.0e7)
+                        return fail("Requested density change exceeds the UV numeric budget");
+                } else {
+                    // Longest actual UV chart edge is a stable, artist-readable
+                    // orientation reference. Rotating about the island centroid
+                    // preserves its exact signed triangle areas and aspect ratio.
+                    double best=0.0;Float2 direction{};
+                    for(auto face:chart)for(unsigned i=0;i<3;++i){
+                        auto a=uv(m.vertices[m.indices[face*3+i]],settings.channel);
+                        auto b=uv(m.vertices[m.indices[face*3+(i+1)%3]],settings.channel);
+                        const double dx=double(b.x)-a.x,dy=double(b.y)-a.y;
+                        if(dx*dx+dy*dy>best){best=dx*dx+dy*dy;direction={float(dx),float(dy)};}
+                    }
+                    if(!(best>1.0e-20))return fail("UV island has no nonzero edge to align");
+                    angle=(operation==UvEdit::AlignIslandV?1.5707963267948966:0.0)-
+                        std::atan2(double(direction.y),double(direction.x));
+                }
+                const double cosine=std::cos(angle),sine=std::sin(angle);
+                for(auto index:indices){
+                    auto p=uv(m.vertices[index],settings.channel);
+                    const double x=double(p.x)-centre.x,y=double(p.y)-centre.y;
+                    p={float(double(centre.x)+scale*(x*cosine-y*sine)),
+                       float(double(centre.y)+scale*(x*sine+y*cosine))};
+                    if(!std::isfinite(p.x)||!std::isfinite(p.y))
+                        return fail("Resulting UV coordinates overflowed");
+                    set_uv(m.vertices[index],settings.channel,p);
+                }
+            }
+        } else {
             if(!(settings.padding>=0&&settings.padding<.25F))return fail("UV padding must be between 0 and 0.25");
             auto grid=std::size_t(std::ceil(std::sqrt(double(charts.size()))));double cell=1.0/double(grid),margin=settings.padding;
             if(margin*2>=cell)return fail("Padding leaves no room for the selected island count");
@@ -344,6 +473,18 @@ PolygonEditResult edit_polygon_uv(const CookedPolygonAsset& source,const std::se
                 double extent=std::max(double(maximum.x-minimum.x),double(maximum.y-minimum.y));if(!(extent>1e-12))return fail("Cannot pack a collapsed UV island; unwrap it first");double scale=(cell-2*margin)/extent;
                 for(auto v:vertices){auto p=uv(m.vertices[v],settings.channel);set_uv(m.vertices[v],settings.channel,{float(double(i%grid)*cell+margin+(p.x-minimum.x)*scale),float(double(i/grid)*cell+margin+(p.y-minimum.y)*scale)});}}
         }
+    }else if(operation==UvEdit::StraightenU||operation==UvEdit::StraightenV) {
+        for(const auto& [corner,pin]:settings.pins)
+            if(corners.contains(corner))return fail("Selection includes saved UV pins; clear them before straightening");
+        // Straighten U holds V fixed (horizontal line); Straighten V holds U
+        // fixed (vertical line). Detached shared attributes protect outsiders.
+        double sum=0.0;
+        for(auto v:selected){const auto p=uv(m.vertices[v],settings.channel);
+            sum+=operation==UvEdit::StraightenU?p.y:p.x;}
+        const float constant=float(sum/double(selected.size()));
+        for(auto v:selected){auto p=uv(m.vertices[v],settings.channel);
+            if(operation==UvEdit::StraightenU)p.y=constant;else p.x=constant;
+            set_uv(m.vertices[v],settings.channel,p);}
     }else if(operation==UvEdit::Stitch){
         std::map<std::tuple<float,float,float>,std::vector<std::uint32_t>> groups;for(auto v:selected){auto p=m.vertices[v].position;groups[{p.x,p.y,p.z}].push_back(v);}for(const auto& [p,vs]:groups){(void)p;Float2 average{};for(auto v:vs){auto x=uv(m.vertices[v],settings.channel);average.x+=x.x;average.y+=x.y;}average.x/=float(vs.size());average.y/=float(vs.size());for(auto v:vs)set_uv(m.vertices[v],settings.channel,average);}
     }else for(auto v:selected){auto p=uv(m.vertices[v],settings.channel);float x=p.x-settings.pivot.x,y=p.y-settings.pivot.y;

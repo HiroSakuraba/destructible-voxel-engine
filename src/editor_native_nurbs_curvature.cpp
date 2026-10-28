@@ -80,13 +80,19 @@ bool NativeEditorController::bridge_nurbs_curves(){
         if(!s->is_curve()){set_status("A G2 bridge joins two curves, not surfaces",true);return false;}
         curves.push_back(std::move(*s));
     }
-    auto bridge=bridge_nurbs_curves_g2(curves[0],curves[1],&error);
+    auto bridge=bridge_nurbs_curves_g2(curves[0],curves[1],&error,true);
     if(!bridge){set_status(error,true);return false;}
     // Built in world space, so the new object has the identity pose and unit scale.
-    if(!create_nurbs_source(bridge->source,"NURBS G2 Bridge",std::pair{RigidTransform{},Float3{1,1,1}}))return false;
+    if(!create_nurbs_source(bridge->source,bridge->tangentOnly?"NURBS G1 Bridge":"NURBS G2 Bridge",std::pair{RigidTransform{},Float3{1,1,1}}))return false;
     auto first=nurbs_curve_join_continuity(curves[0],bridge->source),second=nurbs_curve_join_continuity(curves[1],bridge->source);
-    std::ostringstream text;text.imbue(std::locale::classic());text<<std::setprecision(4)
-        <<"G2 bridge added (cubic; handles "<<bridge->handleA<<" and "<<bridge->handleB<<" world units; "<<bridge->solutions
+    std::ostringstream text;text.imbue(std::locale::classic());text<<std::setprecision(4);
+    if(bridge->tangentOnly){
+        text<<"G1 bridge added (tangent only; curvature jumps at the ends). "<<bridge->fallbackReason<<". Ends: "
+            <<(first?nurbs_continuity_name(first->level):"?")<<" / "<<(second?nurbs_continuity_name(second->level):"?")<<"; one undo step";
+        set_status(text.str(),false,20.0F);
+        return true;
+    }
+    text<<"G2 bridge added (cubic; handles "<<bridge->handleA<<" and "<<bridge->handleB<<" world units; "<<bridge->solutions
         <<(bridge->solutions==1?" solution":" solutions, kept the most stable")<<"). Ends: "
         <<(first?nurbs_continuity_name(first->level):"?")<<" / "<<(second?nurbs_continuity_name(second->level):"?")<<"; one undo step";
     set_status(text.str(),false,15.0F);

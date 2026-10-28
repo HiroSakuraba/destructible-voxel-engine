@@ -364,7 +364,7 @@ std::vector<double> real_roots(std::vector<double> c, double lo, double hi) {
 }
 } // namespace
 
-std::optional<NurbsCurveBridge> bridge_nurbs_curves_g2(const NurbsSource& a, const NurbsSource& b, std::string* e) {
+std::optional<NurbsCurveBridge> bridge_nurbs_curves_g2(const NurbsSource& a, const NurbsSource& b, std::string* e, bool tangentFallback) {
     if (!validate_nurbs(a, e) || !validate_nurbs(b, e)) return std::nullopt;
     if (!a.is_curve() || !b.is_curve()) return fail<NurbsCurveBridge>(e, "A G2 bridge needs two NURBS curves");
     std::optional<NurbsCurvePoint> ends[2][2];
@@ -388,6 +388,23 @@ std::optional<NurbsCurveBridge> bridge_nurbs_curves_g2(const NurbsSource& a, con
     // Travel directions of the bridge: leave A going on, arrive at D going the way B continues.
     const V T0 = out.endOfA ? pa.tangent : mul(pa.tangent, -1.0);
     const V T1 = out.endOfB ? mul(pb.tangent, -1.0) : pb.tangent;
+    auto build = [&](double l0, double l1) -> std::optional<NurbsCurveBridge> {
+        out.handleA = l0; out.handleB = l1;
+        const V p1 = add(A, mul(T0, l0)), p2 = sub(D, mul(T1, l1));
+        out.source.columns = 4;
+        out.source.u.degree = 3;
+        out.source.u.knots = {0, 0, 0, 0, 1, 1, 1, 1};
+        out.source.controls = {{A[0], A[1], A[2], 1}, {p1[0], p1[1], p1[2], 1}, {p2[0], p2[1], p2[2], 1}, {D[0], D[1], D[2], 1}};
+        if (!validate_nurbs(out.source, e)) return std::nullopt;
+        return out;
+    };
+    // Tangent-only fallback: continue both tangents with handles a third of the chord.
+    auto fallback = [&](std::string reason) -> std::optional<NurbsCurveBridge> {
+        if (!tangentFallback) return fail<NurbsCurveBridge>(e, std::move(reason));
+        out.tangentOnly = true;
+        out.fallbackReason = std::move(reason);
+        return build(chord / 3, chord / 3);
+    };
     // The plane: the best-conditioned cross product of the directions involved.
     const V unitChord = mul(chordVector, 1 / chord);
     const V candidates[] = {T0, T1, unitChord, pa.curvatureVector, pb.curvatureVector};
@@ -406,7 +423,7 @@ std::optional<NurbsCurveBridge> bridge_nurbs_curves_g2(const NurbsSource& a, con
     }
     for (unsigned i = 0; i < 5; ++i)
         if (std::abs(dot(candidates[i], n)) > 1e-6 * std::max(norm(candidates[i]), 1e-300))
-            return fail<NurbsCurveBridge>(e, "The two ends, their tangents and curvature do not lie in one plane; a planar cubic bridge cannot match both");
+            return fallback("The two ends, their tangents and curvature do not lie in one plane; a planar cubic bridge cannot match both");
     // Work in units of the chord so the polynomial is well scaled.
     const double k0 = dot(cross(T0, pa.curvatureVector), n) * chord, k1 = dot(cross(T1, pb.curvatureVector), n) * chord;
     const double a0 = 1.5 * k0, a1 = 1.5 * k1, s = dot(cross(T0, T1), n), c0 = dot(cross(T0, unitChord), n), c1 = dot(cross(unitChord, T1), n);
@@ -435,7 +452,7 @@ std::optional<NurbsCurveBridge> bridge_nurbs_curves_g2(const NurbsSource& a, con
     }
     out.solutions = unsigned(solutions.size());
     if (solutions.empty())
-        return fail<NurbsCurveBridge>(e, "No cubic bridge meets both ends with their tangents and curvature (for example, parallel straight ends offset sideways); move an end or bridge with a longer curve");
+        return fallback("No cubic bridge meets both ends with their tangents and curvature (for example, parallel straight ends offset sideways); move an end or bridge with a longer curve");
     double bestWeight = -1;
     std::array<double, 2> chosen{};
     for (const auto& l : solutions) {
@@ -445,15 +462,7 @@ std::optional<NurbsCurveBridge> bridge_nurbs_curves_g2(const NurbsSource& a, con
         const double w = std::pow(l[0] * l[1] * std::acos(-cosine) / (l[0] * l[0] + l[1] * l[1]), 2);
         if (w > bestWeight) { bestWeight = w; chosen = l; }
     }
-    out.handleA = chosen[0] * chord;
-    out.handleB = chosen[1] * chord;
-    const V p1 = add(A, mul(T0, out.handleA)), p2 = sub(D, mul(T1, out.handleB));
-    out.source.columns = 4;
-    out.source.u.degree = 3;
-    out.source.u.knots = {0, 0, 0, 0, 1, 1, 1, 1};
-    out.source.controls = {{A[0], A[1], A[2], 1}, {p1[0], p1[1], p1[2], 1}, {p2[0], p2[1], p2[2], 1}, {D[0], D[1], D[2], 1}};
-    if (!validate_nurbs(out.source, e)) return std::nullopt;
-    return out;
+    return build(chosen[0] * chord, chosen[1] * chord);
 }
 
 } // namespace dve

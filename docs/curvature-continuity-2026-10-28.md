@@ -112,6 +112,11 @@ S-bends work. `bridge_nurbs_curves_g2(a, b)`:
     sideways, or a start that curves away from where B is. These are refused with that
     explanation.
   - Touching ends are refused too.
+- **Fallback.** In the editor, an impossible bridge falls back to a tangent-only (G1) bridge,
+  passed as `tangentFallback = true` to the core call. That bridge has handles a third of the
+  chord and is named "NURBS G1 Bridge". The status line starts "G1 bridge added (tangent only;
+  curvature jumps at the ends)", followed by the reason G2 was impossible. Touching ends are
+  still refused. Without the flag, the core call refuses as before.
 - **World space.** The bridge is built in world space, so the new object has the identity
   pose. The status reports the G0/G1/G2 result at both ends.
 
@@ -147,6 +152,8 @@ Catmull-Rom dollies shape each segment in its own parameter.
   - collinear ends.
 
   Out-of-plane ends, parallel straight ends offset sideways, and touching ends are refused.
+  With the fallback, the first two give tangent-only bridges with third-of-chord handles and
+  the reason. Touching ends still refuse, and a possible G2 bridge is unchanged.
 - **Joins.**
   - A leg into the fillet is G1, with a jump of exactly 1/r.
   - A leg into the blend is G2, in either order and direction.
@@ -166,6 +173,7 @@ Catmull-Rom dollies shape each segment in its own parameter.
     2.343 at fraction 0.25, set through the new field.
   - The bridge is built in world space from posed objects, reports G2 at both ends, and is
     one undo step.
+  - Parallel offset ends give a "NURBS G1 Bridge" with the warning.
   - The comb toggles, and a mixed curve-and-surface report is refused.
 - **Dolly.**
   - Both modes pass through every key.

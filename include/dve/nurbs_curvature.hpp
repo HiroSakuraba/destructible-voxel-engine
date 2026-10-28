@@ -107,8 +107,14 @@ struct NurbsCurveBridge {
     bool endOfA{}, endOfB{};      // which ends were bridged (true: upper end of the domain)
     double handleA{}, handleB{};  // l0, l1
     unsigned solutions{};         // positive exact solutions found
+    // Set when no curvature-matched cubic exists and tangentFallback was allowed: the bridge
+    // then only continues the tangents (G1), with handles a third of the chord, and
+    // fallbackReason says why G2 was impossible.
+    bool tangentOnly{};
+    std::string fallbackReason;
 };
 [[nodiscard]] std::optional<NurbsCurveBridge> bridge_nurbs_curves_g2(
-    const NurbsSource& a, const NurbsSource& b, std::string* error = nullptr);
+    const NurbsSource& a, const NurbsSource& b, std::string* error = nullptr,
+    bool tangentFallback = false);
 
 } // namespace dve

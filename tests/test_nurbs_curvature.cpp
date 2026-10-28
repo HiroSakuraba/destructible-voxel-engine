@@ -13,6 +13,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 
 using namespace dve;
 using namespace dve::editor;
@@ -170,6 +171,20 @@ void bridges() {
     check(!bridge_nurbs_curves_g2(arc, lifted, &error) && error.find("one plane") != std::string::npos, "non-planar refuses");
     check(!bridge_nurbs_curves_g2(polyline({{0,0,0},{1,0,0}}), polyline({{3,1,0},{4,1,0}}), &error) && error.find("No cubic bridge") != std::string::npos, "parallel offset refuses: " + error);
     check(!bridge_nurbs_curves_g2(polyline({{0,0,0},{1,0,0}}), polyline({{1,0,0},{1,1,0}}), &error) && error.find("already touch") != std::string::npos, "touching refuses");
+    // With the fallback allowed, impossible cases give a tangent-only (G1) bridge and say why.
+    for (const auto& [a, b, why] : {std::tuple{polyline({{0,0,0},{1,0,0}}), polyline({{3,1,0},{4,1,0}}), "No cubic bridge"},
+                                    std::tuple{arc, lifted, "one plane"}}) {
+        auto bridge = bridge_nurbs_curves_g2(a, b, &error, true);
+        check(bridge && bridge->tangentOnly && bridge->fallbackReason.find(why) != std::string::npos, std::string("fallback: ") + why);
+        auto ja = nurbs_curve_join_continuity(a, bridge->source), jb = nurbs_curve_join_continuity(b, bridge->source);
+        check(ja && jb && ja->level >= NurbsContinuity::G1 && jb->level >= NurbsContinuity::G1, std::string("fallback keeps tangents: ") + why);
+        const double chord = std::hypot(bridge->source.controls[3].x - bridge->source.controls[0].x, bridge->source.controls[3].y - bridge->source.controls[0].y, bridge->source.controls[3].z - bridge->source.controls[0].z);
+        check(near(bridge->handleA, chord / 3, 1e-12) && near(bridge->handleB, chord / 3, 1e-12), "fallback handles are a third of the chord");
+    }
+    check(!bridge_nurbs_curves_g2(polyline({{0,0,0},{1,0,0}}), polyline({{1,0,0},{1,1,0}}), &error, true), "touching still refuses with the fallback");
+    // A possible G2 bridge is unchanged by allowing the fallback.
+    auto same = bridge_nurbs_curves_g2(arc, line, &error, true);
+    check(same && !same->tangentOnly && same->source == first.source, "fallback only when needed");
 }
 
 NurbsSource reference_patch() {
@@ -328,6 +343,13 @@ void editor_actions() {
     auto bridgeSource = editor_nurbs_source(*document.find_object(*c.workspace().selected_object()));
     check(bridgeSource && std::any_of(bridgeSource->controls.begin(), bridgeSource->controls.end(), [](const NurbsPoint& p) { return near(p.x, 1, 1e-9) && near(p.y, 0, 1e-9) && near(p.z, 2, 1e-9); }), "bridge built in world space (arc end moved by the pose)");
     check(c.dispatch_action("edit.undo") && document.objects().size() == beforeBridge, "bridge undo");
+    // Parallel straight ends offset sideways: a G1 bridge with a warning.
+    add(document, 12, polyline({{0,0,10},{1,0,10}}));
+    add(document, 13, polyline({{3,1,10},{4,1,10}}));
+    c.workspace().select_object(12);
+    c.workspace().add_to_selection(13);
+    check(c.dispatch_action("nurbs.bridge_g2") && c.status().text.starts_with("G1 bridge added (tangent only") &&
+          document.find_object(*c.workspace().selected_object())->name == "NURBS G1 Bridge", "G1 fallback in the editor: " + c.status().text);
     // The comb toggle.
     check(c.dispatch_action("nurbs.show_curvature") && c.dispatch_action("nurbs.show_curvature"), "comb toggles");
     // Mixed selections refuse.

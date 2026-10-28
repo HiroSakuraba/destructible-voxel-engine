@@ -66,7 +66,64 @@ static void scene_unload_drains_staging_futures() {
     require(world.published == 0);
 }
 
+// PSO-2B: a completed CPU stage must not be published until its GPU
+// pipeline requirements are ready. The expensive staging job is not repeated.
+static void pipeline_gate_defers_without_restage() {
+    RegionCatalog catalog;
+    require(catalog.set_object_regions(401, std::vector<RegionKey>{{1,0,0,0,0}}));
+    RuntimeSceneWorld world;
+    world.store.list = {{{401,false},false}};
+    RuntimeSceneStagingExecutor jobs;
+    RegionStreamingRuntimeConfig config;
+    config.planner = {1,3,100,1,1,1};
+    bool ready=false;
+    std::size_t gateCalls=0U;
+    config.pipelinesReadyForPublication=[&](std::uint64_t id) {
+        require(id==401);
+        ++gateCalls;
+        return ready;
+    };
+    RegionStreamingRuntime runtime(catalog,world,jobs,1,config);
+    const RegionKey camera{1,0,0,0,0};
+    require(runtime.tick(camera,0U).submitted==1);
+    jobs.complete(401);
+    auto stats=runtime.tick(camera,1U);
+    require(stats.completed==1 && stats.waitingForPipelines==1 &&
+            stats.published==0 && stats.pending==1 && jobs.submissions==1);
+    stats=runtime.tick(camera,2U);
+    require(stats.completed==0 && stats.waitingForPipelines==1 &&
+            stats.published==0 && jobs.submissions==1 && gateCalls==2U);
+    ready=true;
+    stats=runtime.tick(camera,3U);
+    require(stats.completed==0 && stats.waitingForPipelines==0 &&
+            stats.published==1 && stats.pending==0 && world.published==1);
+    require(jobs.submissions==1 && jobs.reservations.at(401).expired());
+
+    // A cancelled scene releases staging retained while PSOs were missing.
+    ready=false;
+    // Use a separate runtime for cancellation with fresh catalog/world.
+    RegionCatalog otherCatalog;
+    require(otherCatalog.set_object_regions(501,std::vector<RegionKey>{{1,0,0,0,0}}));
+    RuntimeSceneWorld otherWorld;
+    otherWorld.store.list={{{501,false},false}};
+    RuntimeSceneStagingExecutor otherJobs;
+    RegionStreamingRuntimeConfig otherConfig;
+    otherConfig.planner={1,3,100,1,1,1};
+    otherConfig.pipelinesReadyForPublication=[](std::uint64_t){return false;};
+    RegionStreamingRuntime other(otherCatalog,otherWorld,otherJobs,1,otherConfig);
+    require(other.tick(camera,0).submitted==1);
+    otherJobs.complete(501);
+    require(other.tick(camera,1).waitingForPipelines==1);
+    require(other.pending_count()==1 && !otherJobs.reservations.at(501).expired());
+    const RegionKey far{1,0,100,0,0};
+    stats=other.tick(far,2);
+    require(stats.discarded==1 && other.pending_count()==0);
+    require(otherJobs.reservations.at(501).expired());
+    require(otherWorld.published==0);
+}
+
 int main() {
+    pipeline_gate_defers_without_restage();
     retry_backoff_does_not_consume_load_slots();
     scene_unload_drains_staging_futures();
     RegionCatalog catalog;

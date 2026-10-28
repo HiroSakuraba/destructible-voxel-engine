@@ -553,8 +553,10 @@ void test_carved_holes_rebuild_collision() {
 
 class RejectSecondBodyCreation final : public IRigidBodyWorld {
 public:
-    explicit RejectSecondBodyCreation(bool dynamic) : dynamic_(dynamic) {}
+    explicit RejectSecondBodyCreation(bool dynamic, bool rejectFragments = false)
+        : dynamic_(dynamic), rejectFragments_(rejectFragments) {}
     RigidBodyHandle create_body(const RigidBodyCreateDesc& desc) override {
+        if (rejectFragments_) return kInvalidRigidBodyHandle;
         if (dynamic_ && ++attempts_ == 2U) return kInvalidRigidBodyHandle;
         return backend_.create_body(desc);
     }
@@ -576,6 +578,7 @@ public:
     [[nodiscard]] std::size_t body_count() const noexcept { return backend_.body_count(); }
 private:
     bool dynamic_{};
+    bool rejectFragments_{};
     std::size_t attempts_{};
     ReferenceRigidBodyWorld backend_;
 };
@@ -605,6 +608,53 @@ void test_failed_single_piece_collision_rebuild_rolls_back() {
         CHECK(world.raycast(ray, {0, 0, 1}, 6.0F).has_value());
         CHECK(!world.physics().ray_cast_all(ray, {0, 0, 1}, 6.0F).empty());
         CHECK(eventCount == 0U);
+    }
+}
+
+void test_failed_split_body_creation_is_atomic() {
+    for (const bool failFragment : {true, false}) {
+        // A static dumbbell: failure either in its dynamic child body or in
+        // its new static primary body must leave the original world intact.
+        auto physics = std::make_unique<RejectSecondBodyCreation>(false,failFragment);
+        auto* backend = physics.get();
+        GameWorld world(std::move(physics));
+        auto voxels = std::make_unique<VoxelObject>(7911U);
+        for (int x = 0; x < 3; ++x)
+            for (int y = 0; y < 2; ++y)
+                for (int z = 0; z < 2; ++z)
+                    (void)voxels->set_voxel({x,y,z},1);
+        (void)voxels->set_voxel({3,0,0},1);
+        for (int x = 4; x < 7; ++x)
+            for (int y = 0; y < 2; ++y)
+                for (int z = 0; z < 2; ++z)
+                    (void)voxels->set_voxel({x,y,z},1);
+        GameObjectDesc desc;
+        desc.name = "Transactional split";
+        desc.dynamic = false;
+        desc.voxelSizeMeters = 1.0F;
+        desc.voxels = std::move(voxels);
+        const GameObjectId id = world.create_object(std::move(desc));
+        CHECK(id != kInvalidGameObjectId);
+        if (id == kInvalidGameObjectId) continue;
+        std::size_t spawned = 0, damaged = 0;
+        world.on_damage([&](const GameDamageEvent&) { ++damaged; });
+        const auto originalCount = world.voxel_count(id);
+        const auto originalHash = world.voxel_brick_snapshot(id,{0,0,0});
+        const Float3 leftRay{0.5F,0.5F,-3.0F}, rightRay{5.5F,0.5F,-3.0F};
+        CHECK(!world.physics().ray_cast_all(leftRay,{0,0,1},10).empty());
+        CHECK(!world.physics().ray_cast_all(rightRay,{0,0,1},10).empty());
+        const auto failed = world.damage_sphere(id,{3.5F,0.5F,0.5F},0.6F);
+        CHECK(!failed.has_value());
+        CHECK(world.object_count() == 1U);
+        CHECK(world.voxel_count(id) == originalCount);
+        CHECK(backend->body_count() == 1U);
+        CHECK(world.raycast(leftRay,{0,0,1},10).has_value());
+        CHECK(world.raycast(rightRay,{0,0,1},10).has_value());
+        CHECK(!world.physics().ray_cast_all(leftRay,{0,0,1},10).empty());
+        CHECK(!world.physics().ray_cast_all(rightRay,{0,0,1},10).empty());
+        const auto restored = world.voxel_brick_snapshot(id,{0,0,0});
+        CHECK(originalHash && restored && originalHash->contentHash == restored->contentHash);
+        CHECK(spawned == 0U && damaged == 0U);
     }
 }
 
@@ -906,6 +956,7 @@ int main() {
     test_carved_holes_rebuild_collision();
     test_repaired_moving_collision_preserves_velocity_field();
     test_failed_single_piece_collision_rebuild_rolls_back();
+    test_failed_split_body_creation_is_atomic();
     test_repeated_same_brick_cuts_update_physics_collision();
     test_fragment_cap_keeps_smallest_attached();
     test_splitting_debris_at_the_cap_keeps_the_piece_being_split();

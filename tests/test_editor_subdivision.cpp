@@ -87,6 +87,53 @@ void refusals() {
     check(c.dispatch_action("physics.stop"), "Stop");
 }
 
+void uv_smoothing_completion() {
+    auto control=make_editor_polygon_cube(1);
+    SubdivisionSettings settings{2,false};
+    freeze_subdivision_topology(control,settings);
+    const auto linear=evaluate_subdivision(control,settings);
+    check(bool(linear.mesh),"linear subdivision UVs evaluate");
+    settings.uvMode=SubdivisionUvMode::SmoothInterior;
+    const auto smooth=evaluate_subdivision(control,settings);
+    check(bool(smooth.mesh),"smooth-interior subdivision UVs evaluate");
+    if(linear.mesh && smooth.mesh) {
+        check(linear.mesh->indices.size()==smooth.mesh->indices.size(),
+              "UV smoothing does not alter subdivision topology");
+        check(linear.mesh->vertices.size()==smooth.mesh->vertices.size(),
+              "UV smoothing preserves evaluated vertex count");
+        for(std::size_t i=0;i<linear.mesh->vertices.size();++i){
+            const auto& a=linear.mesh->vertices[i];const auto& b=smooth.mesh->vertices[i];
+            near(a.position.x,b.position.x,"subdivision UV option does not move X");
+            near(a.position.y,b.position.y,"subdivision UV option does not move Y");
+            near(a.position.z,b.position.z,"subdivision UV option does not move Z");
+        }
+    }
+    EditorDocument doc("Smooth UV save");
+    EditorObject surface(1,"Surface");
+    surface.polygon=control;
+    surface.subdivision=settings;
+    doc.add_object(std::move(surface));
+    const auto root=std::filesystem::temp_directory_path()/"dve_subdivision_uv_mode_test";
+    std::filesystem::remove_all(root);std::filesystem::create_directories(root);
+    const auto path=root/"smooth.dvescene";
+    const auto saved=doc.save_transactional(path);
+    check(saved.success,"opt-in smooth UV scene saves");
+    check(first_line(path)=="DVE_EDITOR_SCENE 15","smooth UV writes scene format 15");
+    std::string error;
+    auto loaded=EditorDocument::load(path,&error);
+    check(bool(loaded),"smooth UV scene reloads: "+error);
+    if(loaded){
+        const auto* object=loaded->find_object(1);
+        check(object && object->subdivision &&
+              object->subdivision->uvMode==SubdivisionUvMode::SmoothInterior,
+              "UV smoothing survives scene round trip");
+    }
+    std::filesystem::remove_all(root);
+    // Invalid enum must be refused rather than deserializing an arbitrary mode.
+    settings.uvMode=static_cast<SubdivisionUvMode>(55);
+    const auto invalid=evaluate_subdivision(control,settings);
+    check(!invalid.mesh && !invalid.error.empty(),"invalid UV smoothing mode refused");
+}
 void scene_format() {
     const auto root = std::filesystem::temp_directory_path() / "dve_subdivision_scene_test";
     std::filesystem::remove_all(root); std::filesystem::create_directories(root);
@@ -229,7 +276,7 @@ void control_face_undo() {
 } // namespace
 
 int main() {
-    try { create_level_undo(); refusals(); scene_format(); creases_and_migration(); control_face_undo(); }
+    try { create_level_undo(); refusals(); scene_format(); uv_smoothing_completion(); creases_and_migration(); control_face_undo(); }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     std::cout << "Subdivision editor regression checks passed\n";
 }

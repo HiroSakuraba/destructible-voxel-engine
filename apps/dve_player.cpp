@@ -206,6 +206,8 @@ window / rendering
                             vulkan: indirect light (default ambient: sky/ground hemisphere;
                             bounce: rays through the scene voxel grid, one bounce of sun and sky;
                             cascades: radiance cascades)
+  --sky colors|physical     override the scene's sky model (physical: atmosphere sky, sun colour and
+                            sky light from the engine's atmosphere model)
   --no-vsync                vulkan: present without waiting for vertical blank (mailbox
                             when available, else immediate)
   --quality fast|balanced|reference   CPU lighting cost (default fast: hard shadows,
@@ -252,6 +254,7 @@ struct Options {
     bool vsync{true};
     std::string aoMode{"screen"};   // vulkan: screen | voxel | off
     std::string giMode{"ambient"};  // vulkan: ambient | bounce | cascades
+    std::string skyOverride;        // "" (scene), colors | physical
     bool fullscreen{};
     bool headless{};
     bool noAudio{};
@@ -350,6 +353,9 @@ std::optional<Options> parse_arguments(int argc, char** argv, int* exitCode) {
             if (!(v = value()) || (*v != "screen" && *v != "voxel" && *v != "off"))
                 return bad("--ao must be screen, voxel or off");
             options.aoMode = *v;
+        } else if (argument == "--sky") {
+            if (!(v = value()) || (*v != "colors" && *v != "physical")) return bad("--sky must be colors or physical");
+            options.skyOverride = *v;
         } else if (argument == "--gi") {
             if (!(v = value()) || (*v != "ambient" && *v != "bounce" && *v != "cascades"))
                 return bad("--gi must be ambient, bounce or cascades");
@@ -771,7 +777,9 @@ int run(int argc, char** argv) {
         if(racingAudio)racingAudio->update(app->prototype_hud());
         if(mechaAudio)mechaAudio->update(app->prototype_hud());
 #endif
-        const PlayerRenderView view = app->render_view(objects, aspect, interpolationAlpha);
+        PlayerRenderView view = app->render_view(objects, aspect, interpolationAlpha);
+        if (!options.skyOverride.empty())
+            view.environment.skyMode = options.skyOverride == "physical" ? SkyMode::Physical : SkyMode::Colors;
         if (!renderer->render(view, &error)) return false;
         if (captureWindow && blitter && options.windowScreenshot) blitter->request_screenshot(*options.windowScreenshot);
         if (!renderer->present(&error)) return false;

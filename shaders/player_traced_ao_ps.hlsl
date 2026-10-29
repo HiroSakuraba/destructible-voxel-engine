@@ -67,7 +67,7 @@ float4 main(float4 position : SV_Position, float2 uv : TEXCOORD0) : SV_Target0 {
 
     // Grid cells are as coarse as the voxels: start far enough off the surface that the cell
     // holding the surface itself is not counted as an occluder (the offset is part of d).
-    const float lift = max(max(1.0e-3F, gParams.z), 0.35F * gGridOrigin.w);
+    const float lift = max(max(1.0e-3F, gParams.z), 1.1F * gGridOrigin.w);
     const float3 origin = centre + normal * lift;
     const uint pixelIndex = (uint)pixel.y * (uint)gTarget.x + (uint)pixel.x;
     const uint seed = asuint(gParams.w);

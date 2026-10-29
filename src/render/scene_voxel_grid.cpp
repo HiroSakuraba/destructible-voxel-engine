@@ -102,7 +102,7 @@ bool SceneVoxelGrid::update(std::span<const SceneGridObject> objects, const Scen
         cells_.clear(); dimensions_ = {}; contentKey_ = 0U; placementKey_ = 0U;
         return changed;
     }
-    if (!(cell > 0.0F)) cell = smallest;
+    if (!(cell > 0.0F)) cell = 0.5F * smallest;   // half a voxel: rotated objects stair-step less
     cell = std::max(cell, settings.minimumCellMeters);
 
     const float align = cell * static_cast<float>(std::max(settings.alignmentCells, 1U));

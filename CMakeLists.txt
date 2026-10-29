@@ -2882,6 +2882,8 @@ if(DVE_BUILD_TESTS)
     if(TARGET dve_player_runtime)
         add_executable(dve_player_sample_generator tests/player/make_player_sample.cpp)
         target_link_libraries(dve_player_sample_generator PRIVATE dve::core)
+        add_executable(dve_gi_showcase_generator tests/player/make_gi_showcase.cpp)
+        target_link_libraries(dve_gi_showcase_generator PRIVATE dve::core)
         add_test(NAME dve_player_sample_assets_up_to_date
             COMMAND ${CMAKE_COMMAND}
                 -DGENERATOR=$<TARGET_FILE:dve_player_sample_generator>

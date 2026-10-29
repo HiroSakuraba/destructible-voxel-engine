@@ -41,7 +41,7 @@ struct SceneGridMaterial {
 static_assert(sizeof(SceneGridMaterial) == 32U);
 
 struct SceneVoxelGridSettings {
-    float cellMeters{0.1F};                // 0: the smallest object voxel, at least minimumCellMeters
+    float cellMeters{0.1F};                // 0: half the smallest object voxel, at least minimumCellMeters
     float minimumCellMeters{0.02F};
     std::uint32_t maximumDimension{256U};  // per axis; larger scenes keep a window around `focus`
     std::uint32_t alignmentCells{16U};     // placement snaps to this many cells so moving

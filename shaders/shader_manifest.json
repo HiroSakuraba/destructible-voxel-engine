@@ -3632,6 +3632,18 @@
           "register": "s3"
         },
         {
+          "name": "gAerialTransmittanceSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s4"
+        },
+        {
+          "name": "gAerialInscatterSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s5"
+        },
+        {
           "name": "gSceneColor",
           "kind": "sampled_texture",
           "access": "read",
@@ -3648,6 +3660,18 @@
           "kind": "sampled_texture",
           "access": "read",
           "register": "t3"
+        },
+        {
+          "name": "gAerialTransmittance",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t4"
+        },
+        {
+          "name": "gAerialInscatter",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t5"
         }
       ]
     },

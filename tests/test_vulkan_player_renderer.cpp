@@ -358,6 +358,33 @@ int run() {
             std::cout << "physical sky, sun elevation " << elevation << ": frame "
                       << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() << " ms\n";
         }
+        // Aerial perspective: exaggerated (the test scene is ten metres across) so the haze shows.
+        {
+            PlayerRenderView hazy = skyView;
+            hazy.environment.aerialPerspectiveScale = 600.0F;
+            hazy.environment.atmosphereMieScale = 4.0F;
+            const bool hazyRefOk = cpuSky->render(hazy, &error) && cpuSky->present(&error);
+            require(hazyRefOk, "CPU aerial-perspective reference failed: " + error);
+            const Rgba8Image hazyReference = *cpuSky->readback();
+            bool hazyOk = true;
+            for (int frame = 0; frame < 3 && hazyOk; ++frame) hazyOk = skyGpu->render(hazy, &error) && skyGpu->present(&error);
+            require(hazyOk, "GPU aerial-perspective frame failed: " + error);
+            const Rgba8Image hazyGpu = *skyGpu->readback();
+            const bool clearOk = skyGpu->render(skyView, &error) && skyGpu->present(&error);
+            require(clearOk, "GPU clear-air frame failed: " + error);
+            const Rgba8Image clearGpu = *skyGpu->readback();
+            Rgba8Image hazyDiffImage;
+            const Diff hazyDiff = compare(hazyReference, hazyGpu, hazyDiffImage);
+            const Diff clearDiff = compare(hazyReference, clearGpu, hazyDiffImage);
+            std::cout << "aerial perspective: GPU mean |error| vs CPU " << hazyDiff.meanAbsoluteError
+                      << " (same view without haze: " << clearDiff.meanAbsoluteError << ")\n";
+            if (const char* dir = std::getenv("DVE_PLAYER_GPU_DIFF_DIR")) {
+                save_ppm(std::filesystem::path(dir) / "cpu_haze.ppm", hazyReference);
+                save_ppm(std::filesystem::path(dir) / "gpu_haze.ppm", hazyGpu);
+            }
+            require(hazyDiff.meanAbsoluteError < clearDiff.meanAbsoluteError * 0.5 + 0.5,
+                    "GPU aerial perspective does not match the CPU reference");
+        }
         PlayerRenderView colourView = skyView;
         colourView.environment.skyMode = SkyMode::Colors;
         const bool colourOk = skyGpu->render(colourView, &error) && skyGpu->present(&error);

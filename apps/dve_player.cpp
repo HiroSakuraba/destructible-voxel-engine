@@ -206,6 +206,8 @@ window / rendering
                             vulkan: indirect light (default ambient: sky/ground hemisphere;
                             bounce: rays through the scene voxel grid, one bounce of sun and sky;
                             cascades: radiance cascades)
+  --gi-rays N               vulkan: rays per texel for bounce GI (default 32; half-resolution texels,
+                            accumulated over frames; more = smoother, slower)
   --sky colors|physical     override the scene's sky model (physical: atmosphere sky, sun colour and
                             sky light from the engine's atmosphere model)
   --no-vsync                vulkan: present without waiting for vertical blank (mailbox
@@ -254,6 +256,7 @@ struct Options {
     bool vsync{true};
     std::string aoMode{"screen"};   // vulkan: screen | voxel | off
     std::string giMode{"ambient"};  // vulkan: ambient | bounce | cascades
+    std::uint32_t giRays{32};       // vulkan: rays per traced-GI texel
     std::string skyOverride;        // "" (scene), colors | physical
     bool fullscreen{};
     bool headless{};
@@ -353,6 +356,12 @@ std::optional<Options> parse_arguments(int argc, char** argv, int* exitCode) {
             if (!(v = value()) || (*v != "screen" && *v != "voxel" && *v != "off"))
                 return bad("--ao must be screen, voxel or off");
             options.aoMode = *v;
+        } else if (argument == "--gi-rays") {
+            if (!(v = value())) return bad("--gi-rays needs a number");
+            char* end = nullptr;
+            const unsigned long rays = std::strtoul(v->c_str(), &end, 10);
+            if (end == v->c_str() || *end != '\0' || rays < 1UL || rays > 128UL) return bad("--gi-rays must be 1..128");
+            options.giRays = static_cast<std::uint32_t>(rays);
         } else if (argument == "--sky") {
             if (!(v = value()) || (*v != "colors" && *v != "physical")) return bad("--sky must be colors or physical");
             options.skyOverride = *v;
@@ -721,6 +730,7 @@ int run(int argc, char** argv) {
 #if defined(DVE_PLAYER_HAVE_VULKAN)
     if (options.vulkan) {
         VulkanPlayerRendererOptions vulkanOptions;
+        vulkanOptions.globalIlluminationRays = options.giRays;
         vulkanOptions.globalIllumination = options.giMode == "bounce" ? PlayerGlobalIlluminationMode::VoxelOneBounce
                                          : options.giMode == "cascades" ? PlayerGlobalIlluminationMode::RadianceCascades
                                                                         : PlayerGlobalIlluminationMode::Ambient;

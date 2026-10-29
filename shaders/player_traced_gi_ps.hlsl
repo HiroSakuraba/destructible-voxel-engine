@@ -24,7 +24,7 @@ float4 main(float4 position : SV_Position, float2 uv : TEXCOORD0) : SV_Target0 {
     float3 centre, normal;
     if (gGridOrigin.w <= 0.0F || !SurfaceAtPixel(pixel, centre, normal)) return float4(0.0F, 0.0F, 0.0F, 0.0F);
 
-    const uint sampleCount = clamp((uint)gGroundColor.w, 1u, 16u);
+    const uint sampleCount = clamp((uint)gGroundColor.w, 1u, 128u);
     const float maxDistance = max(gSkyColor.w, 1.0e-3F);
     // Grid cells are as coarse as the voxels: start far enough off the surface that the cell
     // holding the surface itself is not counted as the first hit.

@@ -237,6 +237,11 @@ public:
         if (rcGatherPipeline_) (void)device_->destroy_graphics_pipeline(rcGatherPipeline_, &ignored);
         for (rhi::BufferHandle& buffer : rcConstants_)
             if (buffer) { (void)device_->destroy_buffer(buffer, &ignored); buffer = {}; }
+        if (aerialTransmittanceView_) (void)device_->destroy_texture_view(aerialTransmittanceView_, &ignored);
+        if (aerialInscatterView_) (void)device_->destroy_texture_view(aerialInscatterView_, &ignored);
+        if (aerialTransmittance_) (void)device_->destroy_texture(aerialTransmittance_, &ignored);
+        if (aerialInscatter_) (void)device_->destroy_texture(aerialInscatter_, &ignored);
+        if (aerialSampler_) (void)device_->destroy_sampler(aerialSampler_, &ignored);
         if (skyRadianceView_) (void)device_->destroy_texture_view(skyRadianceView_, &ignored);
         if (skyIrradianceView_) (void)device_->destroy_texture_view(skyIrradianceView_, &ignored);
         if (skyRadianceTexture_) (void)device_->destroy_texture(skyRadianceTexture_, &ignored);
@@ -324,6 +329,16 @@ public:
                 return device_->write_texture(texture, 0U, 0U, std::as_bytes(std::span(zeros)),
                                               static_cast<std::size_t>(w) * 8U, error);
             };
+            rhi::SamplerDesc aerialSampler;
+            aerialSampler.addressU = aerialSampler.addressV = aerialSampler.addressW = rhi::AddressMode::ClampToEdge;
+            aerialSampler.mipmapFilter = rhi::MipmapFilterMode::Nearest;
+            aerialSampler.debugName = "player aerial perspective sampler";
+            aerialSampler_ = device_->create_sampler(aerialSampler, error);
+            if (!aerialSampler_) return false;
+            if (!sky_texture(kAerialSlices * kAerialHeights, kAerialDistances, "player aerial transmittance",
+                             aerialTransmittance_, aerialTransmittanceView_) ||
+                !sky_texture(kAerialSlices * kAerialHeights, kAerialDistances, "player aerial in-scatter",
+                             aerialInscatter_, aerialInscatterView_)) return false;
             if (!sky_texture(kSkyWidth, kSkyHeight, "player sky radiance", skyRadianceTexture_, skyRadianceView_) ||
                 !sky_texture(kSkyIrradianceWidth, kSkyIrradianceHeight, "player sky irradiance", skyIrradianceTexture_,
                              skyIrradianceView_)) return false;
@@ -333,7 +348,9 @@ public:
         layout.bindings = {{0U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment},
                            {1U, rhi::BindingType::UniformBuffer, rhi::ShaderStage::Fragment},
                            {2U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment},
-                           {3U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment}};
+                           {3U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment},
+                           {4U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment},
+                           {5U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment}};
         presentLayout_ = device_->create_bind_group_layout(layout, error);
         if (!presentLayout_) return false;
         aoConstants_ = device_->create_buffer({512U, rhi::BufferUsage::Constant, rhi::MemoryDomain::Upload,
@@ -484,7 +501,9 @@ public:
         group.layout = presentLayout_;
         group.debugName = "player present group";
         group.entries = {{0U, {}, hdrView_, 0U, 0U, presentSampler_}, {1U, presentConstants_, {}, 0U, 256U, {}},
-                         {2U, {}, depthView_, 0U, 0U, depthSampler_}, {3U, {}, skyRadianceView_, 0U, 0U, skySampler_}};
+                         {2U, {}, depthView_, 0U, 0U, depthSampler_}, {3U, {}, skyRadianceView_, 0U, 0U, skySampler_},
+                         {4U, {}, aerialTransmittanceView_, 0U, 0U, aerialSampler_},
+                         {5U, {}, aerialInscatterView_, 0U, 0U, aerialSampler_}};
         presentGroup_ = device_->create_bind_group(group, error);
         if (!presentGroup_) return false;
         rhi::TextureDesc ao;
@@ -570,6 +589,7 @@ public:
             presentSky_.cameraPosition = {camera.position.x, camera.position.y, camera.position.z, 1.0F};
             const Float3 sun = unit(environment.sunDirection, {0.0F, 1.0F, 0.0F});
             presentSky_.sunDirection = {sun.x, sun.y, sun.z, std::cos(render::kSunAngularRadius)};
+            if (!update_aerial(view, environment, error)) return false;
             if (environment.sunDisc > 0.0F) {
                 // The disc's radiance: sun irradiance over its solid angle, drawn as pi x radiance (CPU background_radiance).
                 const double solidAngle = 2.0 * std::numbers::pi * (1.0 - std::cos(static_cast<double>(render::kSunAngularRadius)));
@@ -904,7 +924,7 @@ public:
             constants.skyColor = {environment.skyColor.x, environment.skyColor.y, environment.skyColor.z,
                                   environment.globalIlluminationMaxDistanceMeters};
             constants.groundColor = {environment.groundColor.x, environment.groundColor.y, environment.groundColor.z,
-                                     static_cast<float>(std::clamp(environment.globalIlluminationSamples, 1U, 16U))};
+                                     static_cast<float>(std::clamp(options_.globalIlluminationRays > 0U ? options_.globalIlluminationRays : environment.globalIlluminationSamples, 1U, 128U))};
             if (!aoOn) constants.params[2] = std::max(environment.shadowBiasMeters, 1.0e-3F);
         }
         if ((aoTraced || giTraced) && !grid_.empty()) {
@@ -1074,6 +1094,57 @@ private:
         sky_.sinAzimuth = length > 1.0e-4F ? sun.z / length : 0.0F;
     }
 
+    // Aerial perspective tables (see player_present_ps.hlsl): rebuilt when the sun elevation,
+    // the atmosphere, the camera's altitude band or the view range change.
+    bool update_aerial(const PlayerRenderView& view, const RenderEnvironment& environment, std::string* error) {
+        presentSky_.aerial = {};
+        if (!(environment.aerialPerspectiveScale > 0.0F)) return true;
+        const float range = std::clamp(view.camera.farPlane, 100.0F, 20000.0F);
+        const float altitude = environment.observerAltitudeMeters + view.camera.position.y;
+        const float altitudeBand = std::round(altitude / 25.0F) * 25.0F;
+        const std::vector<float> key{static_cast<float>(skyElevationDegrees_), environment.atmosphereRayleighScale,
+                                     environment.atmosphereMieScale, environment.atmosphereOzoneScale,
+                                     environment.atmosphereMieAnisotropy, environment.atmosphereGroundAlbedo,
+                                     environment.observerAltitudeMeters, altitudeBand, range};
+        if (key != aerialKey_) {
+            const auto model = render::atmosphere_model(sky_.environment);
+            if (!model) return true;
+            const std::uint32_t width = kAerialSlices * kAerialHeights;
+            std::vector<std::uint16_t> transmittance(static_cast<std::size_t>(width) * kAerialDistances * 4U);
+            std::vector<std::uint16_t> inscatter(transmittance.size());
+            const float pi = std::numbers::pi_v<float>;
+            for (std::uint32_t slice = 0; slice < kAerialSlices; ++slice)
+                for (std::uint32_t height = 0; height < kAerialHeights; ++height)
+                    for (std::uint32_t step = 0; step < kAerialDistances; ++step) {
+                        const float azimuth = static_cast<float>(slice) * pi / static_cast<float>(kAerialSlices - 1U);
+                        const float y = static_cast<float>(height) / static_cast<float>(kAerialHeights - 1U) * 2.0F - 1.0F;
+                        const float horizontal = std::sqrt(std::max(0.0F, 1.0F - y * y));
+                        const Float3 direction{horizontal * std::cos(azimuth), y, horizontal * std::sin(azimuth)};
+                        const float t = static_cast<float>(step) / static_cast<float>(kAerialDistances - 1U);
+                        const auto segment = model->segment(std::max(altitudeBand, 0.0F), direction, range * t * t, 12U);
+                        const std::size_t texel = (static_cast<std::size_t>(step) * width + slice * kAerialHeights + height) * 4U;
+                        const Float3 tr = step == 0U ? Float3{1.0F, 1.0F, 1.0F} : segment.transmittance;
+                        const Float3 in = step == 0U ? Float3{} : segment.inscattered;
+                        transmittance[texel] = float_to_half(tr.x); transmittance[texel + 1U] = float_to_half(tr.y);
+                        transmittance[texel + 2U] = float_to_half(tr.z); transmittance[texel + 3U] = float_to_half(1.0F);
+                        inscatter[texel] = float_to_half(in.x); inscatter[texel + 1U] = float_to_half(in.y);
+                        inscatter[texel + 2U] = float_to_half(in.z); inscatter[texel + 3U] = float_to_half(1.0F);
+                    }
+            device_->wait_idle();
+            if (!device_->write_texture(aerialTransmittance_, 0U, 0U, std::as_bytes(std::span(transmittance)),
+                                        static_cast<std::size_t>(width) * 8U, error) ||
+                !device_->write_texture(aerialInscatter_, 0U, 0U, std::as_bytes(std::span(inscatter)),
+                                        static_cast<std::size_t>(width) * 8U, error)) return false;
+            aerialKey_ = key;
+        }
+        constexpr float kPi = std::numbers::pi_v<float>;
+        presentSky_.aerial = {1.0F, range, environment.aerialPerspectiveScale, sky_.cosAzimuth};
+        presentSky_.aerialSun = {environment.sunColor.x * environment.sunIntensity * kPi,
+                                 environment.sunColor.y * environment.sunIntensity * kPi,
+                                 environment.sunColor.z * environment.sunIntensity * kPi, sky_.sinAzimuth};
+        return true;
+    }
+
     bool ensure_environment(const RenderEnvironment& environment, std::string* error) {
         update_sky(environment);
         const bool physical = sky_.physical;
@@ -1208,11 +1279,13 @@ private:
             std::array<float, 4> cameraPosition;
             std::array<float, 4> sunDirection;
             std::array<float, 4> sunDisc;
+            std::array<float, 4> aerial;
+            std::array<float, 4> aerialSun;
         } constants{{1.0F, 1.0F, 1.0F, exposure_},
                     {tonemapOperator_, presentSky_.background != 0U ? presentSky_.background : (options_.skyGradient ? 2U : 1U), 0U, 0U},
                     {skyColor_.x, skyColor_.y, skyColor_.z, 0.0F},
                     presentSky_.inverseViewProjection, presentSky_.cameraPosition, presentSky_.sunDirection,
-                    presentSky_.sunDisc};
+                    presentSky_.sunDisc, presentSky_.aerial, presentSky_.aerialSun};
         if (!device_->write_buffer(presentConstants_, 0U, std::as_bytes(std::span(&constants, 1U)), error)) return false;
         const rhi::CommandListHandle commands = device_->begin_commands(rhi::QueueKind::Graphics, "player present", error);
         if (!commands) return false;
@@ -1415,7 +1488,14 @@ private:
         std::array<float, 4> cameraPosition{};
         std::array<float, 4> sunDirection{0.0F, 1.0F, 0.0F, 2.0F};   // w: cos of the disc radius (2: no disc)
         std::array<float, 4> sunDisc{};
+        std::array<float, 4> aerial{};      // x 1: on, y table range m, z distance scale, w sun-azimuth cos
+        std::array<float, 4> aerialSun{};   // rgb sun top-of-atmosphere light x pi, w sun-azimuth sin
     } presentSky_;
+    static constexpr std::uint32_t kAerialSlices = 9U, kAerialHeights = 16U, kAerialDistances = 24U;
+    rhi::TextureHandle aerialTransmittance_{}, aerialInscatter_{};
+    rhi::TextureViewHandle aerialTransmittanceView_{}, aerialInscatterView_{};
+    rhi::SamplerHandle aerialSampler_{};
+    std::vector<float> aerialKey_;
     std::unordered_map<GameObjectId, VoxelMesh> voxelMeshes_;
     std::unordered_map<const CookedPolygonAsset*, PolygonMesh> polygonMeshes_;
     std::vector<render::LivePolygonDraw> draws_;

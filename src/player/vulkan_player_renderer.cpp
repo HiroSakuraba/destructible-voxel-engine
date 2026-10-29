@@ -19,6 +19,7 @@
 #include "dve/render/environment_lighting_gpu.hpp"
 #include "dve/render/live_environment_renderer.hpp"
 #include "dve/render/mesh_rhi_mirror.hpp"
+#include "dve/render/scene_voxel_grid.hpp"
 #include "dve/render/voxel_surface_mesher.hpp"
 #include "dve/rhi/vulkan_device.hpp"
 #include "dve/transform.hpp"
@@ -190,6 +191,11 @@ public:
         if (presentLayout_) (void)device_->destroy_bind_group_layout(presentLayout_, &ignored);
         if (presentSampler_) (void)device_->destroy_sampler(presentSampler_, &ignored);
         if (depthSampler_) (void)device_->destroy_sampler(depthSampler_, &ignored);
+        if (tracedAoPipeline_) (void)device_->destroy_graphics_pipeline(tracedAoPipeline_, &ignored);
+        if (aoPipeline_) (void)device_->destroy_graphics_pipeline(aoPipeline_, &ignored);
+        if (aoLayout_) (void)device_->destroy_bind_group_layout(aoLayout_, &ignored);
+        if (gridBuffer_) (void)device_->destroy_buffer(gridBuffer_, &ignored);
+        if (aoConstants_) (void)device_->destroy_buffer(aoConstants_, &ignored);
         if (presentConstants_) (void)device_->destroy_buffer(presentConstants_, &ignored);
         if (triangleIndices_) (void)device_->destroy_buffer(triangleIndices_, &ignored);
         if (live_.valid()) (void)render::destroy_live_environment_renderer(*device_, live_, &ignored);
@@ -250,10 +256,13 @@ public:
         aoConstants_ = device_->create_buffer({256U, rhi::BufferUsage::Constant, rhi::MemoryDomain::Upload,
                                                "player SSAO constants", ResourceState::ShaderRead}, error);
         if (!aoConstants_) return false;
+        // Scene voxel grid for traced AO; a 16-byte placeholder keeps the layout valid otherwise.
+        if (!ensure_grid_buffer(16U, error)) return false;
         rhi::BindGroupLayoutDesc aoLayout;
         aoLayout.debugName = "player SSAO layout";
         aoLayout.bindings = {{0U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment},
-                             {1U, rhi::BindingType::UniformBuffer, rhi::ShaderStage::Fragment}};
+                             {1U, rhi::BindingType::UniformBuffer, rhi::ShaderStage::Fragment},
+                             {2U, rhi::BindingType::StorageBufferReadOnly, rhi::ShaderStage::Fragment}};
         aoLayout_ = device_->create_bind_group_layout(aoLayout, error);
         if (!aoLayout_) return false;
         {
@@ -269,6 +278,10 @@ public:
             desc.depthWrite = false;
             aoPipeline_ = device_->create_graphics_pipeline(desc, error);
             if (!aoPipeline_) return false;
+            desc.debugName = "player traced AO";
+            desc.fragmentBytecode = copy_bytes(shader_blobs::player_traced_ao_ps());
+            tracedAoPipeline_ = device_->create_graphics_pipeline(desc, error);
+            if (!tracedAoPipeline_) return false;
         }
         const auto present_pipeline = [&](rhi::TextureFormat format, const char* name) {
             rhi::GraphicsPipelineDesc desc;
@@ -349,12 +362,7 @@ public:
         if (!aoTexture_) return false;
         aoView_ = device_->create_texture_view({aoTexture_, 0U, 1U, 0U, 1U, "player AO view"}, error);
         if (!aoView_) return false;
-        rhi::BindGroupDesc aoGroup;
-        aoGroup.layout = aoLayout_;
-        aoGroup.debugName = "player SSAO group";
-        aoGroup.entries = {{0U, {}, depthView_, 0U, 0U, depthSampler_}, {1U, aoConstants_, {}, 0U, 256U, {}}};
-        aoGroup_ = device_->create_bind_group(aoGroup, error);
-        if (!aoGroup_) return false;
+        if (!rebuild_ao_group(error)) return false;
         frame_.width = width; frame_.height = height;
         frame_.pixels.assign(static_cast<std::size_t>(width) * height * 4U, 0U);
         rendered_ = false;
@@ -457,7 +465,10 @@ public:
         const bool aoOn = options_.ambientOcclusion && environment.ambientOcclusionSamples > 0U &&
                           environment.ambientOcclusionMaxDistanceMeters > 0.0F &&
                           environment.globalIlluminationMode != GlobalIlluminationMode::Off && !draws_.empty();
-        if (aoOn && !record_ambient_occlusion(environment, camera, constants, plan, error))
+        const bool traced = aoOn && options_.ambientOcclusionMode == PlayerAmbientOcclusionMode::VoxelTraced &&
+                            shader_blobs::player_traced_ao_ps().size() > 0U;
+        if (traced && !update_scene_grid(view, view.camera.position, error)) return stage_failed("scene voxel grid", error);
+        if (aoOn && !record_ambient_occlusion(environment, camera, constants, plan, traced, error))
             return stage_failed("ambient occlusion", error);
 
         render::LiveEnvironmentFrameDesc frame;
@@ -485,9 +496,71 @@ public:
         return true;
     }
 
+    bool ensure_grid_buffer(std::size_t bytes, std::string* error) {
+        bytes = std::max<std::size_t>((bytes + 15U) & ~std::size_t{15U}, 16U);
+        if (gridBuffer_ && bytes <= gridCapacity_) return true;
+        const std::size_t capacity = std::max(bytes, gridCapacity_ * 2U);
+        const rhi::BufferHandle replacement = device_->create_buffer(
+            {capacity, rhi::BufferUsage::Storage, rhi::MemoryDomain::Upload, "player scene voxel grid",
+             ResourceState::ShaderRead}, error);
+        if (!replacement) return false;
+        std::string ignored;
+        if (gridBuffer_) {
+            device_->wait_idle();
+            if (aoGroup_) { (void)device_->destroy_bind_group(aoGroup_, &ignored); aoGroup_ = {}; }
+            (void)device_->destroy_buffer(gridBuffer_, &ignored);
+        }
+        gridBuffer_ = replacement;
+        gridCapacity_ = capacity;
+        gridUploaded_ = false;
+        return !aoLayout_ || !depthView_ || rebuild_ao_group(error);
+    }
+
+    bool rebuild_ao_group(std::string* error) {
+        std::string ignored;
+        if (aoGroup_) { (void)device_->destroy_bind_group(aoGroup_, &ignored); aoGroup_ = {}; }
+        rhi::BindGroupDesc group;
+        group.layout = aoLayout_;
+        group.debugName = "player AO group";
+        group.entries = {{0U, {}, depthView_, 0U, 0U, depthSampler_}, {1U, aoConstants_, {}, 0U, 256U, {}},
+                         {2U, gridBuffer_, {}, 0U, gridCapacity_, {}}};
+        aoGroup_ = device_->create_bind_group(group, error);
+        return static_cast<bool>(aoGroup_);
+    }
+
+    // Builds the scene voxel grid from this frame's voxel objects and uploads it when it changed.
+    bool update_scene_grid(const PlayerRenderView& view, Float3 focus, std::string* error) {
+        gridObjects_.clear();
+        for (const GameRenderObject& object : view.objects) {
+            if (!object.enabled || object.kind != GameGeometryKind::Voxel || object.voxels == nullptr) continue;
+            const float voxelSize = object.voxelSizeMeters > 0.0F ? object.voxelSizeMeters : kDefaultMetersPerVoxel;
+            render::SceneGridObject entry;
+            entry.id = object.id;
+            entry.voxels = object.voxels;
+            entry.transform = object.transform;
+            entry.cellMeters = {object.voxelScale.x * voxelSize, object.voxelScale.y * voxelSize,
+                                object.voxelScale.z * voxelSize};
+            entry.materials = object.materials;
+            gridObjects_.push_back(entry);
+        }
+        render::SceneVoxelGridSettings settings;
+        settings.cellMeters = options_.tracedAoCellMeters;
+        settings.maximumDimension = options_.tracedAoMaximumDimension;
+        const bool changed = grid_.update(gridObjects_, settings, focus);
+        if (grid_.empty()) return true;
+        if (!changed && gridUploaded_) return true;
+        const auto cells = grid_.cells();
+        if (!ensure_grid_buffer(cells.size(), error)) return false;
+        std::vector<std::uint8_t> padded(cells.begin(), cells.end());
+        padded.resize((padded.size() + 3U) & ~std::size_t{3U});
+        if (!device_->write_buffer(gridBuffer_, 0U, std::as_bytes(std::span(padded)), error)) return false;
+        gridUploaded_ = true;
+        return true;
+    }
+
     bool record_ambient_occlusion(const RenderEnvironment& environment, const CameraFrame& camera,
                                   std::span<const std::byte> frameConstants,
-                                  const render::CascadedShadowPlan& plan, std::string* error) {
+                                  const render::CascadedShadowPlan& plan, bool traced, std::string* error) {
         render::LiveEnvironmentFrameDesc prepass;
         prepass.depthTarget = depth_;
         prepass.width = width_;
@@ -508,6 +581,8 @@ public:
             std::array<float, 4> cameraPosition;
             std::array<float, 4> params;
             std::array<float, 4> target;
+            std::array<float, 4> gridOrigin;   // xyz minimum corner, w cell size (0: none)
+            std::array<float, 4> gridSize;     // xyz cells per axis
         } constants{};
         constants.viewProjection = camera.viewProjection;
         constants.inverseViewProjection = invert(camera.viewProjection);
@@ -520,6 +595,12 @@ public:
                             seedBits};
         constants.target = {static_cast<float>(width_), static_cast<float>(height_), 1.0F / static_cast<float>(width_),
                             1.0F / static_cast<float>(height_)};
+        if (traced && !grid_.empty()) {
+            const Float3 origin = grid_.origin();
+            const auto dims = grid_.dimensions();
+            constants.gridOrigin = {origin.x, origin.y, origin.z, grid_.cell_meters()};
+            constants.gridSize = {static_cast<float>(dims[0]), static_cast<float>(dims[1]), static_cast<float>(dims[2]), 0.0F};
+        }
         if (!device_->write_buffer(aoConstants_, 0U, std::as_bytes(std::span(&constants, 1U)), error)) return false;
         const rhi::CommandListHandle commands = device_->begin_commands(rhi::QueueKind::Graphics, "player ambient occlusion", error);
         if (!commands) return false;
@@ -530,7 +611,7 @@ public:
         pass.debugName = "player SSAO";
         pass.colors.push_back({aoTexture_, true, 1.0F, 1.0F, 1.0F, 1.0F});
         if (!device_->begin_render_pass(commands, pass, error) ||
-            !device_->bind_graphics_pipeline(commands, aoPipeline_, error) ||
+            !device_->bind_graphics_pipeline(commands, traced ? tracedAoPipeline_ : aoPipeline_, error) ||
             !device_->bind_graphics_bind_group(commands, 0U, aoGroup_, error) ||
             !device_->set_viewport(commands, {0.0F, 0.0F, static_cast<float>(width_), static_cast<float>(height_), 0.0F, 1.0F}, error) ||
             !device_->set_scissor(commands, {0, 0, width_, height_}, error) ||
@@ -806,6 +887,12 @@ private:
     rhi::BufferHandle aoConstants_{};
     rhi::BindGroupLayoutHandle aoLayout_{};
     rhi::GraphicsPipelineHandle aoPipeline_{};
+    rhi::GraphicsPipelineHandle tracedAoPipeline_{};
+    rhi::BufferHandle gridBuffer_{};
+    std::size_t gridCapacity_{};
+    bool gridUploaded_{};
+    render::SceneVoxelGrid grid_;
+    std::vector<render::SceneGridObject> gridObjects_;
     rhi::TextureHandle aoTexture_{};
     rhi::TextureViewHandle aoView_{};
     rhi::BindGroupHandle aoGroup_{};

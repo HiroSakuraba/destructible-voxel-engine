@@ -200,6 +200,8 @@ window / rendering
   --threads N               CPU render threads (0 = all cores, default)
   --renderer cpu|vulkan     renderer backend (default cpu). vulkan: GPU raster + swapchain;
                             DVE_VULKAN_VALIDATION=1 enables the Khronos validation layer
+  --ao screen|voxel|off     vulkan: ambient occlusion method (default screen: depth-buffer
+                            marching; voxel: rays through the scene voxel grid; off: none)
   --no-vsync                vulkan: present without waiting for vertical blank (mailbox
                             when available, else immediate)
   --quality fast|balanced|reference   CPU lighting cost (default fast: hard shadows,
@@ -244,6 +246,7 @@ struct Options {
     CpuRenderQuality quality{CpuRenderQuality::Fast};
     bool vulkan{};
     bool vsync{true};
+    std::string aoMode{"screen"};   // vulkan: screen | voxel | off
     bool fullscreen{};
     bool headless{};
     bool noAudio{};
@@ -338,6 +341,10 @@ std::optional<Options> parse_arguments(int argc, char** argv, int* exitCode) {
             if (*v == "vulkan") return bad("--renderer vulkan: this build has no Vulkan backend");
 #endif
             options.vulkan = *v == "vulkan";
+        } else if (argument == "--ao") {
+            if (!(v = value()) || (*v != "screen" && *v != "voxel" && *v != "off"))
+                return bad("--ao must be screen, voxel or off");
+            options.aoMode = *v;
         } else if (argument == "--no-vsync") {
             options.vsync = false;
         } else if (argument == "--fullscreen") {
@@ -699,6 +706,9 @@ int run(int argc, char** argv) {
 #if defined(DVE_PLAYER_HAVE_VULKAN)
     if (options.vulkan) {
         VulkanPlayerRendererOptions vulkanOptions;
+        vulkanOptions.ambientOcclusion = options.aoMode != "off";
+        vulkanOptions.ambientOcclusionMode = options.aoMode == "voxel" ? PlayerAmbientOcclusionMode::VoxelTraced
+                                                                          : PlayerAmbientOcclusionMode::ScreenSpace;
         if (!options.headless) {
             vulkanOptions.surface = host.native_surface_handle();
             const platform::WindowMetrics metrics = host.window_metrics();

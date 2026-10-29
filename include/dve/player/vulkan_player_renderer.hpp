@@ -26,6 +26,12 @@
 
 namespace dve::player {
 
+// What ambient-occlusion rays can hit.
+enum class PlayerAmbientOcclusionMode : std::uint8_t {
+    ScreenSpace,   // marches the camera depth buffer: on-screen geometry only, cheap
+    VoxelTraced,   // walks the whole scene's voxel grid: off-screen occluders count, voxel objects only
+};
+
 struct VulkanPlayerRendererOptions {
     // Window surface to present to. NativeSurfaceKind::Unavailable renders offscreen only (tests,
     // headless --hash runs); readback() is then always current.
@@ -47,6 +53,11 @@ struct VulkanPlayerRendererOptions {
     // ambientOcclusionMaxDistanceMeters; off when the samples are 0 or global illumination is
     // Off). Costs a depth pre-pass and one full-screen pass. false disables it regardless.
     bool ambientOcclusion{true};
+    PlayerAmbientOcclusionMode ambientOcclusionMode{PlayerAmbientOcclusionMode::ScreenSpace};
+    // VoxelTraced: grid cell size in metres (0 = the smallest voxel in the scene) and the largest
+    // grid per axis; scenes beyond that keep a window around the camera.
+    float tracedAoCellMeters{0.0F};
+    std::uint32_t tracedAoMaximumDimension{256U};
 };
 
 // True when this build has the Vulkan backend and its compiled shaders (DXC at build time).

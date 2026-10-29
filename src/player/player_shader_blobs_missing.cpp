@@ -12,4 +12,5 @@ std::span<const std::byte> live_csm_caster_ps() noexcept { return {}; }
 std::span<const std::byte> player_present_vs() noexcept { return {}; }
 std::span<const std::byte> player_present_ps() noexcept { return {}; }
 std::span<const std::byte> player_ssao_ps() noexcept { return {}; }
+std::span<const std::byte> player_traced_ao_ps() noexcept { return {}; }
 } // namespace dve::player::shader_blobs

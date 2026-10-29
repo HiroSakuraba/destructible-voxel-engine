@@ -234,6 +234,30 @@ int run() {
                     ", CPU " + std::to_string(cpuDark) + ")");
         require(aoDiff.meanAbsoluteError < 3.0, "GPU ambient-only image differs too much from the CPU reference (mean " +
                                                     std::to_string(aoDiff.meanAbsoluteError) + ")");
+
+        // Voxel-traced AO: same definition, rays walk the scene voxel grid instead of the depth buffer.
+        VulkanPlayerRendererOptions tracedOptions;
+        tracedOptions.ambientOcclusionMode = PlayerAmbientOcclusionMode::VoxelTraced;
+        std::unique_ptr<IPlayerRenderer> traced = make_vulkan_player_renderer(tracedOptions, &error);
+        require(traced != nullptr, "traced-AO renderer creation failed: " + error);
+        require(traced->resize(kWidth, kHeight, &error), error);
+        const bool tracedOk = traced->render(aoView, &error) && traced->present(&error);
+        require(tracedOk, "traced AO frame failed: " + error);
+        const Rgba8Image tracedFrame = *traced->readback();
+        const double tracedDark = darkening(tracedFrame, gpuFlat);
+        Rgba8Image tracedDiffImage;
+        const Diff tracedDiff = compare(cpuAoFrame, tracedFrame, tracedDiffImage);
+        std::cout << "traced AO: mean |error| " << tracedDiff.meanAbsoluteError << "; mean darkening " << tracedDark
+                  << " (CPU " << cpuDark << ")\n";
+        if (const char* dir = std::getenv("DVE_PLAYER_GPU_DIFF_DIR")) {
+            save_ppm(std::filesystem::path(dir) / "gpu_traced_ao.ppm", tracedFrame);
+            save_ppm(std::filesystem::path(dir) / "diff_traced_ao.ppm", tracedDiffImage);
+        }
+        require(tracedDark > 0.5 * cpuDark && tracedDark < 1.6 * cpuDark,
+                "traced ambient occlusion strength differs from the CPU reference (GPU " + std::to_string(tracedDark) +
+                    ", CPU " + std::to_string(cpuDark) + ")");
+        require(tracedDiff.meanAbsoluteError < 3.5, "traced AO image differs too much from the CPU reference (mean " +
+                                                        std::to_string(tracedDiff.meanAbsoluteError) + ")");
     }
 
     // Same view again: cached meshes, identical frame.

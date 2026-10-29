@@ -1988,7 +1988,7 @@ if(DVE_BUILD_PLAYER AND DVE_BUILD_RHI AND DVE_BUILD_PLATFORM)
             set(_dve_player_spv)
             foreach(_shader IN ITEMS live_ibl_material_vs live_ibl_material_ps live_environment_skybox_vs
                                      live_environment_skybox_ps live_csm_caster_vs live_csm_caster_ps
-                                     player_present_vs player_present_ps player_ssao_ps)
+                                     player_present_vs player_present_ps player_ssao_ps player_traced_ao_ps)
                 if(_shader MATCHES "_vs$")
                     set(_profile vs_6_0)
                 else()

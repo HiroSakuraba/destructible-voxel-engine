@@ -260,6 +260,14 @@ void test_selection_operation_modes() {
         c.pointer_down(PointerButton::Primary, x, y, 1U);
         c.pointer_up(PointerButton::Primary, x, y, 1U);
         check(selected_exactly(c, {2}), "Shift hierarchy row toggles an object on");
+        check(c.dispatch_action("select.operation_add"), "enable explicit add for hierarchy");
+        c.pointer_down(PointerButton::Primary, x, y, 0U);
+        c.pointer_up(PointerButton::Primary, x, y, 0U);
+        check(selected_exactly(c, {2}), "persistent Add plain hierarchy click keeps a selected row: " + names(c));
+        c.pointer_down(PointerButton::Primary, x, y, 1U);
+        c.pointer_up(PointerButton::Primary, x, y, 1U);
+        check(selected_exactly(c, {}), "Shift hierarchy row in Add mode still toggles off");
+        check(c.dispatch_action("select.operation_replace"), "restore replace mode after hierarchy add");
     }
 }
 

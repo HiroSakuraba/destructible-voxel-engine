@@ -5037,7 +5037,9 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
                 // Use the same precedence as viewport, voxel and component selection:
                 // Ctrl+Shift intersects, Ctrl subtracts, Shift toggles a clicked row.
                 SelectionOperation operation = selection_operation_for_input(modifiers);
-                if (operation == SelectionOperation::Add && workspace_.is_selected(order[index]))
+                // Only Shift-click toggles a selected row off; persistent Add mode keeps it.
+                if ((modifiers & 1U) != 0U && operation == SelectionOperation::Add &&
+                    workspace_.is_selected(order[index]))
                     operation = SelectionOperation::Subtract;
                 workspace_.apply_selection({order[index]}, operation);
                 refresh_menu_state();

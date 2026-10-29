@@ -5029,10 +5029,13 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
                     (void)set_hierarchy_expanded(order[index], hierarchy_collapsed(order[index]));
                     return;
                 }
-                // Same rule as the viewport: Shift adds (or takes out a selected row), Ctrl removes.
-                if ((modifiers & 2U) != 0U) workspace_.apply_selection({order[index]}, SelectionOperation::Subtract);
-                else if ((modifiers & 1U) != 0U) workspace_.toggle_selection(order[index]);
-                else workspace_.select_object(order[index]);
+                // Use the same precedence as viewport, voxel and component selection:
+                // Ctrl+Shift intersects, Ctrl subtracts, Shift toggles a clicked row.
+                SelectionOperation operation = selection_operation_for_modifiers(modifiers);
+                if (operation == SelectionOperation::Add && workspace_.is_selected(order[index]))
+                    operation = SelectionOperation::Subtract;
+                workspace_.apply_selection({order[index]}, operation);
+                refresh_menu_state();
                 focusRegion_ = EditorFocusRegion::SceneHierarchy;
                 // Armed as a pending drag source; pointer_move promotes it to an active drag
                 // only once the pointer has actually moved, so a plain click never reparents.
@@ -5575,23 +5578,35 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
                 const int bottom = std::max(marquee_.startY, y);
                 const bool contain = x >= marquee_.startX;
                 const UiRect rectangle{left, top, right - left + 1, bottom - top + 1};
-                // Pieces inside a closed group count for the group: a crossing box takes the group if
-                // any piece is touched, a window box only if every piece with geometry is inside.
-                std::map<EditorObjectId, std::pair<std::size_t, std::size_t>> groupPieces;  // matched, total
+                // Closed groups select as one object. For containment, *every* visible
+                // geometric piece—including the parent if it has its own geometry—must be
+                // inside. An earlier implementation inserted the parent before checking
+                // its children, so a partially enclosed closed group was selected anyway.
+                std::map<EditorObjectId, std::pair<std::size_t, std::size_t>> groupPieces; // matched, total
+                std::map<EditorObjectId, bool> rootGeometry;
                 for (const auto& [id, object] : workspace_.document().objects()) {
-                    // Box selection only takes what is on screen: isolated-out objects are skipped
-                    // (object_matches_screen_rect already skips hidden ones).
-                    if (is_isolated_out(id)) continue;
+                    if (is_isolated_out(id) || !object.flags.visible || !has_own_geometry(object)) continue;
                     const EditorObjectId target = viewport_selection_target(id);
                     const bool matched = object_matches_screen_rect(object, camera_, layout_.viewport, rectangle, contain);
-                    if (target == id) { if (matched) hits.insert(id); continue; }
-                    if (!has_own_geometry(object) || !object.flags.visible) continue;
-                    auto& [matchedCount, total] = groupPieces[target];
-                    ++total;
-                    if (matched) ++matchedCount;
+                    if (target == id) {
+                        rootGeometry[id] = matched;
+                        if (matched) hits.insert(id);
+                    } else {
+                        auto& [matchedCount, total] = groupPieces[target];
+                        ++total;
+                        if (matched) ++matchedCount;
+                    }
                 }
-                for (const auto& [group, counts] : groupPieces)
-                    if (contain ? counts.first == counts.second && counts.second > 0 : counts.first > 0) hits.insert(group);
+                for (const auto& [group, counts] : groupPieces) {
+                    const auto root = rootGeometry.find(group);
+                    const bool rootOk = root == rootGeometry.end() || root->second;
+                    if (contain) {
+                        // Remove a parent previously added on the strength of its own body.
+                        hits.erase(group);
+                        if (rootOk && counts.second > 0U && counts.first == counts.second)
+                            hits.insert(group);
+                    } else if (counts.first > 0U) hits.insert(group);
+                }
                 std::erase_if(hits, [&](EditorObjectId id) { return !object_selectable(id); });
                 // Front-only unless X-Ray Selection: keep what actually shows inside the box.
                 if (!viewportSettings_.xraySelection && !hits.empty()) hits = targets_seen_in_rect(rectangle, hits);

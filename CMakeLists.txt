@@ -746,6 +746,7 @@ if(DVE_BUILD_RHI)
         src/render/rdv_viewport.cpp
         src/render/mesh_rhi_mirror.cpp
         src/render/voxel_surface_mesher.cpp
+        src/render/scene_voxel_grid.cpp
         src/render/dashr_atlas.cpp
         src/render/dashr_shell.cpp
         src/render/dashr_live_surface.cpp
@@ -2181,6 +2182,9 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_vulkan_graphics_tests tests/test_vulkan_graphics_device.cpp)
         target_link_libraries(dve_vulkan_graphics_tests PRIVATE dve::rhi_vulkan)
         add_test(NAME dve_vulkan_graphics_tests COMMAND dve_vulkan_graphics_tests)
+        add_executable(dve_scene_voxel_grid_tests tests/test_scene_voxel_grid.cpp)
+        target_link_libraries(dve_scene_voxel_grid_tests PRIVATE dve::render_bridge dve::core)
+        add_test(NAME dve_scene_voxel_grid_tests COMMAND dve_scene_voxel_grid_tests)
         add_executable(dve_vulkan_presentation_tests tests/test_vulkan_presentation.cpp)
         target_link_libraries(dve_vulkan_presentation_tests PRIVATE dve::rhi_vulkan)
         add_test(NAME dve_vulkan_presentation_tests COMMAND dve_vulkan_presentation_tests)

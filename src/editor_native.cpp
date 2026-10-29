@@ -14412,7 +14412,7 @@ void NativeEditorController::finish_voxel_marquee(int x, int y) {
                     voxel_connected_piece(*object->voxels,marquee.clickVoxel->voxel,kMaxVoxelSelection);
                 SelectionOperation operation = marquee.operation;
                 // Shift+click on a selected piece takes it out again.
-                if (operation == SelectionOperation::Add && object->id == voxelSelectionObject_ && !cells.empty() &&
+                if (marquee.shiftHeldOnPress && operation == SelectionOperation::Add && object->id == voxelSelectionObject_ && !cells.empty() &&
                     std::all_of(cells.begin(), cells.end(), [&](const Int3& cell) { return voxelSelection_.contains(cell); }))
                     operation = SelectionOperation::Subtract;
                 select_voxels(object->id,cells,operation);

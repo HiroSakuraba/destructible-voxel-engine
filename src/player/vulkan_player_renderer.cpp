@@ -4,6 +4,8 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <numbers>
 #include <span>
@@ -139,8 +141,29 @@ std::array<float, 16> rigid_matrix(const RigidTransform& transform) noexcept {
 
 // Sky light from the environment's sky/ground colours: the same hemisphere the CPU renderer
 // uses for ambient (ShadeAmbient), as a small cube the IBL baker integrates.
-EnvironmentLightingAsset sky_environment_asset(const RenderEnvironment& environment) {
-    const bool physical = environment.skyMode == SkyMode::Physical;
+// The environment's sky model. Physical sky: built for the sun at azimuth 0 and an elevation
+// rounded to whole degrees, and queried with directions rotated by the sun's real azimuth, so
+// turning the sun costs no new atmosphere tables (a new elevation builds them, ~0.2 s).
+struct SkySampler {
+    RenderEnvironment environment;
+    bool physical{};
+    float cosAzimuth{1.0F}, sinAzimuth{};
+
+    [[nodiscard]] Float3 canonical(Float3 d) const noexcept {
+        return {d.x * cosAzimuth + d.z * sinAzimuth, d.y, -d.x * sinAzimuth + d.z * cosAzimuth};
+    }
+    [[nodiscard]] Float3 radiance(Float3 d) const { return render::sky_radiance(environment, physical ? canonical(d) : d); }
+    [[nodiscard]] Float3 irradiance(Float3 d) const { return render::sky_irradiance(environment, physical ? canonical(d) : d); }
+    // Colour x intensity x transmittance at the observer (colour x intensity in Colours mode).
+    [[nodiscard]] Float3 sun_light() const {
+        if (physical) return render::sun_irradiance(environment);
+        return {environment.sunColor.x * environment.sunIntensity, environment.sunColor.y * environment.sunIntensity,
+                environment.sunColor.z * environment.sunIntensity};
+    }
+};
+
+EnvironmentLightingAsset sky_environment_asset(const SkySampler& sky) {
+    const bool physical = sky.physical;
     const std::uint32_t kResolution = physical ? 32U : 16U;
     EnvironmentLightingAsset asset;
     asset.name = "Player sky";
@@ -154,7 +177,7 @@ EnvironmentLightingAsset sky_environment_asset(const RenderEnvironment& environm
                 // Colours mode: the sky/ground blend; Physical: the atmosphere (same convention).
                 asset.sourceRadiance.texels[asset.sourceRadiance.face_offset(static_cast<CubeFace>(face)) +
                                             static_cast<std::size_t>(y) * kResolution + x] =
-                    render::sky_radiance(environment, d);
+                    sky.radiance(d);
             }
     IblBakeSettings settings;
     settings.irradianceResolution = 8U;
@@ -518,7 +541,7 @@ public:
             if (environment.sunDisc > 0.0F) {
                 // The disc's radiance: sun irradiance over its solid angle, drawn as pi x radiance (CPU background_radiance).
                 const double solidAngle = 2.0 * std::numbers::pi * (1.0 - std::cos(static_cast<double>(render::kSunAngularRadius)));
-                const Float3 irradiance = render::sun_irradiance(environment);
+                const Float3 irradiance = sky_.sun_light();
                 const float scale = static_cast<float>(std::numbers::pi / solidAngle) * environment.sunDisc;
                 presentSky_.sunDisc = {irradiance.x * scale, irradiance.y * scale, irradiance.z * scale, 0.0F};
             } else {
@@ -591,11 +614,7 @@ public:
         head[20] = camera.position.x; head[21] = camera.position.y; head[22] = camera.position.z; head[23] = 1.0F;
         std::memcpy(constants.data(), head.data(), sizeof(head));
         // Physical sky: the sun's colour is what reaches the ground (transmittance applied).
-        const bool physicalSky = environment.skyMode == SkyMode::Physical;
-        const Float3 sunLight = physicalSky ? render::sun_irradiance(environment)
-                                            : Float3{environment.sunColor.x * environment.sunIntensity,
-                                                     environment.sunColor.y * environment.sunIntensity,
-                                                     environment.sunColor.z * environment.sunIntensity};
+        const Float3 sunLight = sky_.sun_light();
         const render::GpuLiveSunConstants sun = render::make_live_sun_constants(
             shadowsOn ? &plan : nullptr, environment.sunDirection, sunLight,
             sunOn ? std::numbers::pi_v<float> : 0.0F,
@@ -783,7 +802,7 @@ public:
             constants.sunDirection = {sun.x, sun.y, sun.z, environment.sunIntensity};
             Float3 sunTint = environment.sunColor;
             if (environment.skyMode == SkyMode::Physical && environment.sunIntensity > 1.0e-6F) {
-                const Float3 reaching = render::sun_irradiance(environment);   // colour x intensity x transmittance
+                const Float3 reaching = sky_.sun_light();   // colour x intensity x transmittance
                 sunTint = {reaching.x / environment.sunIntensity, reaching.y / environment.sunIntensity,
                            reaching.z / environment.sunIntensity};
             }
@@ -925,8 +944,31 @@ private:
 
     // The sky light is baked from the environment's sky and ground colours; the live renderer's
     // bind groups reference the IBL textures, so a new sky rebuilds both.
+    // Chooses the sky model for this frame (see SkySampler); a new sun elevation is adopted at
+    // most every 300 ms so holding the elevation key does not rebuild the atmosphere every frame.
+    void update_sky(const RenderEnvironment& environment) {
+        sky_.environment = environment;
+        sky_.physical = environment.skyMode == SkyMode::Physical;
+        if (!sky_.physical) return;
+        const Float3 sun = unit(environment.sunDirection, {0.0F, 1.0F, 0.0F});
+        const int elevation = static_cast<int>(std::lround(std::asin(std::clamp(sun.y, -1.0F, 1.0F)) * 57.29578F));
+        const auto now = Clock::now();
+        if (!skyModelValid_ || (elevation != skyElevationDegrees_ &&
+                                std::chrono::duration<double, std::milli>(now - skyModelTime_).count() > 300.0)) {
+            skyElevationDegrees_ = elevation;
+            skyModelTime_ = now;
+            skyModelValid_ = true;
+        }
+        const float e = static_cast<float>(skyElevationDegrees_) * 0.017453293F;
+        sky_.environment.sunDirection = {std::cos(e), std::sin(e), 0.0F};
+        const float length = std::sqrt(sun.x * sun.x + sun.z * sun.z);
+        sky_.cosAzimuth = length > 1.0e-4F ? sun.x / length : 1.0F;
+        sky_.sinAzimuth = length > 1.0e-4F ? sun.z / length : 0.0F;
+    }
+
     bool ensure_environment(const RenderEnvironment& environment, std::string* error) {
-        const bool physical = environment.skyMode == SkyMode::Physical;
+        update_sky(environment);
+        const bool physical = sky_.physical;
         std::vector<float> key{environment.skyColor.x, environment.skyColor.y, environment.skyColor.z,
                                environment.groundColor.x, environment.groundColor.y, environment.groundColor.z,
                                physical ? 1.0F : 0.0F};
@@ -937,27 +979,35 @@ private:
                                                               {0.7F, 0.0F, -0.7F}}};
             for (const Float3& probe : kProbes) {
                 const Float3 d = unit(probe, {0.0F, 1.0F, 0.0F});
-                const Float3 radiance = render::sky_radiance(environment, d);
+                const Float3 radiance = sky_.radiance(d);
                 key.insert(key.end(), {radiance.x, radiance.y, radiance.z});
             }
-            const Float3 sunLight = render::sun_irradiance(environment);
+            const Float3 sunLight = sky_.sun_light();
             key.insert(key.end(), {sunLight.x, sunLight.y, sunLight.z, environment.sunDisc});
         }
         if (lighting_.valid() && key == skyKey_) return true;
         device_->wait_idle();
-        if (live_.valid() && !render::destroy_live_environment_renderer(*device_, live_, error)) return false;
-        if (lighting_.valid() && !render::destroy_environment_lighting(*device_, lighting_, error)) return false;
-        // Cached meshes keep their GPU buffers; only material descriptor tables lived in live_,
-        // and the new live renderer rebuilds those on first use.
-        const EnvironmentLightingAsset asset = sky_environment_asset(environment);
-        if (!render::upload_environment_lighting(*device_, asset, lighting_, error)) return false;
-        if (physical && !upload_sky_tables(environment, error)) return false;
+        const EnvironmentLightingAsset asset = sky_environment_asset(sky_);
+        // A new sky (the sun moved, ...) rewrites the baked cubes in place: the live renderer's
+        // pipelines and bind groups keep pointing at the same textures.
+        if (lighting_.valid() && live_.valid()) {
+            std::string refreshError;
+            if (!render::refresh_environment_lighting(*device_, asset, lighting_, &refreshError)) {
+                set_error(error, refreshError);
+                return false;
+            }
+        } else {
+            if (live_.valid() && !render::destroy_live_environment_renderer(*device_, live_, error)) return false;
+            if (lighting_.valid() && !render::destroy_environment_lighting(*device_, lighting_, error)) return false;
+            if (!render::upload_environment_lighting(*device_, asset, lighting_, error)) return false;
+        }
+        if (physical && !upload_sky_tables(error)) return false;
         skyKey_ = std::move(key);
         return true;
     }
 
     // Equirectangular radiance (by direction) and irradiance (by normal) tables of the physical sky.
-    bool upload_sky_tables(const RenderEnvironment& environment, std::string* error) {
+    bool upload_sky_tables(std::string* error) {
         const auto fill = [&](std::uint32_t w, std::uint32_t h, bool irradiance, rhi::TextureHandle texture) {
             std::vector<std::uint16_t> texels(static_cast<std::size_t>(w) * h * 4U);
             for (std::uint32_t y = 0; y < h; ++y)
@@ -965,7 +1015,7 @@ private:
                     const float phi = ((static_cast<float>(x) + 0.5F) / static_cast<float>(w) - 0.5F) * 2.0F * std::numbers::pi_v<float>;
                     const float theta = (static_cast<float>(y) + 0.5F) / static_cast<float>(h) * std::numbers::pi_v<float>;
                     const Float3 d{std::sin(theta) * std::cos(phi), std::cos(theta), std::sin(theta) * std::sin(phi)};
-                    const Float3 value = irradiance ? render::sky_irradiance(environment, d) : render::sky_radiance(environment, d);
+                    const Float3 value = irradiance ? sky_.irradiance(d) : sky_.radiance(d);
                     std::uint16_t* texel = &texels[(static_cast<std::size_t>(y) * w + x) * 4U];
                     texel[0] = float_to_half(value.x); texel[1] = float_to_half(value.y);
                     texel[2] = float_to_half(value.z); texel[3] = float_to_half(1.0F);
@@ -1214,6 +1264,10 @@ private:
     render::CascadedShadowAtlasResources atlas_{};
     render::LiveEnvironmentRendererResources live_{};
     std::vector<float> skyKey_;
+    SkySampler sky_;
+    int skyElevationDegrees_{};
+    bool skyModelValid_{};
+    Clock::time_point skyModelTime_{};
     static constexpr std::uint32_t kSkyWidth = 128U, kSkyHeight = 64U, kSkyIrradianceWidth = 32U, kSkyIrradianceHeight = 16U;
     rhi::TextureHandle skyRadianceTexture_{}, skyIrradianceTexture_{};
     rhi::TextureViewHandle skyRadianceView_{}, skyIrradianceView_{};

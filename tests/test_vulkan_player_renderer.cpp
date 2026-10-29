@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -344,6 +345,16 @@ int run() {
         const bool skyOk = skyGpu->render(skyView, &error) && skyGpu->present(&error);
         require(skyOk, "GPU physical-sky frame failed: " + error);
         const Rgba8Image physical = *skyGpu->readback();
+        // The sun moves: the sky is rebuilt without recreating the live renderer.
+        for (const float elevation : {0.9F, 0.6F, 0.35F}) {
+            PlayerRenderView moved = skyView;
+            moved.environment.sunDirection = {std::cos(elevation), std::sin(elevation), 0.2F};
+            const auto t0 = std::chrono::steady_clock::now();
+            const bool movedOk = skyGpu->render(moved, &error) && skyGpu->present(&error);
+            require(movedOk, "GPU frame after the sun moved failed: " + error);
+            std::cout << "physical sky, sun elevation " << elevation << ": frame "
+                      << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() << " ms\n";
+        }
         PlayerRenderView colourView = skyView;
         colourView.environment.skyMode = SkyMode::Colors;
         const bool colourOk = skyGpu->render(colourView, &error) && skyGpu->present(&error);

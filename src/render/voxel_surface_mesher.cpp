@@ -215,22 +215,63 @@ bool build_voxel_surface_mesh(const VoxelObject& object,
         }
     }
 
+    // Layer references are material IDs, including slots not directly used by voxels.
+    // Preserve their original indices instead of compacting the table by visible material.
+    asset.materials.assign(materials.begin(), materials.end());
+    for (const MaterialId id : builder.slotMaterial)
+        while (asset.materials.size() <= id)
+            asset.materials.push_back(default_voxel_material(static_cast<MaterialId>(asset.materials.size())));
     for (std::size_t slot = 0; slot < builder.indicesByMaterial.size(); ++slot) {
         const MaterialId id = builder.slotMaterial[slot];
-        asset.materials.push_back(id < materials.size() ? materials[id] : default_voxel_material(id));
         PolygonSubmesh submesh;
         submesh.name = "voxel material " + std::to_string(id);
         submesh.firstIndex = static_cast<std::uint32_t>(asset.indices.size());
         submesh.indexCount = static_cast<std::uint32_t>(builder.indicesByMaterial[slot].size());
-        submesh.materialIndex = static_cast<std::uint32_t>(slot);
+        submesh.materialIndex = static_cast<std::uint32_t>(id);
         asset.indices.insert(asset.indices.end(), builder.indicesByMaterial[slot].begin(),
                              builder.indicesByMaterial[slot].end());
         asset.submeshes.push_back(std::move(submesh));
     }
     asset.materialBindings.resize(asset.materials.size());
+    // Voxel texture maps use object-space triplanar coordinates, in metres.
+    // Material bindings are aligned with the material slots built above.
+    for (std::size_t i = 0; i < asset.materials.size(); ++i) {
+        const auto& material = asset.materials[i];
+        auto& binding = asset.materialBindings[i];
+        const auto add_map = [&](const std::shared_ptr<const VoxelNormalMap>& map,
+                                 PolygonTextureBinding& target) {
+            if (!map || map->width == 0 || map->height == 0 ||
+                map->rgba8.size() != static_cast<std::size_t>(map->width) * map->height * 4U) return;
+            const auto image = static_cast<std::uint32_t>(asset.images.size());
+            asset.images.push_back({map->name, "image/raw", map->width, map->height, map->rgba8});
+            const auto texture = static_cast<std::uint32_t>(asset.textures.size());
+            if (asset.samplers.empty()) asset.samplers.emplace_back();
+            asset.textures.push_back({map->name, image, 0U});
+            target.texture = texture;
+        };
+        add_map(material.baseColorMap, binding.baseColor);
+        add_map(material.ormMap, binding.metallicRoughness);
+        add_map(material.emissiveMap, binding.emissive);
+        const bool hasTextureSet = binding.baseColor.texture || binding.metallicRoughness.texture || binding.emissive.texture;
+        // The live material currently has one shared triplanar mapping. Only bind the normal
+        // when its independently authored scale and sharpness agree with that mapping.
+        const bool matchingNormalMapping = !hasTextureSet ||
+            (material.normalMapTileMeters == material.textureTileMeters &&
+             material.normalMapSharpness == material.textureSharpness);
+        if (matchingNormalMapping) {
+            add_map(material.normalMap, binding.normal);
+            binding.normalScale = material.normalMapStrength;
+        }
+        if (hasTextureSet || binding.normal.texture) {
+            binding.mapping.mappingMode = MaterialMappingMode::ObjectTriplanar;
+            const float tile = hasTextureSet ? material.textureTileMeters : material.normalMapTileMeters;
+            binding.mapping.triplanarScale = 1.0F / std::max(tile, 1.0e-4F);
+            binding.mapping.triplanarBlendSharpness = hasTextureSet ? material.textureSharpness : material.normalMapSharpness;
+        }
+    }
     if (!asset.vertices.empty()) asset.bounds = {builder.minimum, builder.maximum};
     asset.contentHash = polygon_asset_content_hash(asset);
-    counters.materials = static_cast<std::uint32_t>(asset.materials.size());
+    counters.materials = static_cast<std::uint32_t>(builder.slotMaterial.size());
     if (stats) *stats = counters;
     return true;
 }

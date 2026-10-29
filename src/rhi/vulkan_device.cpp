@@ -3419,20 +3419,20 @@ FenceHandle VulkanDevice::submit(CommandListHandle commands, std::string* error)
         if (!pool) { recorded = false; break; }
         impl_->fn.cmdResetQueryPool(native, pool->pool, timestamp->index, 1U);
     }
-    bool lastWasCopy = false;
+    // Transfer dependencies survive labels, timestamps and other intervening commands.
+    bool hasPriorCopy = false;
     for (const auto& command : list->commands) {
         if (!recorded) break;
-        if (!std::holds_alternative<Impl::CopyCommand>(command)) lastWasCopy = false;
         recorded = std::visit([&](const auto& item) -> bool {
             using T = std::decay_t<decltype(item)>;
             if constexpr (std::is_same_v<T, Impl::CopyCommand>) {
                 const auto* src = impl_->buffer(item.source, error);
                 const auto* dst = impl_->buffer(item.destination, error);
                 if (!src || !dst) return false;
-                // Back-to-back copies may read what the previous copy wrote (upload -> device
+                // Dependent copies may read what an earlier copy wrote (upload -> device
                 // -> readback chains); transfer writes are not visible to later transfer reads
                 // without this dependency. Software rasterizers hide the hazard, real GPUs do not.
-                if (lastWasCopy) {
+                if (hasPriorCopy) {
                     const vk::GlobalMemoryBarrier memory{vk::StructureTypeMemoryBarrier, nullptr,
                                                    vk::AccessTransferWriteBit,
                                                    vk::AccessTransferReadBit | vk::AccessTransferWriteBit};
@@ -3440,7 +3440,7 @@ FenceHandle VulkanDevice::submit(CommandListHandle commands, std::string* error)
                                                  vk::PipelineStageTransferBit, 0U,
                                                  1U, &memory, 0U, nullptr, 0U, nullptr);
                 }
-                lastWasCopy = true;
+                hasPriorCopy = true;
                 const vk::BufferCopy copy{item.sourceOffset, item.destinationOffset, item.bytes};
                 impl_->fn.cmdCopyBuffer(native, src->buffer, dst->buffer, 1U, &copy);
                 return true;

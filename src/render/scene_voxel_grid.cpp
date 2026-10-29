@@ -61,6 +61,12 @@ std::uint64_t object_key(const SceneGridObject& object, std::uint64_t placement)
     mix_value(hash, object.cellMeters);
     mix_value(hash, object.materials.data());
     mix_value(hash, object.materials.size());
+    // Lighting depends on material values, not just the table's allocation.
+    for (const auto& material : object.materials) {
+        mix_value(hash, material.baseColor);
+        mix_value(hash, material.metallic);
+        mix_value(hash, material.emissive);
+    }
     mix_value(hash, placement);
     return hash;
 }
@@ -69,7 +75,13 @@ std::uint64_t object_key(const SceneGridObject& object, std::uint64_t placement)
 
 std::uint8_t SceneVoxelGrid::palette_slot(const VoxelMaterialDefinition& material, const void* table, std::uint32_t id) {
     const auto key = std::make_pair(table, id);
-    if (const auto it = paletteIndex_.find(key); it != paletteIndex_.end()) return it->second;
+    if (const auto it = paletteIndex_.find(key); it != paletteIndex_.end()) {
+        auto& entry = palette_[static_cast<std::size_t>(it->second) - 1U];
+        entry.albedo = {material.baseColor.x, material.baseColor.y, material.baseColor.z};
+        entry.metallic = material.metallic;
+        entry.emissive = material.emissive;
+        return it->second;
+    }
     if (palette_.size() >= 255U) return 255U;   // out of slots: the last one is shared
     SceneGridMaterial entry;
     entry.albedo = {material.baseColor.x, material.baseColor.y, material.baseColor.z};
@@ -100,6 +112,7 @@ bool SceneVoxelGrid::update(std::span<const SceneGridObject> objects, const Scen
     if (!all.valid()) {
         const bool changed = !cells_.empty();
         cells_.clear(); dimensions_ = {}; contentKey_ = 0U; placementKey_ = 0U;
+        cache_.clear(); palette_.clear(); paletteIndex_.clear();
         return changed;
     }
     if (!(cell > 0.0F)) cell = 0.5F * smallest;   // half a voxel: rotated objects stair-step less

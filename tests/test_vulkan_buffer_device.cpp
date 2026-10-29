@@ -57,6 +57,8 @@ int main() {
         require(device.begin_debug_label(commands, "copy", &error), error.c_str());
         require(device.copy_buffer(commands, upload, 0U, deviceLocal, 0U, source.size(), &error),
                 error.c_str());
+        require(device.begin_debug_label(commands, "between copies", &error), error.c_str());
+        require(device.end_debug_label(commands, &error), error.c_str());
         require(device.copy_buffer(commands, deviceLocal, 0U, readback, 0U, source.size(), &error),
                 error.c_str());
         require(device.end_debug_label(commands, &error), error.c_str());
@@ -94,3 +96,4 @@ int main() {
         return 1;
     }
 }
+

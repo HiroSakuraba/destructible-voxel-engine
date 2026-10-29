@@ -210,6 +210,7 @@ window / rendering
                             accumulated over frames; more = smoother, slower)
   --sky colors|physical     override the scene's sky model (physical: atmosphere sky, sun colour and
                             sky light from the engine's atmosphere model)
+  --free-camera             mouse look; WASD move; Space up; C down; Esc quits
   --no-vsync                vulkan: present without waiting for vertical blank (mailbox
                             when available, else immediate)
   --quality fast|balanced|reference   CPU lighting cost (default fast: hard shadows,
@@ -259,6 +260,7 @@ struct Options {
     std::uint32_t giRays{32};       // vulkan: rays per traced-GI texel
     std::string skyOverride;        // "" (scene), colors | physical
     bool fullscreen{};
+    bool freeCamera{};
     bool headless{};
     bool noAudio{};
     bool noScript{};
@@ -369,6 +371,8 @@ std::optional<Options> parse_arguments(int argc, char** argv, int* exitCode) {
             if (!(v = value()) || (*v != "ambient" && *v != "bounce" && *v != "cascades"))
                 return bad("--gi must be ambient, bounce or cascades");
             options.giMode = *v;
+        } else if (argument == "--free-camera") {
+            options.freeCamera = true;
         } else if (argument == "--no-vsync") {
             options.vsync = false;
         } else if (argument == "--fullscreen") {
@@ -780,6 +784,11 @@ int run(int argc, char** argv) {
     FrameTimes frameTimes;
     FrameTimes tickTimes;
     std::uint64_t framesRendered = 0;
+    // Opt-in fly camera, independent of gameplay and the saved scene camera.
+    bool cameraReady = false, forwardKey = false, backKey = false, leftKey = false, rightKey = false;
+    bool upKey = false, downKey = false;
+    float cameraYaw = 0.0F, cameraPitch = 0.0F, cameraDt = 0.0F;
+    Float3 cameraPosition{};
     const auto render_frame = [&](bool captureWindow) -> bool {
         const auto frameStart = Clock::now();
         const float aspect = static_cast<float>(renderWidth) / static_cast<float>(renderHeight);
@@ -788,6 +797,26 @@ int run(int argc, char** argv) {
         if(mechaAudio)mechaAudio->update(app->prototype_hud());
 #endif
         PlayerRenderView view = app->render_view(objects, aspect, interpolationAlpha);
+        if (options.freeCamera && !options.headless) {
+            if (!cameraReady) {
+                cameraPosition = view.camera.position;
+                const Float3 direction{view.camera.target.x - cameraPosition.x,
+                    view.camera.target.y - cameraPosition.y, view.camera.target.z - cameraPosition.z};
+                cameraYaw = std::atan2(direction.x, -direction.z);
+                cameraPitch = std::atan2(direction.y, std::sqrt(direction.x * direction.x + direction.z * direction.z));
+                cameraReady = true;
+            }
+            const float sine = std::sin(cameraYaw), cosine = std::cos(cameraYaw);
+            const float move = 2.5F * std::clamp(cameraDt, 0.0F, 0.05F);
+            const float along = float(forwardKey) - float(backKey), side = float(rightKey) - float(leftKey);
+            cameraPosition.x += move * (along * sine + side * cosine);
+            cameraPosition.z += move * (-along * cosine + side * sine);
+            cameraPosition.y += move * (float(upKey) - float(downKey));
+            const float cp = std::cos(cameraPitch);
+            view.camera.position = cameraPosition;
+            view.camera.target = {cameraPosition.x + sine * cp, cameraPosition.y + std::sin(cameraPitch),
+                                  cameraPosition.z - cosine * cp};
+        }
         if (!options.skyOverride.empty())
             view.environment.skyMode = options.skyOverride == "physical" ? SkyMode::Physical : SkyMode::Colors;
         if (!renderer->render(view, &error)) return false;
@@ -801,9 +830,22 @@ int run(int argc, char** argv) {
     };
     std::vector<platform::PlatformEvent> pendingHostEvents;
     const auto poll = [&]() {
-        if(host.has_window()&&!options.headless){const auto* hud=app->prototype_hud();bool wanted=hud&&hud->phase==PrototypePhase::Playing&&host.window_metrics().focused;if(host.relative_mouse_mode()!=wanted)(void)host.set_relative_mouse_mode(wanted);}
+        if(host.has_window()&&!options.headless){const auto* hud=app->prototype_hud();bool wanted=(options.freeCamera||(hud&&hud->phase==PrototypePhase::Playing))&&host.window_metrics().focused;if(host.relative_mouse_mode()!=wanted)(void)host.set_relative_mouse_mode(wanted);}
         platform::PlatformEvent event;
         while (host.has_window() && host.poll_event(event)) {
+            if (options.freeCamera) {
+                if (event.type == platform::EventType::WindowFocusLost) {
+                    forwardKey = backKey = leftKey = rightKey = upKey = downKey = false;
+                } else if (event.type == platform::EventType::PointerMove && cameraReady && host.window_metrics().focused) {
+                    cameraYaw += event.deltaX * 0.0025F;
+                    cameraPitch = std::clamp(cameraPitch - event.deltaY * 0.0025F, -1.55F, 1.55F);
+                } else if (event.type == platform::EventType::KeyDown || event.type == platform::EventType::KeyUp) {
+                    const bool held = event.type == platform::EventType::KeyDown;
+                    if (event.key == "w") forwardKey = held; else if (event.key == "s") backKey = held;
+                    else if (event.key == "a") leftKey = held; else if (event.key == "d") rightKey = held;
+                    else if (event.key == "space") upKey = held; else if (event.key == "c") downKey = held;
+                }
+            }
             if (options.headless) app->handle_event(event);
             else pendingHostEvents.push_back(event);
             if (event.type == platform::EventType::KeyDown && event.key == "escape") app->request_quit();
@@ -890,6 +932,7 @@ int run(int argc, char** argv) {
             const auto now = Clock::now();
             const double elapsed = std::chrono::duration<double>(now - previous).count();
             previous = now;
+            cameraDt = static_cast<float>(elapsed);
             const auto inputNow = host.monotonic_nanoseconds();
             const auto tickBefore = app->tick_count();
             const auto phaseBefore = clock.accumulator;

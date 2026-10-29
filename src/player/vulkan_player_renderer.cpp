@@ -1042,6 +1042,7 @@ private:
         Float3 cell{};
         const VoxelMaterialDefinition* materials{};
         std::size_t materialCount{};
+        std::uint64_t materialHash{};
         CookedPolygonAsset asset;
         std::unique_ptr<render::MeshRhiMirror> mirror;
         std::uint64_t lastFrame{};
@@ -1209,11 +1210,17 @@ private:
     VoxelMesh* voxel_mesh(const GameRenderObject& object, Float3 cell, std::string* error) {
         std::span<const VoxelMaterialDefinition> materials = object.materials;
         if (materials.empty()) materials = default_palette();
+        // A caller may edit a material in place without changing the table address.
+        // Reuse the asset's canonical material hashing, including extended material fields.
+        CookedPolygonAsset materialKey;
+        if (!object.materials.empty()) materialKey.materials.assign(materials.begin(), materials.end());
+        const std::uint64_t materialHash = object.materials.empty() ? 0U : polygon_asset_content_hash(materialKey);
         auto& mesh = voxelMeshes_[object.id];
         mesh.lastFrame = frameIndex_;
         const bool stale = !mesh.mirror || mesh.object != object.voxels || mesh.revision != object.voxels->revision() ||
                            mesh.cell.x != cell.x || mesh.cell.y != cell.y || mesh.cell.z != cell.z ||
-                           mesh.materials != materials.data() || mesh.materialCount != materials.size();
+                           mesh.materials != materials.data() || mesh.materialCount != materials.size() ||
+                           mesh.materialHash != materialHash;
         if (!stale) return &mesh;
         const std::uint64_t previousHash = mesh.asset.contentHash;
         render::VoxelSurfaceMeshOptions options;
@@ -1229,6 +1236,7 @@ private:
         mesh.cell = cell;
         mesh.materials = materials.data();
         mesh.materialCount = materials.size();
+        mesh.materialHash = materialHash;
         return &mesh;
     }
 

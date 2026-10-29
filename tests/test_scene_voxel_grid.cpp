@@ -14,6 +14,7 @@
 #include "dve/render/scene_voxel_grid.hpp"
 #include "dve/render/voxel_surface_mesher.hpp"
 #include "dve/transform.hpp"
+#include "dve/voxel_textures.hpp"
 
 namespace {
 
@@ -75,6 +76,45 @@ void mesher_tests() {
     const float holeArea = -2.0F * cell + 4.0F * cell;                      // lose 2 faces, gain 4
     require(std::abs(triangle_area(holed) - (wallArea + holeArea)) < 1.0e-4F, "holed wall area wrong");
 
+    std::vector<VoxelMaterialDefinition> mapped(4);
+    auto image = make_voxel_image("map", 1, 1, {255, 128, 64, 255}, VoxelImageRole::Color);
+    mapped[3].baseColorMap = image;
+    mapped[3].ormMap = image;
+    mapped[3].emissiveMap = image;
+    mapped[3].textureTileMeters = 0.25F;
+    CookedPolygonAsset textured;
+    require(build_voxel_surface_mesh(cube, mapped, options, textured, &stats, &error), error);
+    require(textured.materialBindings.size() == 4U, "material IDs are preserved");
+    const auto& binding = textured.materialBindings[3];
+    require(binding.baseColor.texture && binding.metallicRoughness.texture && binding.emissive.texture,
+            "voxel texture maps must survive conversion to GPU material bindings");
+    require(textured.images.size() == 3U && textured.textures.size() == 3U,
+            "all three voxel maps must be included in the mesh asset");
+    require(binding.mapping.mappingMode == MaterialMappingMode::ObjectTriplanar &&
+            std::abs(binding.mapping.triplanarScale - 4.0F) < 1.0e-5F,
+            "voxel texture mapping must retain object-space metre scale");
+
+    mapped[3].baseColorMap.reset(); mapped[3].ormMap.reset(); mapped[3].emissiveMap.reset();
+    mapped[3].normalMap = image; mapped[3].normalMapTileMeters = 0.5F;
+    mapped[3].normalMapStrength = 0.7F;
+    require(build_voxel_surface_mesh(cube, mapped, options, textured, &stats, &error), error);
+    require(textured.materialBindings[3].normal.texture &&
+            std::abs(textured.materialBindings[3].normalScale - 0.7F) < 1.0e-5F &&
+            std::abs(textured.materialBindings[3].mapping.triplanarScale - 2.0F) < 1.0e-5F,
+            "normal map and its independent projection must survive voxel meshing");
+    mapped[3].baseColorMap = image; mapped[3].textureTileMeters = 0.25F;
+    require(build_voxel_surface_mesh(cube, mapped, options, textured, &stats, &error), error);
+    require(!textured.materialBindings[3].normal.texture,
+            "different normal and color scales must not silently use the wrong projection");
+
+    mapped[3].baseColorMap.reset(); mapped[3].normalMap.reset();
+    mapped[1].baseColor = {0.0F, 1.0F, 0.0F, 1.0F};
+    mapped[3].layers.push_back({1U, 0.5F});
+    require(build_voxel_surface_mesh(cube, mapped, options, textured, &stats, &error), error);
+    require(textured.submeshes[0].materialIndex == 3U && textured.materials.size() == 4U &&
+            textured.materials[3].layers[0].sourceMaterial == 1U && textured.materials[1].baseColor.y == 1.0F,
+            "voxel layers must retain their original source material IDs");
+
     VoxelObject empty(3);
     CookedPolygonAsset none;
     require(build_voxel_surface_mesh(empty, {}, options, none, &stats, &error) && none.vertices.empty(),
@@ -126,6 +166,18 @@ void grid_tests() {
                 if (grid.cell_at_world(world) == 0U) ++mismatches;
             }
     require(mismatches * 10U <= checked, "rotated object lost more than 10% of its voxel centres");
+
+    // In-place material edits must refresh traced lighting even when the table address is stable.
+    std::vector<VoxelMaterialDefinition> materials(6);
+    materials[3].baseColor = {1, 0, 0, 1};
+    objects[0].materials = materials;
+    require(grid.update(objects, settings, {1.0F, 0.4F, 0.4F}), "new material table changes grid");
+    auto slot = grid.cell_at_world({0.45F, 0.45F, 0.45F});
+    require(slot != 0 && grid.palette()[slot - 1].albedo.x == 1.0F, "red material uploaded");
+    materials[3].baseColor = {0, 1, 0, 1};
+    require(grid.update(objects, settings, {1.0F, 0.4F, 0.4F}), "material edit changes grid");
+    slot = grid.cell_at_world({0.45F, 0.45F, 0.45F});
+    require(grid.palette()[slot - 1].albedo.y == 1.0F, "edited green material uploaded");
 
     // Unchanged scene: nothing to do.
     require(!grid.update(objects, settings, {1.0F, 0.4F, 0.4F}), "identical scene must not report a change");

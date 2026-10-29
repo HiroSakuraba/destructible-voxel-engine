@@ -9,6 +9,7 @@
 // partly shadowed. Q/E turn the sun around the room, Z/X raise and lower it (see main.lua).
 #include "dve/asset_cooker.hpp"
 #include "dve/dvox.hpp"
+#include "dve/voxel_textures.hpp"
 
 #include <cmath>
 #include <cstdint>
@@ -28,6 +29,41 @@ dve::VoxelMaterialDefinition material(std::string name, dve::Float4 color, float
     result.roughness = roughness;
     result.metallic = metallic;
     result.densityKilogramsPerCubicMeter = 1500.0F;
+    return result;
+}
+
+// A clear, repeatable texture that makes the GPU material mapping visible in the showcase.
+dve::VoxelMaterialDefinition showcase_surface(std::string name, bool metal) {
+    auto result = material(std::move(name), {1, 1, 1, 1}, metal ? 0.18F : 0.8F, metal ? 0.85F : 0.0F);
+    std::vector<std::uint8_t> rgba;
+    constexpr int size = 64;
+    for (int y = 0; y < size; ++y) for (int x = 0; x < size; ++x) {
+        const bool stripe = ((x / 8 + y / 8) & 1) != 0;
+        if (metal) {
+            rgba.insert(rgba.end(), stripe ? std::initializer_list<std::uint8_t>{230, 145, 35, 255}
+                                            : std::initializer_list<std::uint8_t>{90, 38, 12, 255});
+        } else {
+            rgba.insert(rgba.end(), stripe ? std::initializer_list<std::uint8_t>{25, 110, 190, 255}
+                                            : std::initializer_list<std::uint8_t>{220, 230, 235, 255});
+        }
+    }
+    result.baseColorMap = dve::make_voxel_image("showcase checker", size, size, std::move(rgba), dve::VoxelImageRole::Color);
+    result.textureTileMeters = 0.8F;
+    // A repeating raised-tile normal map: slopes change the lighting while the
+    // silhouette stays voxel geometry. Same projection and tile size as the color map.
+    std::vector<std::uint8_t> normals;
+    for (int y = 0; y < size; ++y) for (int x = 0; x < size; ++x) {
+        constexpr float pi = 3.14159265358979323846F;
+        const float dx = 0.48F * std::sin(2.0F * pi * float(x) / 8.0F);
+        const float dy = 0.48F * std::sin(2.0F * pi * float(y) / 8.0F);
+        const float inv = 1.0F / std::sqrt(dx * dx + dy * dy + 1.0F);
+        const auto channel = [](float f) { return static_cast<std::uint8_t>(std::round((f * 0.5F + 0.5F) * 255.0F)); };
+        normals.insert(normals.end(), {channel(dx * inv), channel(dy * inv), channel(inv), 255});
+    }
+    result.normalMap = dve::make_voxel_image("raised tile normal", size, size, std::move(normals), dve::VoxelImageRole::Normal);
+    result.normalMapTileMeters = result.textureTileMeters;
+    result.normalMapSharpness = result.textureSharpness;
+    result.normalMapStrength = 1.0F;
     return result;
 }
 
@@ -102,9 +138,9 @@ int main(int argc, char** argv) {
                         for (int x = -16; x <= 15; ++x) o.set_voxel({x, y, z}, 1);
                 }
         }) && ok;
-    ok = write_asset(scenes / "tall_box.dvox", 3002, {unused, material("white", {0.76F, 0.74F, 0.70F, 1}, 0.85F)},
+    ok = write_asset(scenes / "tall_box.dvox", 3002, {unused, showcase_surface("Copper checker metal", true)},
                      [](dve::VoxelObject& o) { box(o, -5, 0, -5, 4, 17, 4, 1); }) && ok;
-    ok = write_asset(scenes / "short_box.dvox", 3003, {unused, material("white", {0.76F, 0.74F, 0.70F, 1}, 0.85F)},
+    ok = write_asset(scenes / "short_box.dvox", 3003, {unused, showcase_surface("Blue and white ceramic", false)},
                      [](dve::VoxelObject& o) { box(o, -5, 0, -5, 4, 8, 4, 1); }) && ok;
     // Bumpy dome: a half sphere whose radius ripples with angle, so its surface has ridges and
     // dimples that the light skims across and that trap ambient occlusion.

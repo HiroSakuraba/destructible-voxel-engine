@@ -814,6 +814,8 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"subdiv.level_up","Subdivision","Increase Subdivision Level",""},
         {"subdiv.level_down","Subdivision","Decrease Subdivision Level",""},
         {"subdiv.sharp_toggle","Subdivision","Preserve Sharp Cage Edges (60 deg)",""},
+        {"subdiv.uv_linear","Subdivision","UV Smoothing: Linear (Preserve Original)",""},
+        {"subdiv.uv_smooth","Subdivision","UV Smoothing: Smooth Interior (Keep Seams)",""},
         {"subdiv.cage_toggle","Subdivision","Show Control Cage",""},
         {"subdiv.cage_xray","Subdivision","Cage X-ray Selection",""},
         {"subdiv.cage_only","Subdivision","Preview Selected Cage Only",""},

@@ -60,6 +60,6 @@ private:
     SubdivisionSettings before_{},after_{};
     bool captured_{};
     std::optional<ModelingTopology> beforeTopology_,afterTopology_;
-    std::optional<ComponentValue> levelOverride_,sharpOverride_,geometryOverride_;
+    std::optional<ComponentValue> levelOverride_,sharpOverride_,uvSmoothingOverride_,geometryOverride_;
 };
 }

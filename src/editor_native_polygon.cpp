@@ -967,6 +967,9 @@ void NativeEditorController::refresh_subdivision_menu_state() {
     enabled("subdiv.level_down",surface && !polygonPreviewBefore_ && !mesh_authoring_dragging() &&
         object->subdivision->level>0,"Select a subdivision object above level 0.");
     enabled("subdiv.sharp_toggle",surface && !polygonPreviewBefore_ && !mesh_authoring_dragging(),"Select a subdivision object and finish the preview.");
+    for(auto id:{"subdiv.uv_linear","subdiv.uv_smooth"})
+        enabled(id,surface && !polygonPreviewBefore_ && !mesh_authoring_dragging(),
+                "Select an unlocked subdivision surface and close active previews.");
     enabled("subdiv.cage_toggle",surface,"Select a subdivision object.");
     for (auto id : {"subdiv.cage_xray","subdiv.cage_only"}) enabled(id,surface,"Select a subdivision object.");
     const bool faceReady=surface && selectionDomain_==SelectionDomain::Polygons &&
@@ -982,6 +985,10 @@ void NativeEditorController::refresh_subdivision_menu_state() {
     (void)workspace_.menus().set_checked("subdiv.cage_xray",subdivisionCageXray_);
     (void)workspace_.menus().set_checked("subdiv.cage_only",subdivisionCageOnly_);
     (void)workspace_.menus().set_checked("subdiv.sharp_toggle",object && object->subdivision && object->subdivision->preserveSharpEdges);
+    (void)workspace_.menus().set_checked("subdiv.uv_linear",object && object->subdivision &&
+        object->subdivision->uvMode==SubdivisionUvMode::Linear);
+    (void)workspace_.menus().set_checked("subdiv.uv_smooth",object && object->subdivision &&
+        object->subdivision->uvMode==SubdivisionUvMode::SmoothInterior);
     (void)workspace_.menus().set_checked("subdiv.cage_toggle",subdivisionCageVisible_);
     for (const auto& [id,destination] : subdivision_tools()) {
         const auto* target=std::as_const(workspace_.menus()).find(destination);
@@ -1130,11 +1137,14 @@ bool NativeEditorController::dispatch_subdivision_action(std::string_view action
         set_status(result.success ? strength==0?"Cleared selected edge creases":"Set selected crease strength to "+std::to_string(strength) : result.message,!result.success);
         refresh_menu_state();return result.success;
     }
-    if (action.starts_with("subdiv.level_") || action=="subdiv.sharp_toggle") {
+    if (action.starts_with("subdiv.level_") || action=="subdiv.sharp_toggle" ||
+        action=="subdiv.uv_linear" || action=="subdiv.uv_smooth") {
         auto settings=*source->subdivision;
         if (action=="subdiv.level_up") settings.level=std::min(kMaxSubdivisionLevel,settings.level+1);
         else if (action=="subdiv.level_down") settings.level=settings.level>0?settings.level-1:0;
         else if (action=="subdiv.sharp_toggle") settings.preserveSharpEdges=!settings.preserveSharpEdges;
+        else if (action=="subdiv.uv_linear") settings.uvMode=SubdivisionUvMode::Linear;
+        else if (action=="subdiv.uv_smooth") settings.uvMode=SubdivisionUvMode::SmoothInterior;
         else {
             const auto text=action.substr(std::string_view("subdiv.level_").size());
             if (text.size()!=1 || text[0]<'0' || text[0]>'4') {set_status("Unknown subdivision level",true);return false;}

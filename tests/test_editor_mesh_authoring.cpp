@@ -48,6 +48,55 @@ void uv(){
     settings.pins={{0,{.2F,.3F}},{1,{.7F,.3F}}};auto pinned=edit_polygon_uv(m,all,UvEdit::Unwrap,settings);if(!pinned)throw std::runtime_error(pinned.error);near(pinned.mesh.vertices[pinned.mesh.indices[0]].texcoord.x,.2,"UV pin U");near(pinned.mesh.vertices[pinned.mesh.indices[1]].texcoord.x,.7,"second UV pin U");settings.pins.clear();
     settings.channel=1;settings.vector={2,2};auto scaled=edit_polygon_uv(m,all,UvEdit::Scale,settings);check(bool(scaled),"UV1 scale");near(scaled.mesh.vertices[0].texcoord.x,m.vertices[0].texcoord.x,"UV0 unchanged");settings.vector={0,1};check(!edit_polygon_uv(m,all,UvEdit::Scale,settings),"zero UV scale refused");
 }
+void uv_completion_density_and_alignment() {
+    auto m=make_editor_polygon_plane(1,4);
+    const std::set<std::uint32_t> all{0,1,2,3,4,5};
+    UvEditSettings settings;settings.objectScale={2,1,1};
+    const auto original=measure_polygon_uv_density(m,all,settings);
+    check(bool(original) && original.charts.size()==1,"density measures a complete chart");
+    check(original.geometricAreaSquareMeters>0 && original.uvArea>0,"density has physical and UV area");
+    check(!measure_polygon_uv_density(m,{0,1,2},settings),"partial island density is rejected");
+    settings.targetTexelsPerMeter=float(original.texelsPerMeter*2);
+    const auto matched=edit_polygon_uv(m,all,UvEdit::MatchDensity,settings);
+    check(bool(matched),matched.error.empty()?"density match succeeds":matched.error.c_str());
+    if(matched){
+        const auto changed=measure_polygon_uv_density(matched.mesh,all,settings);
+        check(bool(changed),"matched island can be measured");
+        if(changed)near(changed.texelsPerMeter,original.texelsPerMeter*2,"doubling target density");
+        near(matched.mesh.vertices[matched.mesh.indices[0]].position.x,m.vertices[m.indices[0]].position.x,"positions stay unchanged");
+        near(matched.mesh.vertices[matched.mesh.indices[0]].texcoord1.x,m.vertices[m.indices[0]].texcoord1.x,"UV1 unchanged");
+        const auto horizontal=edit_polygon_uv(matched.mesh,all,UvEdit::AlignIslandU,settings);
+        const auto vertical=edit_polygon_uv(matched.mesh,all,UvEdit::AlignIslandV,settings);
+        check(bool(horizontal)&&bool(vertical),"island alignment on U or V");
+        if(horizontal&&vertical){
+            auto uh=measure_polygon_uv_density(horizontal.mesh,all,settings),uv=measure_polygon_uv_density(vertical.mesh,all,settings);
+            if(uh&&uv){near(uh.uvArea,original.uvArea*4,"align U preserves chart area");near(uv.uvArea,original.uvArea*4,"align V preserves chart area");}
+        }
+    }
+    settings.pins={{0,m.vertices[m.indices[0]].texcoord}};
+    check(!edit_polygon_uv(m,all,UvEdit::MatchDensity,settings),"automatic density respects saved pins");
+    settings.pins.clear();
+    const auto straight=edit_polygon_uv(m,{0,1,2},UvEdit::StraightenU,settings);
+    check(bool(straight),"selected UV corners can be straightened");
+    if(straight){
+        const auto& a=straight.mesh;
+        const float y=a.vertices[a.indices[0]].texcoord.y;
+        near(a.vertices[a.indices[1]].texcoord.y,y,"straighten horizontal 1");
+        near(a.vertices[a.indices[2]].texcoord.y,y,"straighten horizontal 2");
+        near(a.vertices[a.indices[3]].texcoord.y,m.vertices[m.indices[3]].texcoord.y,"unselected UV stays unchanged");
+    }
+    settings.channel=1;
+    // Generated primitives leave UV1 all-zero (a collapsed chart), which must be refused.
+    check(!measure_polygon_uv_density(m,all,settings),"collapsed UV1 refused");
+    auto halfUv1=m;
+    for(auto& vertex:halfUv1.vertices)vertex.texcoord1={vertex.texcoord.x*.5F,vertex.texcoord.y*.5F};
+    refresh_editor_polygon(halfUv1,false);
+    const auto uv1=measure_polygon_uv_density(halfUv1,all,settings);
+    check(bool(uv1),"UV1 measured independently");
+    if(uv1)near(uv1.texelsPerMeter,original.texelsPerMeter*.5,"UV1 density is independent of UV0");
+    settings.textureWidth=0;
+    check(!measure_polygon_uv_density(m,all,settings),"invalid texture size rejected");
+}
 void hull(){
     std::vector<Float3> points{{0,0,0},{1,0,0},{0,1,0},{0,0,1}};check(validate_collision_hull_points(points),"valid tetrahedron points");auto encoded=encode_collision_hull_points(points);auto decoded=decode_collision_hull_points(encoded);check(decoded&&decoded->size()==4,"hull codec");check(!decode_collision_hull_points(encoded+"junk"),"trailing data refused");auto mesh=convex_editor_hull(1,points);check(bool(mesh),"convex hull");near(volume(mesh.mesh),1.0/6,"hull tetrahedron volume");points[3]={1,1,0};check(!validate_collision_hull_points(points)&&!convex_editor_hull(1,points),"flat hull refused");
     auto source=make_editor_polygon_cube(1);points=*decoded;PolygonCollisionOptions options;options.hullPoints=points;Float3 center;auto desc=make_polygon_dynamic_body_desc(source,{},options,&center);check(desc&&desc->convexHullPoints.size()==4,"hull descriptor");auto stat=make_polygon_static_body_desc(source,{},points);check(stat&&stat->convexHullPoints.size()==4,"static hull descriptor");
@@ -166,7 +215,35 @@ void native(){
     EditorDocument d("Native authoring");d.add_object(cube(1));auto b=cube(2);b.transform.position={.5F,0,0};d.add_object(std::move(b));auto owner=std::make_unique<NativeEditorController>(EditorWorkspace(std::move(d)));auto& c=*owner;c.resize(1600,900);c.workspace().select_object(2);c.workspace().add_to_selection(1);
     check(c.dispatch_action("mesh.boolean_difference"),"native Boolean preview");check(c.workspace().document().objects().size()==2,"preview preserves inputs");c.key_down("enter",false,false,false);check(c.workspace().document().objects().size()==3,"Boolean new output");check(c.dispatch_action("edit.undo")&&c.workspace().document().objects().size()==2,"Boolean Undo");check(c.workspace().selection_count()==2,"Boolean undo selection");
     c.workspace().select_object(1);auto geometry=c.workspace().document().find_object(1)->polygon->contentHash;check(c.dispatch_action("mesh.hull_fit"),"native fit hull");check(find_component_by_type(std::span<const Component>(c.workspace().document().find_object(1)->components),kCollisionHullComponent),"hull saved as component");c.key_down("x",false,false,false);c.key_down("minus",false,false,false);c.key_down("1",false,false,false);c.key_down("enter",false,false,false);check(c.workspace().document().find_object(1)->polygon->contentHash==geometry,"hull edits preserve visible geometry");check(c.dispatch_action("edit.undo"),"Hull point undo");c.key_down("escape",false,false,false);
-    check(c.dispatch_action("mesh.uv_editor"),"UV workspace opens");c.key_down("a",false,false,false);c.key_down("g",false,false,false);c.key_down("1",false,false,false);check(c.mesh_authoring_dragging(),"typed UV preview");check(!c.dispatch_action("file.save"),"unapplied UVs cannot save");c.key_down("enter",false,false,false);check(c.workspace().document().find_object(1)->polygon->contentHash!=geometry,"UV edit applies");check(c.dispatch_action("edit.undo")&&c.workspace().document().find_object(1)->polygon->contentHash==geometry,"UV Undo exact");Canvas canvas;c.draw_mesh_authoring(canvas,c.layout().viewport);check(canvas.lines&&canvas.fills,"UV canvas draws geometry and checker");
+    check(c.dispatch_action("mesh.uv_editor"),"UV workspace opens");c.key_down("a",false,false,false);c.key_down("g",false,false,false);c.key_down("1",false,false,false);check(c.mesh_authoring_dragging(),"typed UV preview");check(!c.dispatch_action("file.save"),"unapplied UVs cannot save");c.key_down("enter",false,false,false);check(c.workspace().document().find_object(1)->polygon->contentHash!=geometry,"UV edit applies");check(c.dispatch_action("edit.undo")&&c.workspace().document().find_object(1)->polygon->contentHash==geometry,"UV Undo exact");
+    // UV-Completion-1: density measure, typed target, preview, cancel and one undo.
+    c.key_down("q",false,false,false);
+    c.key_down("a",false,false,false);
+    c.key_down("b",false,false,false);
+    check(c.status().text.find("texels/m")!=std::string::npos,"density measurement visible to artist");
+    c.key_down("i",false,false,false);
+    for(const char* digit:{"2","5","6"})c.key_down(digit,false,false,false);
+    c.key_down("enter",false,false,false);
+    check(c.status().text.find("256")!=std::string::npos,"numeric density target accepted");
+    c.key_down("n",false,false,false);
+    check(c.mesh_authoring_dragging(),"density matching opens a cancellable preview");
+    c.key_down("escape",false,false,false);
+    check(c.workspace().document().find_object(1)->polygon->contentHash==geometry,
+          "density cancel restores source mesh byte-equivalent content hash");
+    c.key_down("n",false,false,false);
+    check(c.mesh_authoring_dragging(),"density preview opens again");
+    c.key_down("enter",false,false,false);
+    check(c.workspace().document().find_object(1)->polygon->contentHash!=geometry,
+          "density match commits changed UV coordinates");
+    check(c.dispatch_action("edit.undo")&&
+          c.workspace().document().find_object(1)->polygon->contentHash==geometry,
+          "density edit is one undoable command");
+    c.key_down("o",false,false,false);
+    check(c.mesh_authoring_dragging(),"UV island alignment previews");
+    c.key_down("escape",false,false,false);
+    check(c.workspace().document().find_object(1)->polygon->contentHash==geometry,
+          "island alignment cancellation restores original UVs");
+    Canvas canvas;c.draw_mesh_authoring(canvas,c.layout().viewport);check(canvas.lines&&canvas.fills,"UV canvas draws geometry and checker");
 }
 }
 void bevel_options(){
@@ -192,4 +269,4 @@ void bevel_options(){
     bool refusedConcave=false;for(auto key:polygon_all_components(ell.mesh,PolygonSelectionMode::Edge)){auto r=bevel_convex_editor_edges(ell.mesh,{1,PolygonSelectionMode::Edge,{key}},round);check(!r,"concave solid bevel refused");if(r.error.find("convex")!=std::string::npos)refusedConcave=true;}
     check(refusedConcave,"concave refusal names the convex limitation");
 }
-int main(){try{uv_flags_persistence();seam_unwrap();uv_flag_controller();if(!mesh_boolean_available()){std::cout<<"Manifold authoring disabled in this build\n";return 0;}booleans();topology();bevel_options();uv();hull();native();}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}std::cout<<"Mesh authoring regression checks passed\n";}
+int main(){try{uv_flags_persistence();seam_unwrap();uv_flag_controller();uv();uv_completion_density_and_alignment();if(!mesh_boolean_available()){std::cout<<"Manifold authoring disabled in this build\n";return 0;}booleans();topology();bevel_options();hull();native();}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}std::cout<<"Mesh authoring regression checks passed\n";}

@@ -143,17 +143,22 @@ bool apply_template_property(EditorObject& object, std::string_view propertyPath
         return fail("invalid prefab template override");
     if (propertyPath == "name") {
         if (const auto* typed = std::get_if<std::string>(&value)) { object.name = *typed; return true; }
-    } else if (propertyPath == "subdivision.level" || propertyPath == "subdivision.sharp_edges") {
+    } else if (propertyPath == "subdivision.level" || propertyPath == "subdivision.sharp_edges" ||
+               propertyPath == "subdivision.uv_smooth") {
         if (!object.subdivision || !object.polygon) return fail("subdivision override needs a control cage");
         auto settings=*object.subdivision;
         if (propertyPath=="subdivision.level") {
             const auto* level=std::get_if<std::int64_t>(&value);
             if (!level || *level<0 || *level>kMaxSubdivisionLevel) return fail("subdivision level must be 0..4");
             settings.level=static_cast<std::uint32_t>(*level);
-        } else {
+        } else if(propertyPath=="subdivision.sharp_edges") {
             const auto* sharp=std::get_if<bool>(&value);
             if (!sharp) return fail("subdivision sharp edge override needs a boolean");
             settings.preserveSharpEdges=*sharp;
+        } else {
+            const auto* smooth=std::get_if<bool>(&value);
+            if (!smooth) return fail("subdivision UV smoothing override needs a boolean");
+            settings.uvMode=*smooth?SubdivisionUvMode::SmoothInterior:SubdivisionUvMode::Linear;
         }
         auto evaluated=evaluate_subdivision(*object.polygon,settings);
         if (!evaluated.mesh) return fail(evaluated.error);
@@ -355,6 +360,8 @@ static std::uint64_t subdivision_prefab_hash(const EditorPrefabAsset& prefab,boo
         // Preserve legacy hashes for objects without subdivision settings.
         if (object.subdivision) {hash=hash_value(hash,std::uint32_t{0x53554244});
             hash=hash_value(hash,object.subdivision->level);hash=hash_value(hash,object.subdivision->preserveSharpEdges);
+            if(object.subdivision->uvMode!=SubdivisionUvMode::Linear)
+                hash=hash_value(hash,static_cast<std::uint32_t>(object.subdivision->uvMode));
             if (topologyMetadata) {
                 auto settings=*object.subdivision;
                 if (object.polygon) freeze_subdivision_topology(*object.polygon,settings);
@@ -703,6 +710,8 @@ static EditorPrefabInstanceUpdatePreview apply_editor_prefab_instance_update_in_
                     previousSubdivision->level : source.subdivision->level;
                 target->subdivision->preserveSharpEdges=object_has_override(*target,"subdivision.sharp_edges") && previousSubdivision ?
                     previousSubdivision->preserveSharpEdges : source.subdivision->preserveSharpEdges;
+                target->subdivision->uvMode=object_has_override(*target,"subdivision.uv_smooth") && previousSubdivision ?
+                    previousSubdivision->uvMode : source.subdivision->uvMode;
             }
             target->subdivisionCache.reset();
             target->tags = source.tags;

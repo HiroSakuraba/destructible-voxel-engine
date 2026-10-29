@@ -303,6 +303,7 @@ struct MarqueeState {
     std::optional<EditorObjectId> clickObject;
     std::optional<EditorPickResult> clickVoxel;  // Voxel domain: the voxel under the press
     SelectionOperation operation{SelectionOperation::Replace};
+    bool shiftHeldOnPress{};  // distinguish Shift-click toggle from explicit Add operation
     int startX{};
     int startY{};
     int currentX{};

@@ -248,6 +248,8 @@ bool destroy_live_environment_renderer(rhi::IDevice& device,
     r.mainMaterials.reset();
     r.materialResidency.reset();
     if (r.frameGroup) destroy(device.destroy_bind_group(r.frameGroup, &local));
+    if (r.giFallbackView) destroy(device.destroy_texture_view(r.giFallbackView, &local));
+    if (r.giFallback) destroy(device.destroy_texture(r.giFallback, &local));
     if (r.aoFallbackView) destroy(device.destroy_texture_view(r.aoFallbackView, &local));
     if (r.aoFallback) destroy(device.destroy_texture(r.aoFallback, &local));
     if (r.aoSampler) destroy(device.destroy_sampler(r.aoSampler, &local));
@@ -328,7 +330,8 @@ bool create_live_environment_renderer(rhi::IDevice& device,
     frameLayout.debugName = "Live environment frame layout";
     frameLayout.bindings = {{0U, rhi::BindingType::UniformBuffer,
                              rhi::ShaderStage::Vertex | rhi::ShaderStage::Fragment},
-                            {1U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment}};
+                            {1U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment},
+                            {2U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment}};
     r.frameLayout = device.create_bind_group_layout(frameLayout, &local);
     if (!r.frameLayout) return fail(local);
     rhi::BindGroupLayoutDesc objectLayout;
@@ -364,12 +367,23 @@ bool create_live_environment_renderer(rhi::IDevice& device,
         r.aoFallbackView = device.create_texture_view({r.aoFallback, 0U, 1U, 0U, 1U,
                                                        "Live ambient occlusion fallback view"}, &local);
         if (!r.aoFallbackView) return fail(local);
+        rhi::TextureDesc none = white;
+        none.debugName = "Live indirect light fallback (transparent)";
+        r.giFallback = device.create_texture(none, &local);
+        if (!r.giFallback) return fail(local);
+        const std::array<std::uint8_t, 4> clear{0U, 0U, 0U, 0U};
+        if (!device.write_texture(r.giFallback, 0U, 0U, std::as_bytes(std::span(clear)), 4U, &local))
+            return fail(local);
+        r.giFallbackView = device.create_texture_view({r.giFallback, 0U, 1U, 0U, 1U,
+                                                       "Live indirect light fallback view"}, &local);
+        if (!r.giFallbackView) return fail(local);
     }
     rhi::BindGroupDesc frameGroup;
     frameGroup.layout = r.frameLayout;
     frameGroup.debugName = "Live environment frame group";
     frameGroup.entries = {{0U, r.frameConstants, {}, 0U, maximumFrameConstantBytes, {}},
-                          {1U, {}, r.aoFallbackView, 0U, 0U, r.aoSampler}};
+                          {1U, {}, r.aoFallbackView, 0U, 0U, r.aoSampler},
+                          {2U, {}, r.giFallbackView, 0U, 0U, r.aoSampler}};
     r.frameGroup = device.create_bind_group(frameGroup, &local);
     if (!r.frameGroup) return fail(local);
 
@@ -866,12 +880,15 @@ bool record_live_environment_frame(rhi::IDevice& device,
     };
     if (!atlas_state(rhi::ResourceState::DepthWrite, rhi::ResourceState::ShaderRead)) return fail();
     rhi::BindGroupHandle mainFrameGroup = renderer.frameGroup;
-    if (frame.ambientOcclusion) {
+    if (frame.ambientOcclusion || frame.indirectLight) {
         rhi::BindGroupDesc aoGroup;
         aoGroup.layout = renderer.frameLayout;
         aoGroup.debugName = "Live environment frame group (ambient occlusion)";
         aoGroup.entries = {{0U, renderer.frameConstants, {}, 0U, renderer.frameConstantCapacity, {}},
-                           {1U, {}, frame.ambientOcclusion, 0U, 0U, renderer.aoSampler}};
+                           {1U, {}, frame.ambientOcclusion ? frame.ambientOcclusion : renderer.aoFallbackView,
+                            0U, 0U, renderer.aoSampler},
+                           {2U, {}, frame.indirectLight ? frame.indirectLight : renderer.giFallbackView,
+                            0U, 0U, renderer.aoSampler}};
         mainFrameGroup = device.create_bind_group(aoGroup, error);
         if (!mainFrameGroup) return fail();
         transientGroups.push_back(mainFrameGroup);

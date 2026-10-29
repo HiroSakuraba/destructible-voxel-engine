@@ -2,8 +2,8 @@
 #define DVE_PLAYER_SCREEN_GEOMETRY_HLSLI
 // Depth-buffer helpers shared by the player's ambient occlusion passes: world position of a
 // pixel and the surface normal rebuilt from neighbouring depths. Declares the AO bindings
-// (set 0: 0 depth, 1 constants, 2 scene voxel grid) so both passes read one layout.
-#include "common/live_bindings.hlsli"
+// (set 0: 0 depth, 1 constants, 2 scene voxel grid cells, 3 grid palette) so both passes read one layout.
+#include "live_bindings.hlsli"
 
 DVE_LIVE_IMAGE(0,0) Texture2D<float> gDepth : register(t0);
 DVE_LIVE_IMAGE(0,0) SamplerState gDepthSampler : register(s0);
@@ -15,6 +15,10 @@ DVE_LIVE_BIND(1,0) cbuffer PlayerSsaoConstants : register(b0) {
     float4 gTarget;          // xy size in pixels, zw 1 / size
     float4 gGridOrigin;      // xyz world minimum corner, w cell size m (0: no grid)
     float4 gGridSize;        // xyz cells per axis
+    float4 gSunDirection;    // xyz unit vector toward the sun; w sun intensity (CPU units)
+    float4 gSunColor;        // rgb sun colour; w sun-visibility ray length m
+    float4 gSkyColor;        // rgb sky colour (Colours sky mode); w indirect ray length m
+    float4 gGroundColor;     // rgb ground colour; w indirect sample count (1..16)
 };
 
 float3 WorldFromUv(float2 uv, float depth) {

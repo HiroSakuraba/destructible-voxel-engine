@@ -32,6 +32,16 @@ enum class PlayerAmbientOcclusionMode : std::uint8_t {
     VoxelTraced,   // walks the whole scene's voxel grid: off-screen occluders count, voxel objects only
 };
 
+// How indirect (bounced) diffuse light is computed. Ambient is the sky/ground hemisphere term the
+// CPU player's default quality uses; the traced modes follow the CPU reference's
+// GlobalIlluminationMode of the same name and need the scene voxel grid (voxel objects only).
+// An environment with global illumination Off, or a Physical sky, always uses Ambient.
+enum class PlayerGlobalIlluminationMode : std::uint8_t {
+    Ambient,
+    VoxelOneBounce,
+    RadianceCascades,
+};
+
 struct VulkanPlayerRendererOptions {
     // Window surface to present to. NativeSurfaceKind::Unavailable renders offscreen only (tests,
     // headless --hash runs); readback() is then always current.
@@ -54,6 +64,7 @@ struct VulkanPlayerRendererOptions {
     // Off). Costs a depth pre-pass and one full-screen pass. false disables it regardless.
     bool ambientOcclusion{true};
     PlayerAmbientOcclusionMode ambientOcclusionMode{PlayerAmbientOcclusionMode::ScreenSpace};
+    PlayerGlobalIlluminationMode globalIllumination{PlayerGlobalIlluminationMode::Ambient};
     // VoxelTraced: grid cell size in metres (0 = the smallest voxel in the scene) and the largest
     // grid per axis; scenes beyond that keep a window around the camera.
     float tracedAoCellMeters{0.0F};

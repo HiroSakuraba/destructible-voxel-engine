@@ -202,6 +202,10 @@ window / rendering
                             DVE_VULKAN_VALIDATION=1 enables the Khronos validation layer
   --ao screen|voxel|off     vulkan: ambient occlusion method (default screen: depth-buffer
                             marching; voxel: rays through the scene voxel grid; off: none)
+  --gi ambient|bounce|cascades
+                            vulkan: indirect light (default ambient: sky/ground hemisphere;
+                            bounce: rays through the scene voxel grid, one bounce of sun and sky;
+                            cascades: radiance cascades)
   --no-vsync                vulkan: present without waiting for vertical blank (mailbox
                             when available, else immediate)
   --quality fast|balanced|reference   CPU lighting cost (default fast: hard shadows,
@@ -247,6 +251,7 @@ struct Options {
     bool vulkan{};
     bool vsync{true};
     std::string aoMode{"screen"};   // vulkan: screen | voxel | off
+    std::string giMode{"ambient"};  // vulkan: ambient | bounce | cascades
     bool fullscreen{};
     bool headless{};
     bool noAudio{};
@@ -345,6 +350,10 @@ std::optional<Options> parse_arguments(int argc, char** argv, int* exitCode) {
             if (!(v = value()) || (*v != "screen" && *v != "voxel" && *v != "off"))
                 return bad("--ao must be screen, voxel or off");
             options.aoMode = *v;
+        } else if (argument == "--gi") {
+            if (!(v = value()) || (*v != "ambient" && *v != "bounce" && *v != "cascades"))
+                return bad("--gi must be ambient, bounce or cascades");
+            options.giMode = *v;
         } else if (argument == "--no-vsync") {
             options.vsync = false;
         } else if (argument == "--fullscreen") {
@@ -706,6 +715,9 @@ int run(int argc, char** argv) {
 #if defined(DVE_PLAYER_HAVE_VULKAN)
     if (options.vulkan) {
         VulkanPlayerRendererOptions vulkanOptions;
+        vulkanOptions.globalIllumination = options.giMode == "bounce" ? PlayerGlobalIlluminationMode::VoxelOneBounce
+                                         : options.giMode == "cascades" ? PlayerGlobalIlluminationMode::RadianceCascades
+                                                                        : PlayerGlobalIlluminationMode::Ambient;
         vulkanOptions.ambientOcclusion = options.aoMode != "off";
         vulkanOptions.ambientOcclusionMode = options.aoMode == "voxel" ? PlayerAmbientOcclusionMode::VoxelTraced
                                                                           : PlayerAmbientOcclusionMode::ScreenSpace;

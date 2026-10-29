@@ -35,6 +35,10 @@ DVE_LIVE_IMAGE(6,3) SamplerState gOpacitySampler : register(s12);
 // 1x1 white fallback when the frame has none, so the factor is then exactly 1.
 DVE_LIVE_IMAGE(1,0) Texture2D<float4> gAmbientOcclusion : register(t41);
 DVE_LIVE_IMAGE(1,0) SamplerState gAmbientOcclusionSampler : register(s13);
+// Traced indirect diffuse light (frame set binding 2): .rgb radiance, .a 1 = use instead of the
+// environment's diffuse integral. The 1x1 fallback has .a = 0.
+DVE_LIVE_IMAGE(2,0) Texture2D<float4> gIndirectLight : register(t42);
+DVE_LIVE_IMAGE(2,0) SamplerState gIndirectLightSampler : register(s14);
 DVE_LIVE_BIND(0,0) cbuffer LiveEnvironmentFrameConstants : register(b8) {
     float4x4 gViewProjection;float4 gEnvironmentParameters;float4 gCameraWorldPosition;
     // Direct sunlight and cascaded shadows (GpuLiveSunConstants). All zero = IBL only, the
@@ -160,10 +164,14 @@ float4 main(float4 position : SV_Position, float3 worldPosition : TEXCOORD0,
     gAmbientOcclusion.GetDimensions(aoWidth, aoHeight);
     const float ambientOcclusion = saturate(gAmbientOcclusion.SampleLevel(
         gAmbientOcclusionSampler, position.xy / float2(max(aoWidth, 1u), max(aoHeight, 1u)), 0.0F).r);
-    float3 ibl = EvaluateImageBasedLightingSeparateSamplers(
+    uint giWidth, giHeight;
+    gIndirectLight.GetDimensions(giWidth, giHeight);
+    const float4 indirect = gIndirectLight.SampleLevel(
+        gIndirectLightSampler, position.xy / float2(max(giWidth, 1u), max(giHeight, 1u)), 0.0F);
+    float3 ibl = EvaluateImageBasedLightingWithIndirect(
         gDiffuseIrradiance, gSpecularPrefilter, gEnvironmentBrdfLut, gEnvironmentSampler,gSpecularSampler,gBrdfSampler,
         shadingNormal, V, baseColor, metallic, roughness, material.specular,
-        ambientOcclusion, gEnvironmentParameters.w, gEnvironmentParameters.x);
+        ambientOcclusion, gEnvironmentParameters.w, gEnvironmentParameters.x, indirect);
     if(material.clearCoat>0){
         float fresnel=.04F+.96F*pow(1-saturate(dot(shadingNormal,V)),5);
         float3 coat=EvaluateImageBasedLightingSeparateSamplers(gDiffuseIrradiance,gSpecularPrefilter,

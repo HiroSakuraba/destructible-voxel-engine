@@ -191,6 +191,8 @@ public:
         if (presentLayout_) (void)device_->destroy_bind_group_layout(presentLayout_, &ignored);
         if (presentSampler_) (void)device_->destroy_sampler(presentSampler_, &ignored);
         if (depthSampler_) (void)device_->destroy_sampler(depthSampler_, &ignored);
+        if (giPipeline_) (void)device_->destroy_graphics_pipeline(giPipeline_, &ignored);
+        if (gridPalette_) (void)device_->destroy_buffer(gridPalette_, &ignored);
         if (tracedAoPipeline_) (void)device_->destroy_graphics_pipeline(tracedAoPipeline_, &ignored);
         if (aoPipeline_) (void)device_->destroy_graphics_pipeline(aoPipeline_, &ignored);
         if (aoLayout_) (void)device_->destroy_bind_group_layout(aoLayout_, &ignored);
@@ -253,16 +255,21 @@ public:
                            {2U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment}};
         presentLayout_ = device_->create_bind_group_layout(layout, error);
         if (!presentLayout_) return false;
-        aoConstants_ = device_->create_buffer({256U, rhi::BufferUsage::Constant, rhi::MemoryDomain::Upload,
+        aoConstants_ = device_->create_buffer({512U, rhi::BufferUsage::Constant, rhi::MemoryDomain::Upload,
                                                "player SSAO constants", ResourceState::ShaderRead}, error);
         if (!aoConstants_) return false;
         // Scene voxel grid for traced AO; a 16-byte placeholder keeps the layout valid otherwise.
+        gridPalette_ = device_->create_buffer(
+            {256U * sizeof(render::SceneGridMaterial), rhi::BufferUsage::Storage, rhi::MemoryDomain::Upload,
+             "player scene voxel palette", ResourceState::ShaderRead}, error);
+        if (!gridPalette_) return false;
         if (!ensure_grid_buffer(16U, error)) return false;
         rhi::BindGroupLayoutDesc aoLayout;
         aoLayout.debugName = "player SSAO layout";
         aoLayout.bindings = {{0U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment},
                              {1U, rhi::BindingType::UniformBuffer, rhi::ShaderStage::Fragment},
-                             {2U, rhi::BindingType::StorageBufferReadOnly, rhi::ShaderStage::Fragment}};
+                             {2U, rhi::BindingType::StorageBufferReadOnly, rhi::ShaderStage::Fragment},
+                             {3U, rhi::BindingType::StorageBufferReadOnly, rhi::ShaderStage::Fragment}};
         aoLayout_ = device_->create_bind_group_layout(aoLayout, error);
         if (!aoLayout_) return false;
         {
@@ -282,6 +289,11 @@ public:
             desc.fragmentBytecode = copy_bytes(shader_blobs::player_traced_ao_ps());
             tracedAoPipeline_ = device_->create_graphics_pipeline(desc, error);
             if (!tracedAoPipeline_) return false;
+            desc.debugName = "player traced GI";
+            desc.fragmentBytecode = copy_bytes(shader_blobs::player_traced_gi_ps());
+            desc.colorFormat = rhi::TextureFormat::RGBA16Float;
+            giPipeline_ = device_->create_graphics_pipeline(desc, error);
+            if (!giPipeline_) return false;
         }
         const auto present_pipeline = [&](rhi::TextureFormat format, const char* name) {
             rhi::GraphicsPipelineDesc desc;
@@ -362,6 +374,13 @@ public:
         if (!aoTexture_) return false;
         aoView_ = device_->create_texture_view({aoTexture_, 0U, 1U, 0U, 1U, "player AO view"}, error);
         if (!aoView_) return false;
+        rhi::TextureDesc gi = ao;
+        gi.format = rhi::TextureFormat::RGBA16Float;
+        gi.debugName = "player indirect light";
+        giTexture_ = device_->create_texture(gi, error);
+        if (!giTexture_) return false;
+        giView_ = device_->create_texture_view({giTexture_, 0U, 1U, 0U, 1U, "player indirect light view"}, error);
+        if (!giView_) return false;
         if (!rebuild_ao_group(error)) return false;
         frame_.width = width; frame_.height = height;
         frame_.pixels.assign(static_cast<std::size_t>(width) * height * 4U, 0U);
@@ -465,14 +484,23 @@ public:
         const bool aoOn = options_.ambientOcclusion && environment.ambientOcclusionSamples > 0U &&
                           environment.ambientOcclusionMaxDistanceMeters > 0.0F &&
                           environment.globalIlluminationMode != GlobalIlluminationMode::Off && !draws_.empty();
-        const bool traced = aoOn && options_.ambientOcclusionMode == PlayerAmbientOcclusionMode::VoxelTraced &&
-                            shader_blobs::player_traced_ao_ps().size() > 0U;
-        if (traced && !update_scene_grid(view, view.camera.position, error)) return stage_failed("scene voxel grid", error);
-        if (aoOn && !record_ambient_occlusion(environment, camera, constants, plan, traced, error))
-            return stage_failed("ambient occlusion", error);
+        const bool aoTraced = aoOn && options_.ambientOcclusionMode == PlayerAmbientOcclusionMode::VoxelTraced &&
+                              shader_blobs::player_traced_ao_ps().size() > 0U;
+        // Traced indirect light (Colours sky only: the traced sky is the sky/ground blend).
+        const bool giTraced = options_.globalIllumination != PlayerGlobalIlluminationMode::Ambient &&
+                              environment.globalIlluminationMode != GlobalIlluminationMode::Off &&
+                              environment.globalIlluminationIntensity > 0.0F &&
+                              environment.skyMode == SkyMode::Colors && !draws_.empty() &&
+                              shader_blobs::player_traced_gi_ps().size() > 0U;
+        if ((aoTraced || giTraced) && !update_scene_grid(view, view.camera.position, error))
+            return stage_failed("scene voxel grid", error);
+        if ((aoOn || giTraced) &&
+            !record_screen_passes(environment, camera, constants, plan, aoOn, aoTraced, giTraced, error))
+            return stage_failed("ambient occlusion / indirect light", error);
 
         render::LiveEnvironmentFrameDesc frame;
         frame.ambientOcclusion = aoOn ? aoView_ : rhi::TextureViewHandle{};
+        frame.indirectLight = giTraced ? giView_ : rhi::TextureViewHandle{};
         frame.colorTarget = hdr_;
         frame.depthTarget = depth_;
         frame.width = width_;
@@ -513,7 +541,7 @@ public:
         gridBuffer_ = replacement;
         gridCapacity_ = capacity;
         gridUploaded_ = false;
-        return !aoLayout_ || !depthView_ || rebuild_ao_group(error);
+        return !aoLayout_ || !depthView_ || !gridPalette_ || rebuild_ao_group(error);
     }
 
     bool rebuild_ao_group(std::string* error) {
@@ -522,8 +550,9 @@ public:
         rhi::BindGroupDesc group;
         group.layout = aoLayout_;
         group.debugName = "player AO group";
-        group.entries = {{0U, {}, depthView_, 0U, 0U, depthSampler_}, {1U, aoConstants_, {}, 0U, 256U, {}},
-                         {2U, gridBuffer_, {}, 0U, gridCapacity_, {}}};
+        group.entries = {{0U, {}, depthView_, 0U, 0U, depthSampler_}, {1U, aoConstants_, {}, 0U, 512U, {}},
+                         {2U, gridBuffer_, {}, 0U, gridCapacity_, {}},
+                         {3U, gridPalette_, {}, 0U, 256U * sizeof(render::SceneGridMaterial), {}}};
         aoGroup_ = device_->create_bind_group(group, error);
         return static_cast<bool>(aoGroup_);
     }
@@ -554,13 +583,20 @@ public:
         std::vector<std::uint8_t> padded(cells.begin(), cells.end());
         padded.resize((padded.size() + 3U) & ~std::size_t{3U});
         if (!device_->write_buffer(gridBuffer_, 0U, std::as_bytes(std::span(padded)), error)) return false;
+        const auto palette = grid_.palette();
+        if (!palette.empty() &&
+            !device_->write_buffer(gridPalette_, 0U, std::as_bytes(palette.first(std::min<std::size_t>(palette.size(), 255U))), error))
+            return false;
         gridUploaded_ = true;
         return true;
     }
 
-    bool record_ambient_occlusion(const RenderEnvironment& environment, const CameraFrame& camera,
-                                  std::span<const std::byte> frameConstants,
-                                  const render::CascadedShadowPlan& plan, bool traced, std::string* error) {
+    // Depth pre-pass, then the screen-sized passes that read it: ambient occlusion (aoTexture_)
+    // and traced indirect light (giTexture_).
+    bool record_screen_passes(const RenderEnvironment& environment, const CameraFrame& camera,
+                              std::span<const std::byte> frameConstants,
+                              const render::CascadedShadowPlan& plan, bool aoOn, bool aoTraced, bool giTraced,
+                              std::string* error) {
         render::LiveEnvironmentFrameDesc prepass;
         prepass.depthTarget = depth_;
         prepass.width = width_;
@@ -583,6 +619,10 @@ public:
             std::array<float, 4> target;
             std::array<float, 4> gridOrigin;   // xyz minimum corner, w cell size (0: none)
             std::array<float, 4> gridSize;     // xyz cells per axis
+            std::array<float, 4> sunDirection; // xyz toward the sun, w intensity
+            std::array<float, 4> sunColor;     // rgb, w sun-visibility ray length m
+            std::array<float, 4> skyColor;     // rgb, w indirect ray length m
+            std::array<float, 4> groundColor;  // rgb, w indirect sample count
         } constants{};
         constants.viewProjection = camera.viewProjection;
         constants.inverseViewProjection = invert(camera.viewProjection);
@@ -595,7 +635,18 @@ public:
                             seedBits};
         constants.target = {static_cast<float>(width_), static_cast<float>(height_), 1.0F / static_cast<float>(width_),
                             1.0F / static_cast<float>(height_)};
-        if (traced && !grid_.empty()) {
+        {
+            const Float3 sun = unit(environment.sunDirection, {0.0F, 1.0F, 0.0F});
+            constants.sunDirection = {sun.x, sun.y, sun.z, environment.sunIntensity};
+            constants.sunColor = {environment.sunColor.x, environment.sunColor.y, environment.sunColor.z,
+                                  std::max(environment.shadowMaxDistanceMeters, 0.1F)};
+            constants.skyColor = {environment.skyColor.x, environment.skyColor.y, environment.skyColor.z,
+                                  environment.globalIlluminationMaxDistanceMeters};
+            constants.groundColor = {environment.groundColor.x, environment.groundColor.y, environment.groundColor.z,
+                                     static_cast<float>(std::clamp(environment.globalIlluminationSamples, 1U, 16U))};
+            if (!aoOn) constants.params[2] = std::max(environment.shadowBiasMeters, 1.0e-3F);
+        }
+        if ((aoTraced || giTraced) && !grid_.empty()) {
             const Float3 origin = grid_.origin();
             const auto dims = grid_.dimensions();
             constants.gridOrigin = {origin.x, origin.y, origin.z, grid_.cell_meters()};
@@ -604,22 +655,29 @@ public:
         if (!device_->write_buffer(aoConstants_, 0U, std::as_bytes(std::span(&constants, 1U)), error)) return false;
         const rhi::CommandListHandle commands = device_->begin_commands(rhi::QueueKind::Graphics, "player ambient occlusion", error);
         if (!commands) return false;
-        if (!device_->transition_texture(commands, depth_, ResourceState::DepthWrite, ResourceState::ShaderRead, error) ||
-            !device_->transition_texture(commands, aoTexture_, ResourceState::ShaderRead, ResourceState::RenderTarget, error))
+        if (!device_->transition_texture(commands, depth_, ResourceState::DepthWrite, ResourceState::ShaderRead, error))
             return false;
-        rhi::RenderPassDesc pass;
-        pass.debugName = "player SSAO";
-        pass.colors.push_back({aoTexture_, true, 1.0F, 1.0F, 1.0F, 1.0F});
-        if (!device_->begin_render_pass(commands, pass, error) ||
-            !device_->bind_graphics_pipeline(commands, traced ? tracedAoPipeline_ : aoPipeline_, error) ||
-            !device_->bind_graphics_bind_group(commands, 0U, aoGroup_, error) ||
-            !device_->set_viewport(commands, {0.0F, 0.0F, static_cast<float>(width_), static_cast<float>(height_), 0.0F, 1.0F}, error) ||
-            !device_->set_scissor(commands, {0, 0, width_, height_}, error) ||
-            !device_->bind_index_buffer(commands, triangleIndices_, 0U, rhi::IndexFormat::Uint32, error) ||
-            !device_->draw_indexed(commands, 3U, 1U, 0U, 0, 0U, error) ||
-            !device_->end_render_pass(commands, error)) return false;
-        if (!device_->transition_texture(commands, depth_, ResourceState::ShaderRead, ResourceState::DepthWrite, error) ||
-            !device_->transition_texture(commands, aoTexture_, ResourceState::RenderTarget, ResourceState::ShaderRead, error))
+        const auto fullscreen_pass = [&](rhi::TextureHandle target, rhi::GraphicsPipelineHandle pipeline,
+                                         const char* name, float clear) {
+            if (!device_->transition_texture(commands, target, ResourceState::ShaderRead, ResourceState::RenderTarget, error))
+                return false;
+            rhi::RenderPassDesc pass;
+            pass.debugName = name;
+            pass.colors.push_back({target, true, clear, clear, clear, clear});
+            if (!device_->begin_render_pass(commands, pass, error) ||
+                !device_->bind_graphics_pipeline(commands, pipeline, error) ||
+                !device_->bind_graphics_bind_group(commands, 0U, aoGroup_, error) ||
+                !device_->set_viewport(commands, {0.0F, 0.0F, static_cast<float>(width_), static_cast<float>(height_), 0.0F, 1.0F}, error) ||
+                !device_->set_scissor(commands, {0, 0, width_, height_}, error) ||
+                !device_->bind_index_buffer(commands, triangleIndices_, 0U, rhi::IndexFormat::Uint32, error) ||
+                !device_->draw_indexed(commands, 3U, 1U, 0U, 0, 0U, error) ||
+                !device_->end_render_pass(commands, error)) return false;
+            return device_->transition_texture(commands, target, ResourceState::RenderTarget, ResourceState::ShaderRead, error);
+        };
+        if (aoOn && !fullscreen_pass(aoTexture_, aoTraced ? tracedAoPipeline_ : aoPipeline_, "player ambient occlusion", 1.0F))
+            return false;
+        if (giTraced && !fullscreen_pass(giTexture_, giPipeline_, "player traced indirect light", 0.0F)) return false;
+        if (!device_->transition_texture(commands, depth_, ResourceState::ShaderRead, ResourceState::DepthWrite, error))
             return false;
         return static_cast<bool>(device_->submit(commands, error));
     }
@@ -857,6 +915,9 @@ private:
         if (aoView_) (void)device_->destroy_texture_view(aoView_, &ignored);
         if (aoTexture_) (void)device_->destroy_texture(aoTexture_, &ignored);
         aoGroup_ = {}; aoView_ = {}; aoTexture_ = {};
+        if (giView_) (void)device_->destroy_texture_view(giView_, &ignored);
+        if (giTexture_) (void)device_->destroy_texture(giTexture_, &ignored);
+        giView_ = {}; giTexture_ = {};
         if (presentGroup_) (void)device_->destroy_bind_group(presentGroup_, &ignored);
         if (hdrView_) (void)device_->destroy_texture_view(hdrView_, &ignored);
         if (hdr_) (void)device_->destroy_texture(hdr_, &ignored);
@@ -888,6 +949,10 @@ private:
     rhi::BindGroupLayoutHandle aoLayout_{};
     rhi::GraphicsPipelineHandle aoPipeline_{};
     rhi::GraphicsPipelineHandle tracedAoPipeline_{};
+    rhi::GraphicsPipelineHandle giPipeline_{};
+    rhi::BufferHandle gridPalette_{};
+    rhi::TextureHandle giTexture_{};
+    rhi::TextureViewHandle giView_{};
     rhi::BufferHandle gridBuffer_{};
     std::size_t gridCapacity_{};
     bool gridUploaded_{};

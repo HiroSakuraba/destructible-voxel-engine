@@ -9,11 +9,30 @@
       "stage": "compute",
       "entry": "main",
       "profile": "cs_6_0",
-      "threads": [64, 1, 1],
+      "threads": [
+        64,
+        1,
+        1
+      ],
       "bindings": [
-        {"name": "AtmosphereConstants", "kind": "constant_buffer", "access": "read", "register": "b0"},
-        {"name": "gTransmittanceTable", "kind": "storage_buffer", "access": "read", "register": "t0"},
-        {"name": "gMultipleScattering", "kind": "storage_buffer", "access": "read_write", "register": "u0"}
+        {
+          "name": "AtmosphereConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b0"
+        },
+        {
+          "name": "gTransmittanceTable",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "gMultipleScattering",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u0"
+        }
       ]
     },
     {
@@ -22,12 +41,36 @@
       "stage": "compute",
       "entry": "main",
       "profile": "cs_6_0",
-      "threads": [64, 1, 1],
+      "threads": [
+        64,
+        1,
+        1
+      ],
       "bindings": [
-        {"name": "AtmosphereConstants", "kind": "constant_buffer", "access": "read", "register": "b0"},
-        {"name": "gTransmittanceTable", "kind": "storage_buffer", "access": "read", "register": "t0"},
-        {"name": "gMultipleScatteringTable", "kind": "storage_buffer", "access": "read", "register": "t1"},
-        {"name": "gSkyView", "kind": "storage_buffer", "access": "read_write", "register": "u0"}
+        {
+          "name": "AtmosphereConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b0"
+        },
+        {
+          "name": "gTransmittanceTable",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "gMultipleScatteringTable",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t1"
+        },
+        {
+          "name": "gSkyView",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u0"
+        }
       ]
     },
     {
@@ -36,10 +79,24 @@
       "stage": "compute",
       "entry": "main",
       "profile": "cs_6_0",
-      "threads": [64, 1, 1],
+      "threads": [
+        64,
+        1,
+        1
+      ],
       "bindings": [
-        {"name": "AtmosphereConstants", "kind": "constant_buffer", "access": "read", "register": "b0"},
-        {"name": "gTransmittance", "kind": "storage_buffer", "access": "read_write", "register": "u0"}
+        {
+          "name": "AtmosphereConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b0"
+        },
+        {
+          "name": "gTransmittance",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u0"
+        }
       ]
     },
     {
@@ -261,12 +318,6 @@
           "register": "t22"
         },
         {
-          "name": "gCascadedShadowDynamicDepth",
-          "kind": "sampled_texture",
-          "access": "read",
-          "register": "t25"
-        },
-        {
           "name": "gCascadedShadowCoordinates",
           "kind": "storage_buffer",
           "access": "read",
@@ -277,6 +328,12 @@
           "kind": "storage_buffer",
           "access": "read",
           "register": "t24"
+        },
+        {
+          "name": "gCascadedShadowDynamicDepth",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t25"
         },
         {
           "name": "gCascadedShadowVisibility",
@@ -516,40 +573,16 @@
           "register": "b0, space0"
         },
         {
-          "name": "gDashrAtlas0",
-          "kind": "sampled_texture",
+          "name": "gDashrShadowSampler",
+          "kind": "sampler",
           "access": "read",
-          "register": "t0, space1"
+          "register": "s2, space4"
         },
         {
-          "name": "gDashrAtlas1",
-          "kind": "sampled_texture",
+          "name": "gDashrEnvironmentSampler",
+          "kind": "sampler",
           "access": "read",
-          "register": "t1, space1"
-        },
-        {
-          "name": "gDashrAtlas2",
-          "kind": "sampled_texture",
-          "access": "read",
-          "register": "t2, space1"
-        },
-        {
-          "name": "gDashrAtlas3",
-          "kind": "sampled_texture",
-          "access": "read",
-          "register": "t3, space1"
-        },
-        {
-          "name": "gDashrSeamMap",
-          "kind": "sampled_texture",
-          "access": "read",
-          "register": "t4, space1"
-        },
-        {
-          "name": "gDashrHeight",
-          "kind": "sampled_texture",
-          "access": "read",
-          "register": "t5, space1"
+          "register": "s3, space3"
         },
         {
           "name": "gDashrLinearClamp",
@@ -564,58 +597,16 @@
           "register": "s7, space1"
         },
         {
-          "name": "gDashrHeightSampler",
-          "kind": "sampler",
-          "access": "read",
-          "register": "s8, space1"
-        },
-        {
-          "name": "gDashrMaterialRecords",
-          "kind": "storage_buffer",
-          "access": "read",
-          "register": "t0, space2"
-        },
-        {
-          "name": "gDashrMaterialMappings",
-          "kind": "storage_buffer",
-          "access": "read",
-          "register": "t1, space2"
-        },
-        {
-          "name": "gDashrBaseColorTexture",
-          "kind": "sampled_texture",
-          "access": "read",
-          "register": "t2, space2"
-        },
-        {
-          "name": "gDashrMetallicRoughnessTexture",
-          "kind": "sampled_texture",
-          "access": "read",
-          "register": "t3, space2"
-        },
-        {
-          "name": "gDashrNormalTexture",
-          "kind": "sampled_texture",
-          "access": "read",
-          "register": "t4, space2"
-        },
-        {
-          "name": "gDashrEmissiveTexture",
-          "kind": "sampled_texture",
-          "access": "read",
-          "register": "t5, space2"
-        },
-        {
-          "name": "gDashrOpacityTexture",
-          "kind": "sampled_texture",
-          "access": "read",
-          "register": "t6, space2"
-        },
-        {
           "name": "gDashrBaseColorSampler",
           "kind": "sampler",
           "access": "read",
           "register": "s7, space2"
+        },
+        {
+          "name": "gDashrHeightSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s8, space1"
         },
         {
           "name": "gDashrMetallicRoughnessSampler",
@@ -642,28 +633,22 @@
           "register": "s11, space2"
         },
         {
+          "name": "gDashrAtlas0",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t0, space1"
+        },
+        {
+          "name": "gDashrMaterialRecords",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t0, space2"
+        },
+        {
           "name": "gDashrDiffuseIrradiance",
           "kind": "sampled_texture",
           "access": "read",
           "register": "t0, space3"
-        },
-        {
-          "name": "gDashrSpecularPrefilter",
-          "kind": "sampled_texture",
-          "access": "read",
-          "register": "t1, space3"
-        },
-        {
-          "name": "gDashrEnvironmentBrdfLut",
-          "kind": "sampled_texture",
-          "access": "read",
-          "register": "t2, space3"
-        },
-        {
-          "name": "gDashrEnvironmentSampler",
-          "kind": "sampler",
-          "access": "read",
-          "register": "s3, space3"
         },
         {
           "name": "gDashrStaticShadowDepth",
@@ -672,16 +657,88 @@
           "register": "t0, space4"
         },
         {
+          "name": "gDashrAtlas1",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t1, space1"
+        },
+        {
+          "name": "gDashrMaterialMappings",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t1, space2"
+        },
+        {
+          "name": "gDashrSpecularPrefilter",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t1, space3"
+        },
+        {
           "name": "gDashrDynamicShadowDepth",
           "kind": "sampled_texture",
           "access": "read",
           "register": "t1, space4"
         },
         {
-          "name": "gDashrShadowSampler",
-          "kind": "sampler",
+          "name": "gDashrAtlas2",
+          "kind": "sampled_texture",
           "access": "read",
-          "register": "s2, space4"
+          "register": "t2, space1"
+        },
+        {
+          "name": "gDashrBaseColorTexture",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t2, space2"
+        },
+        {
+          "name": "gDashrEnvironmentBrdfLut",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t2, space3"
+        },
+        {
+          "name": "gDashrAtlas3",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t3, space1"
+        },
+        {
+          "name": "gDashrMetallicRoughnessTexture",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t3, space2"
+        },
+        {
+          "name": "gDashrSeamMap",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t4, space1"
+        },
+        {
+          "name": "gDashrNormalTexture",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t4, space2"
+        },
+        {
+          "name": "gDashrHeight",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t5, space1"
+        },
+        {
+          "name": "gDashrEmissiveTexture",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t5, space2"
+        },
+        {
+          "name": "gDashrOpacityTexture",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t6, space2"
         }
       ]
     },
@@ -699,6 +756,24 @@
           "register": "b0, space0"
         },
         {
+          "name": "gDashrLinearClamp",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s6, space1"
+        },
+        {
+          "name": "gDashrPointClamp",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s7, space1"
+        },
+        {
+          "name": "gDashrHeightSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s8, space1"
+        },
+        {
           "name": "gDashrAtlas0",
           "kind": "sampled_texture",
           "access": "read",
@@ -733,24 +808,6 @@
           "kind": "sampled_texture",
           "access": "read",
           "register": "t5, space1"
-        },
-        {
-          "name": "gDashrLinearClamp",
-          "kind": "sampler",
-          "access": "read",
-          "register": "s6, space1"
-        },
-        {
-          "name": "gDashrPointClamp",
-          "kind": "sampler",
-          "access": "read",
-          "register": "s7, space1"
-        },
-        {
-          "name": "gDashrHeightSampler",
-          "kind": "sampler",
-          "access": "read",
-          "register": "s8, space1"
         }
       ]
     },
@@ -768,6 +825,24 @@
           "register": "b0, space0"
         },
         {
+          "name": "gDashrLinearClamp",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s6, space1"
+        },
+        {
+          "name": "gDashrPointClamp",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s7, space1"
+        },
+        {
+          "name": "gDashrHeightSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s8, space1"
+        },
+        {
           "name": "gDashrAtlas0",
           "kind": "sampled_texture",
           "access": "read",
@@ -802,24 +877,6 @@
           "kind": "sampled_texture",
           "access": "read",
           "register": "t5, space1"
-        },
-        {
-          "name": "gDashrLinearClamp",
-          "kind": "sampler",
-          "access": "read",
-          "register": "s6, space1"
-        },
-        {
-          "name": "gDashrPointClamp",
-          "kind": "sampler",
-          "access": "read",
-          "register": "s7, space1"
-        },
-        {
-          "name": "gDashrHeightSampler",
-          "kind": "sampler",
-          "access": "read",
-          "register": "s8, space1"
         }
       ]
     },
@@ -2084,6 +2141,66 @@
           "register": "s2"
         },
         {
+          "name": "gSpecularSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s5"
+        },
+        {
+          "name": "gBrdfSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s6"
+        },
+        {
+          "name": "gDynamicShadowSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s7"
+        },
+        {
+          "name": "gBaseColorSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s8"
+        },
+        {
+          "name": "gMetallicRoughnessSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s9"
+        },
+        {
+          "name": "gNormalSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s10"
+        },
+        {
+          "name": "gEmissiveSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s11"
+        },
+        {
+          "name": "gOpacitySampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s12"
+        },
+        {
+          "name": "gAmbientOcclusionSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s13"
+        },
+        {
+          "name": "gIndirectLightSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s14"
+        },
+        {
           "name": "gDiffuseIrradiance",
           "kind": "sampled_texture",
           "access": "read",
@@ -2162,58 +2279,22 @@
           "register": "t33"
         },
         {
-          "name": "gSpecularSampler",
-          "kind": "sampler",
-          "access": "read",
-          "register": "s5"
-        },
-        {
-          "name": "gBrdfSampler",
-          "kind": "sampler",
-          "access": "read",
-          "register": "s6"
-        },
-        {
-          "name": "gDynamicShadowSampler",
-          "kind": "sampler",
-          "access": "read",
-          "register": "s7"
-        },
-        {
-          "name": "gBaseColorSampler",
-          "kind": "sampler",
-          "access": "read",
-          "register": "s8"
-        },
-        {
-          "name": "gMetallicRoughnessSampler",
-          "kind": "sampler",
-          "access": "read",
-          "register": "s9"
-        },
-        {
-          "name": "gNormalSampler",
-          "kind": "sampler",
-          "access": "read",
-          "register": "s10"
-        },
-        {
-          "name": "gEmissiveSampler",
-          "kind": "sampler",
-          "access": "read",
-          "register": "s11"
-        },
-        {
-          "name": "gOpacitySampler",
-          "kind": "sampler",
-          "access": "read",
-          "register": "s12"
-        },
-        {
           "name": "gLayerData",
           "kind": "storage_buffer",
           "access": "read",
           "register": "t37"
+        },
+        {
+          "name": "gAmbientOcclusion",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t41"
+        },
+        {
+          "name": "gIndirectLight",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t42"
         }
       ],
       "vulkan_bindings": [
@@ -2300,6 +2381,18 @@
           "kind": "storage_buffer",
           "set": 3,
           "binding": 14
+        },
+        {
+          "name": "gAmbientOcclusion",
+          "kind": "combined_image_sampler",
+          "set": 0,
+          "binding": 1
+        },
+        {
+          "name": "gIndirectLight",
+          "kind": "combined_image_sampler",
+          "set": 0,
+          "binding": 2
         }
       ]
     },
@@ -3166,12 +3259,36 @@
       "stage": "compute",
       "entry": "main",
       "profile": "cs_6_0",
-      "threads": [64, 1, 1],
+      "threads": [
+        64,
+        1,
+        1
+      ],
       "bindings": [
-        {"name": "BbvConstants", "kind": "constant_buffer", "access": "read", "register": "b0"},
-        {"name": "gBbvBricks", "kind": "byte_address_buffer", "access": "read", "register": "t0"},
-        {"name": "gBbvRays", "kind": "storage_buffer", "access": "read", "register": "t1"},
-        {"name": "gBbvResults", "kind": "storage_buffer", "access": "read_write", "register": "u0"}
+        {
+          "name": "BbvConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b0"
+        },
+        {
+          "name": "gBbvBricks",
+          "kind": "byte_address_buffer",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "gBbvRays",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t1"
+        },
+        {
+          "name": "gBbvResults",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u0"
+        }
       ]
     },
     {
@@ -3187,6 +3304,12 @@
       ],
       "bindings": [
         {
+          "name": "RcProbeConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b2"
+        },
+        {
           "name": "gPrimarySamples",
           "kind": "storage_buffer",
           "access": "read",
@@ -3197,12 +3320,6 @@
           "kind": "storage_buffer",
           "access": "read_write",
           "register": "u1"
-        },
-        {
-          "name": "RcProbeConstants",
-          "kind": "constant_buffer",
-          "access": "read",
-          "register": "b2"
         }
       ]
     },
@@ -3456,22 +3573,174 @@
       ],
       "bindings": [
         {
-          "name": "gBc5Normals",
-          "kind": "sampled_texture",
-          "access": "read",
-          "register": "t0"
-        },
-        {
           "name": "gBc5Sampler",
           "kind": "sampler",
           "access": "read",
           "register": "s0"
         },
         {
+          "name": "gBc5Normals",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t0"
+        },
+        {
           "name": "gBc5DecodeResults",
           "kind": "storage_buffer",
           "access": "read_write",
           "register": "u0"
+        }
+      ]
+    },
+    {
+      "name": "player_present_vs",
+      "source": "player_present_vs.hlsl",
+      "stage": "vertex",
+      "entry": "main",
+      "profile": "vs_6_0",
+      "bindings": []
+    },
+    {
+      "name": "player_present_ps",
+      "source": "player_present_ps.hlsl",
+      "stage": "pixel",
+      "entry": "main",
+      "profile": "ps_6_0",
+      "bindings": [
+        {
+          "name": "PlayerPresentConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b0"
+        },
+        {
+          "name": "gSceneSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s0"
+        },
+        {
+          "name": "gDepthSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s2"
+        },
+        {
+          "name": "gSceneColor",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "gSceneDepth",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t2"
+        }
+      ]
+    },
+    {
+      "name": "player_ssao_ps",
+      "source": "player_ssao_ps.hlsl",
+      "stage": "pixel",
+      "entry": "main",
+      "profile": "ps_6_0",
+      "bindings": [
+        {
+          "name": "PlayerSsaoConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b0"
+        },
+        {
+          "name": "gDepthSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s0"
+        },
+        {
+          "name": "gDepth",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t0"
+        }
+      ]
+    },
+    {
+      "name": "player_traced_ao_ps",
+      "source": "player_traced_ao_ps.hlsl",
+      "stage": "pixel",
+      "entry": "main",
+      "profile": "ps_6_0",
+      "bindings": [
+        {
+          "name": "PlayerSsaoConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b0"
+        },
+        {
+          "name": "gDepthSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s0"
+        },
+        {
+          "name": "gDepth",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "gGridCells",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t2"
+        },
+        {
+          "name": "gGridPalette",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t3"
+        }
+      ]
+    },
+    {
+      "name": "player_traced_gi_ps",
+      "source": "player_traced_gi_ps.hlsl",
+      "stage": "pixel",
+      "entry": "main",
+      "profile": "ps_6_0",
+      "bindings": [
+        {
+          "name": "PlayerSsaoConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b0"
+        },
+        {
+          "name": "gDepthSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s0"
+        },
+        {
+          "name": "gDepth",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "gGridCells",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t2"
+        },
+        {
+          "name": "gGridPalette",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t3"
         }
       ]
     }

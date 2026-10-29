@@ -258,6 +258,50 @@ int run() {
                     ", CPU " + std::to_string(cpuDark) + ")");
         require(tracedDiff.meanAbsoluteError < 3.5, "traced AO image differs too much from the CPU reference (mean " +
                                                         std::to_string(tracedDiff.meanAbsoluteError) + ")");
+
+        // Traced one-bounce GI against the CPU reference's VoxelOneBounce (Reference quality keeps
+        // the environment's mode), with the sun on so lit surfaces bounce light onto their
+        // neighbours, and with the sun off so only the sky is bounced and occluded.
+        VulkanPlayerRendererOptions giOptions;
+        giOptions.globalIllumination = PlayerGlobalIlluminationMode::VoxelOneBounce;
+        std::unique_ptr<IPlayerRenderer> giGpu = make_vulkan_player_renderer(giOptions, &error);
+        require(giGpu != nullptr, "GI renderer creation failed: " + error);
+        require(giGpu->resize(kWidth, kHeight, &error), error);
+        CpuPlayerRendererOptions refOptions;
+        refOptions.quality = CpuRenderQuality::Reference;
+        refOptions.threadCount = 2U;
+        std::unique_ptr<IPlayerRenderer> cpuRef = make_cpu_player_renderer(nullptr, refOptions);
+        require(cpuRef->resize(kWidth, kHeight, &error), error);
+        for (const bool sunOn : {true, false}) {
+            PlayerRenderView giView = view;
+            giView.environment.globalIlluminationMode = GlobalIlluminationMode::VoxelOneBounce;
+            giView.environment.globalIlluminationSamples = 16U;
+            giView.environment.globalIlluminationMaxDistanceMeters = 8.0F;
+            if (!sunOn) giView.environment.sunIntensity = 0.0F;
+            const bool refOk = cpuRef->render(giView, &error) && cpuRef->present(&error);
+            require(refOk, "CPU one-bounce reference failed: " + error);
+            const Rgba8Image reference = *cpuRef->readback();
+            const bool bounceOk = giGpu->render(giView, &error) && giGpu->present(&error);
+            require(bounceOk, "GPU one-bounce frame failed: " + error);
+            const Rgba8Image bounce = *giGpu->readback();
+            const bool ambientOk = gpu->render(giView, &error) && gpu->present(&error);
+            require(ambientOk, "GPU ambient frame failed: " + error);
+            const Rgba8Image ambient = *gpu->readback();
+            Rgba8Image bounceDiffImage, ambientDiffImage;
+            const Diff bounceDiff = compare(reference, bounce, bounceDiffImage);
+            const Diff ambientDiff = compare(reference, ambient, ambientDiffImage);
+            std::cout << "one-bounce GI (sun " << (sunOn ? "on" : "off") << "): traced mean |error| "
+                      << bounceDiff.meanAbsoluteError << ", ambient-only " << ambientDiff.meanAbsoluteError << "\n";
+            require(bounceDiff.meanAbsoluteError < 1.5 && bounceDiff.meanAbsoluteError < ambientDiff.meanAbsoluteError,
+                    std::string("traced one-bounce GI (sun ") + (sunOn ? "on" : "off") +
+                        ") is not closer to the CPU reference than ambient-only light");
+            if (const char* dir = std::getenv("DVE_PLAYER_GPU_DIFF_DIR")) {
+                const std::string tag = sunOn ? "sun" : "nosun";
+                save_ppm(std::filesystem::path(dir) / ("cpu_gi_" + tag + ".ppm"), reference);
+                save_ppm(std::filesystem::path(dir) / ("gpu_gi_" + tag + ".ppm"), bounce);
+                save_ppm(std::filesystem::path(dir) / ("gpu_ambient_" + tag + ".ppm"), ambient);
+            }
+        }
     }
 
     // Same view again: cached meshes, identical frame.

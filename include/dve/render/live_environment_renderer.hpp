@@ -113,6 +113,10 @@ struct LiveEnvironmentRendererResources {
     rhi::TextureHandle aoFallback;
     rhi::TextureViewHandle aoFallbackView;
     rhi::SamplerHandle aoSampler;
+    // Frame-set binding 2: traced indirect diffuse light (.rgb radiance, .a 1 = use it in place
+    // of the image-based diffuse term). The 1x1 transparent fallback leaves the IBL untouched.
+    rhi::TextureHandle giFallback;
+    rhi::TextureViewHandle giFallbackView;
     rhi::GraphicsPipelineHandle depthPrepassPipeline;
     rhi::GraphicsPipelineHandle skyboxPipeline;
     rhi::GraphicsPipelineHandle materialPipeline;
@@ -185,6 +189,9 @@ struct LiveEnvironmentFrameDesc {
     bool depthPrepassOnly{false};
     // Screen-sized RGBA8 view whose .r scales the image-based ambient light; empty = no AO.
     rhi::TextureViewHandle ambientOcclusion{};
+    // Screen-sized view of traced indirect diffuse light (see LiveEnvironmentRendererResources::
+    // giFallback); empty = image-based ambient only.
+    rhi::TextureViewHandle indirectLight{};
 };
 
 struct LiveEnvironmentFrameStats {

@@ -17,4 +17,5 @@ namespace dve::player::shader_blobs {
 [[nodiscard]] std::span<const std::byte> player_present_ps() noexcept;
 [[nodiscard]] std::span<const std::byte> player_ssao_ps() noexcept;
 [[nodiscard]] std::span<const std::byte> player_traced_ao_ps() noexcept;
+[[nodiscard]] std::span<const std::byte> player_traced_gi_ps() noexcept;
 } // namespace dve::player::shader_blobs

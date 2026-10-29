@@ -5310,6 +5310,7 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
             }
             marquee_.active = true;
             marquee_.operation = selection_operation_for_input(modifiers);
+            marquee_.shiftHeldOnPress = (modifiers & 1U) != 0U;
             marquee_.startX = marquee_.currentX = x; marquee_.startY = marquee_.currentY = y;
             return;
         }
@@ -5338,6 +5339,7 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
             marquee_.clickObject.reset();
             marquee_.clickVoxel = hoverPick_;
             marquee_.operation = operation;
+            marquee_.shiftHeldOnPress = (modifiers & 1U) != 0U;
             marquee_.startX = marquee_.currentX = x;
             marquee_.startY = marquee_.currentY = y;
             return;
@@ -5353,6 +5355,7 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
             marquee_.active = true;
             marquee_.clickObject = hoverPick_ ? std::optional<EditorObjectId>(hoverPick_->objectId) : std::nullopt;
             marquee_.operation = selection_operation_for_input(modifiers);
+            marquee_.shiftHeldOnPress = (modifiers & 1U) != 0U;
             marquee_.startX = marquee_.currentX = x;
             marquee_.startY = marquee_.currentY = y;
         } else if (activeTool_ == EditorToolId::ScatterBrush) {
@@ -5623,7 +5626,7 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
             }
             SelectionOperation operation = marquee_.operation;
             // Shift+click on something already selected takes it out again.
-            if (distanceSquared <= 25 && operation == SelectionOperation::Add && !hits.empty() &&
+            if (distanceSquared <= 25 && marquee_.shiftHeldOnPress && operation == SelectionOperation::Add && !hits.empty() &&
                 std::all_of(hits.begin(), hits.end(), [&](EditorObjectId id) { return workspace_.is_selected(id); }))
                 operation = SelectionOperation::Subtract;
             workspace_.apply_selection(hits, operation);

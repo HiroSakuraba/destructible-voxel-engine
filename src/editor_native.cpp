@@ -7067,7 +7067,8 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
         const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), id);
         if (error != std::errc{} || end != value.data() + value.size() ||
             !workspace_.document().find_object(id)) return false;
-        workspace_.select_object(id);
+        workspace_.apply_selection({id}, selectionOperation_);
+        refresh_menu_state();
         return true;
     }
     // Selection, clipboard, play-session, and authoring-panel state can change outside menu

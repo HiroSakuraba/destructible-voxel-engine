@@ -1935,13 +1935,10 @@ struct VulkanDevice::Impl {
             name_object(vk::ObjectTypeImage, texture.image, texture.desc.debugName);
             slot.images.push_back({textureIndex, texture.generation});
         }
-        // Present is the resting state of every image the application does not hold.
-        return record_immediate([&](vk::CommandBuffer commandBuffer) {
-            for (const TextureHandle image : slot.images)
-                if (!image_barrier(commandBuffer, textures[image.index], ResourceState::Undefined,
-                                   ResourceState::Present, error)) return false;
-            return true;
-        }, error);
+        // Present is the resting state of every image the application does not hold, but a
+        // presentable image may only be touched after vkAcquireNextImageKHR returns it: each
+        // image moves Undefined -> Present on its first acquire (see acquire_next_image).
+        return true;
     }
 
     bool unsupported(std::string_view feature, std::string* error) const {
@@ -2489,6 +2486,13 @@ AcquiredSwapchainImage VulkanDevice::acquire_next_image(SwapchainHandle handle, 
     if (index >= slot->images.size()) { set_error(error, "driver returned an invalid swapchain image index"); return {}; }
     slot->acquired = true;
     slot->acquiredIndex = index;
+    if (auto* image = impl_->texture(slot->images[index], error); image != nullptr &&
+        image->state == ResourceState::Undefined) {
+        if (!impl_->record_immediate([&](vk::CommandBuffer commandBuffer) {
+                return impl_->image_barrier(commandBuffer, *image, ResourceState::Undefined,
+                                            ResourceState::Present, error);
+            }, error)) { slot->acquired = false; return {}; }
+    }
     acquired.texture = slot->images[index];
     acquired.imageIndex = index;
     acquired.suboptimal = result == vk::SuboptimalKHR;

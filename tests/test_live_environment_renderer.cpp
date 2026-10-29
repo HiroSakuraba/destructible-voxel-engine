@@ -53,7 +53,7 @@ int main() {
         bytecode.shadowVertex={std::byte{5}}; bytecode.shadowFragment={std::byte{6}};
         dve::render::LiveEnvironmentRendererResources renderer;
         CHECK(dve::render::create_live_environment_renderer(device,lighting,atlas,bytecode,256U,dve::rhi::TextureFormat::RGBA8Unorm,renderer,&error));
-        CHECK(renderer.preparedPipelineVariants==4U); // sky, material, opaque/masked shadow
+        CHECK(renderer.preparedPipelineVariants==5U); // sky, depth prepass, material, opaque/masked shadow
         CHECK(renderer.skyboxPipeline && renderer.materialPipeline &&
               renderer.shadowOpaquePipeline && renderer.shadowMaskedPipeline);
 
@@ -75,7 +75,7 @@ int main() {
         auto tableStats=renderer.shadowMaterials->stats(); CHECK(tableStats.materialDescriptorCount==1U); CHECK(tableStats.imageResourceCount==2U); CHECK(tableStats.samplerResourceCount==1U);
         auto mainTableStats=renderer.mainMaterials->stats(); CHECK(mainTableStats.materialDescriptorCount==1U); CHECK(mainTableStats.assetResourceCount==1U); CHECK(mainTableStats.materialRecordsUploaded==1U); CHECK(mainTableStats.mappingRecordsUploaded==1U); CHECK(mainTableStats.imageResourceCount==2U);
         auto residencyStats=renderer.materialResidency->stats(); CHECK(residencyStats.imagesUploaded==2U); CHECK(residencyStats.samplersCreated==1U); CHECK(residencyStats.retainedAssetCount==1U); CHECK(residencyStats.assetReferenceCount==2U);
-        CHECK(renderer.preparedPipelineVariants==4U); // draw does not discover variants
+        CHECK(renderer.preparedPipelineVariants==5U); // draw does not discover variants
         const auto recorded=device.statistics(); CHECK(recorded.renderPassesExecuted==3U); CHECK(recorded.indexedDrawsExecuted==6U);
         CHECK(stats.debugLabelsEmitted==0U);
         // Non-rigid instance transforms must not silently stretch metric recipes.

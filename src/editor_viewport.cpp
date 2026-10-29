@@ -421,26 +421,92 @@ bool object_matches_screen_rect(const EditorObject& object, const EditorCamera& 
     const EditorObjectBounds world = object_world_bounds(object);
     if (!world.valid) return false;
     const Projected broad = project_box(world.minimum, world.maximum, true);
-    if (!overlaps(broad)) return false;
+    if (!overlaps(broad) && !object.polygon) return false;
     if (contain && contained(broad)) return true;
     if (object.polygon) {
-        bool any=false;
-        for (std::size_t i=0;i<object.polygon->indices.size();i+=3) {
-            Projected projected;projected.left=projected.top=INFINITY;
-            projected.right=projected.bottom=-INFINITY;projected.fullyVisible=true;
-            for (int j=0;j<3;++j) {
-                const auto local=object.polygon->vertices[object.polygon->indices[i+std::size_t(j)]].position;
-                const auto screen=project_world_to_screen(camera,viewport,voxel_to_world(object.transform,object.voxelScale,local));
-                // Off-screen but in front still bounds the triangle; behind the camera does not.
-                if (!screen.visible) projected.fullyVisible=false;
-                if (!(screen.depth>camera.nearPlane) || !std::isfinite(screen.x) || !std::isfinite(screen.y)) continue;
-                projected.valid=true;
-                projected.left=std::min(projected.left,screen.x);projected.right=std::max(projected.right,screen.x);
-                projected.top=std::min(projected.top,screen.y);projected.bottom=std::max(projected.bottom,screen.y);
+        // The projected AABB of a triangle is NOT the triangle: a diagonal face's empty
+        // corner must not answer a right-to-left crossing marquee. Clip each face against
+        // the camera's near/far planes before projection, then use convex SAT in screen space.
+        // This also handles a face straddling the near plane (whose hidden vertices project
+        // to invalid screen coordinates) without missing the visible part.
+        const ScreenProjector projector = make_screen_projector(camera, viewport);
+        const auto depth = [&](Float3 point) {
+            return dot(subtract(point, projector.position), projector.basis.forward);
+        };
+        const auto inside_rect = [&](const ScreenPoint& point) {
+            return std::isfinite(point.x) && std::isfinite(point.y) &&
+                   point.x >= left && point.x <= right && point.y >= top && point.y <= bottom;
+        };
+        const auto overlaps_polygon = [&](const std::array<ScreenPoint, 8>& points, std::size_t count) {
+            const auto overlap_axis = [&](double ax, double ay) {
+                double pmin = std::numeric_limits<double>::infinity();
+                double pmax = -std::numeric_limits<double>::infinity();
+                for (std::size_t i = 0; i < count; ++i) {
+                    const double value = ax * points[i].x + ay * points[i].y;
+                    pmin = std::min(pmin, value);
+                    pmax = std::max(pmax, value);
+                }
+                const double a = ax * left + ay * top, b = ax * right + ay * top;
+                const double c = ax * right + ay * bottom, d = ax * left + ay * bottom;
+                const double rmin = std::min({a, b, c, d});
+                const double rmax = std::max({a, b, c, d});
+                return pmax >= rmin && rmax >= pmin;
+            };
+            if (!overlap_axis(1, 0) || !overlap_axis(0, 1)) return false;
+            for (std::size_t i = 0; i < count; ++i) {
+                const ScreenPoint& a = points[i], &b = points[(i + 1U) % count];
+                const double dx = static_cast<double>(b.x) - a.x;
+                const double dy = static_cast<double>(b.y) - a.y;
+                if (!overlap_axis(-dy, dx)) return false;
             }
-            if (!contain && overlaps(projected)) return true;
-            if (contain && !contained(projected)) return false;
-            any=any||projected.valid;
+            return true;
+        };
+        bool any = false;
+        for (std::size_t i = 0; i + 2U < object.polygon->indices.size(); i += 3U) {
+            std::array<Float3, 8> vertices{};
+            for (std::size_t j = 0; j < 3U; ++j)
+                vertices[j] = voxel_to_world(object.transform, object.voxelScale,
+                    object.polygon->vertices[object.polygon->indices[i + j]].position);
+            std::size_t count = 3U;
+            // Sutherland-Hodgman depth clipping: a triangle yields at most five vertices
+            // after both clip planes, so the fixed-size buffers never allocate per face.
+            const auto clip = [&](float plane, bool greater) {
+                std::array<Float3, 8> output{};
+                std::size_t next = 0;
+                for (std::size_t j = 0; j < count; ++j) {
+                    const Float3 a = vertices[j], b = vertices[(j + 1U) % count];
+                    const float da = greater ? depth(a) - plane : plane - depth(a);
+                    const float db = greater ? depth(b) - plane : plane - depth(b);
+                    const bool insideA = da >= 0.0F, insideB = db >= 0.0F;
+                    if (insideA) output[next++] = a;
+                    if (insideA != insideB) {
+                        const float t = da / (da - db);
+                        output[next++] = add(a, multiply(subtract(b, a), t));
+                    }
+                }
+                vertices = output;
+                count = next;
+            };
+            clip(std::nextafter(camera.nearPlane, std::numeric_limits<float>::infinity()), true);
+            if (count < 3U) continue;
+            clip(camera.farPlane, false);
+            if (count < 3U) continue;
+            std::array<ScreenPoint, 8> projected{};
+            bool valid = true;
+            for (std::size_t j = 0; j < count; ++j) {
+                projected[j] = project_with(projector, vertices[j]);
+                if (!(projected[j].depth > camera.nearPlane) ||
+                    !std::isfinite(projected[j].x) || !std::isfinite(projected[j].y)) {
+                    valid = false;
+                    break;
+                }
+            }
+            if (!valid) continue;
+            any = true;
+            if (contain) {
+                for (std::size_t j = 0; j < count; ++j)
+                    if (!inside_rect(projected[j])) return false;
+            } else if (overlaps_polygon(projected, count)) return true;
         }
         return contain && any;
     }

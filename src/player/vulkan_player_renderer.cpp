@@ -192,6 +192,12 @@ public:
         if (presentSampler_) (void)device_->destroy_sampler(presentSampler_, &ignored);
         if (depthSampler_) (void)device_->destroy_sampler(depthSampler_, &ignored);
         if (giPipeline_) (void)device_->destroy_graphics_pipeline(giPipeline_, &ignored);
+        if (rcCascadePipeline_) (void)device_->destroy_graphics_pipeline(rcCascadePipeline_, &ignored);
+        if (rcGatherPipeline_) (void)device_->destroy_graphics_pipeline(rcGatherPipeline_, &ignored);
+        for (rhi::BufferHandle& buffer : rcConstants_)
+            if (buffer) { (void)device_->destroy_buffer(buffer, &ignored); buffer = {}; }
+        if (rcDummyView_) (void)device_->destroy_texture_view(rcDummyView_, &ignored);
+        if (rcDummy_) (void)device_->destroy_texture(rcDummy_, &ignored);
         if (gridPalette_) (void)device_->destroy_buffer(gridPalette_, &ignored);
         if (tracedAoPipeline_) (void)device_->destroy_graphics_pipeline(tracedAoPipeline_, &ignored);
         if (aoPipeline_) (void)device_->destroy_graphics_pipeline(aoPipeline_, &ignored);
@@ -258,6 +264,23 @@ public:
         aoConstants_ = device_->create_buffer({512U, rhi::BufferUsage::Constant, rhi::MemoryDomain::Upload,
                                                "player SSAO constants", ResourceState::ShaderRead}, error);
         if (!aoConstants_) return false;
+        for (rhi::BufferHandle& buffer : rcConstants_) {
+            buffer = device_->create_buffer({512U, rhi::BufferUsage::Constant, rhi::MemoryDomain::Upload,
+                                             "player radiance cascade constants", ResourceState::ShaderRead}, error);
+            if (!buffer) return false;
+        }
+        {
+            rhi::TextureDesc dummy;
+            dummy.format = rhi::TextureFormat::RGBA16Float;
+            dummy.width = 1U; dummy.height = 1U;
+            dummy.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::Sampled;
+            dummy.initialState = ResourceState::ShaderRead;
+            dummy.debugName = "player radiance cascade placeholder";
+            rcDummy_ = device_->create_texture(dummy, error);
+            if (!rcDummy_) return false;
+            rcDummyView_ = device_->create_texture_view({rcDummy_, 0U, 1U, 0U, 1U, "player rc placeholder view"}, error);
+            if (!rcDummyView_) return false;
+        }
         // Scene voxel grid for traced AO; a 16-byte placeholder keeps the layout valid otherwise.
         gridPalette_ = device_->create_buffer(
             {256U * sizeof(render::SceneGridMaterial), rhi::BufferUsage::Storage, rhi::MemoryDomain::Upload,
@@ -269,7 +292,8 @@ public:
         aoLayout.bindings = {{0U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment},
                              {1U, rhi::BindingType::UniformBuffer, rhi::ShaderStage::Fragment},
                              {2U, rhi::BindingType::StorageBufferReadOnly, rhi::ShaderStage::Fragment},
-                             {3U, rhi::BindingType::StorageBufferReadOnly, rhi::ShaderStage::Fragment}};
+                             {3U, rhi::BindingType::StorageBufferReadOnly, rhi::ShaderStage::Fragment},
+                             {4U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment}};
         aoLayout_ = device_->create_bind_group_layout(aoLayout, error);
         if (!aoLayout_) return false;
         {
@@ -294,6 +318,16 @@ public:
             desc.colorFormat = rhi::TextureFormat::RGBA16Float;
             giPipeline_ = device_->create_graphics_pipeline(desc, error);
             if (!giPipeline_) return false;
+            if (shader_blobs::player_rc_cascade_ps().size() > 0U && shader_blobs::player_rc_gather_ps().size() > 0U) {
+                desc.debugName = "player radiance cascade";
+                desc.fragmentBytecode = copy_bytes(shader_blobs::player_rc_cascade_ps());
+                rcCascadePipeline_ = device_->create_graphics_pipeline(desc, error);
+                if (!rcCascadePipeline_) return false;
+                desc.debugName = "player radiance cascade gather";
+                desc.fragmentBytecode = copy_bytes(shader_blobs::player_rc_gather_ps());
+                rcGatherPipeline_ = device_->create_graphics_pipeline(desc, error);
+                if (!rcGatherPipeline_) return false;
+            }
         }
         const auto present_pipeline = [&](rhi::TextureFormat format, const char* name) {
             rhi::GraphicsPipelineDesc desc;
@@ -381,6 +415,19 @@ public:
         if (!giTexture_) return false;
         giView_ = device_->create_texture_view({giTexture_, 0U, 1U, 0U, 1U, "player indirect light view"}, error);
         if (!giView_) return false;
+        for (std::size_t level = 0; level < kRcLevels; ++level) {
+            const std::uint32_t spacing = kRcBaseSpacing << level;
+            const std::uint32_t dirRes = kRcBaseDirections << level;
+            rhi::TextureDesc rc = ao;
+            rc.format = rhi::TextureFormat::RGBA16Float;
+            rc.width = ((width + spacing - 1U) / spacing) * dirRes;
+            rc.height = ((height + spacing - 1U) / spacing) * dirRes;
+            rc.debugName = "player radiance cascade";
+            rcTextures_[level] = device_->create_texture(rc, error);
+            if (!rcTextures_[level]) return false;
+            rcViews_[level] = device_->create_texture_view({rcTextures_[level], 0U, 1U, 0U, 1U, "player rc view"}, error);
+            if (!rcViews_[level]) return false;
+        }
         if (!rebuild_ao_group(error)) return false;
         frame_.width = width; frame_.height = height;
         frame_.pixels.assign(static_cast<std::size_t>(width) * height * 4U, 0U);
@@ -492,10 +539,12 @@ public:
                               environment.globalIlluminationIntensity > 0.0F &&
                               environment.skyMode == SkyMode::Colors && !draws_.empty() &&
                               shader_blobs::player_traced_gi_ps().size() > 0U;
+        const bool giCascades = giTraced && options_.globalIllumination == PlayerGlobalIlluminationMode::RadianceCascades &&
+                                rcCascadePipeline_ && rcGatherPipeline_ && rcViews_[0];
         if ((aoTraced || giTraced) && !update_scene_grid(view, view.camera.position, error))
             return stage_failed("scene voxel grid", error);
         if ((aoOn || giTraced) &&
-            !record_screen_passes(environment, camera, constants, plan, aoOn, aoTraced, giTraced, error))
+            !record_screen_passes(environment, camera, constants, plan, aoOn, aoTraced, giTraced, giCascades, error))
             return stage_failed("ambient occlusion / indirect light", error);
 
         render::LiveEnvironmentFrameDesc frame;
@@ -541,7 +590,7 @@ public:
         gridBuffer_ = replacement;
         gridCapacity_ = capacity;
         gridUploaded_ = false;
-        return !aoLayout_ || !depthView_ || !gridPalette_ || rebuild_ao_group(error);
+        return !aoLayout_ || !depthView_ || !gridPalette_ || !rcDummyView_ || rebuild_ao_group(error);
     }
 
     bool rebuild_ao_group(std::string* error) {
@@ -552,9 +601,23 @@ public:
         group.debugName = "player AO group";
         group.entries = {{0U, {}, depthView_, 0U, 0U, depthSampler_}, {1U, aoConstants_, {}, 0U, 512U, {}},
                          {2U, gridBuffer_, {}, 0U, gridCapacity_, {}},
-                         {3U, gridPalette_, {}, 0U, 256U * sizeof(render::SceneGridMaterial), {}}};
+                         {3U, gridPalette_, {}, 0U, 256U * sizeof(render::SceneGridMaterial), {}},
+                         {4U, {}, rcDummyView_, 0U, 0U, depthSampler_}};
         aoGroup_ = device_->create_bind_group(group, error);
-        return static_cast<bool>(aoGroup_);
+        if (!aoGroup_) return false;
+        // Radiance cascade groups: one per level (reads the level above) and one for the gather.
+        for (std::size_t i = 0; i < kRcLevels + 1U; ++i) {
+            if (rcGroups_[i]) { (void)device_->destroy_bind_group(rcGroups_[i], &ignored); rcGroups_[i] = {}; }
+            if (!rcViews_[0]) continue;
+            const rhi::TextureViewHandle upper = i == kRcLevels ? rcViews_[0] : (i + 1U < kRcLevels ? rcViews_[i + 1U] : rcDummyView_);
+            rhi::BindGroupDesc rcGroup = group;
+            rcGroup.debugName = "player rc group";
+            rcGroup.entries[1] = {1U, rcConstants_[i], {}, 0U, 512U, {}};
+            rcGroup.entries[4] = {4U, {}, upper, 0U, 0U, depthSampler_};
+            rcGroups_[i] = device_->create_bind_group(rcGroup, error);
+            if (!rcGroups_[i]) return false;
+        }
+        return true;
     }
 
     // Builds the scene voxel grid from this frame's voxel objects and uploads it when it changed.
@@ -595,7 +658,7 @@ public:
     // and traced indirect light (giTexture_).
     bool record_screen_passes(const RenderEnvironment& environment, const CameraFrame& camera,
                               std::span<const std::byte> frameConstants,
-                              const render::CascadedShadowPlan& plan, bool aoOn, bool aoTraced, bool giTraced,
+                              const render::CascadedShadowPlan& plan, bool aoOn, bool aoTraced, bool giTraced, bool giCascades,
                               std::string* error) {
         render::LiveEnvironmentFrameDesc prepass;
         prepass.depthTarget = depth_;
@@ -623,6 +686,9 @@ public:
             std::array<float, 4> sunColor;     // rgb, w sun-visibility ray length m
             std::array<float, 4> skyColor;     // rgb, w indirect ray length m
             std::array<float, 4> groundColor;  // rgb, w indirect sample count
+            std::array<float, 4> rcLevel;      // x level, y direction map size, z probe spacing px, w level count
+            std::array<float, 4> rcProbes;     // x, y probes of this level; z, w of the level above
+            std::array<float, 4> rcInterval;   // x start m, y end m, z direction map size above, w top level
         } constants{};
         constants.viewProjection = camera.viewProjection;
         constants.inverseViewProjection = invert(camera.viewProjection);
@@ -658,7 +724,8 @@ public:
         if (!device_->transition_texture(commands, depth_, ResourceState::DepthWrite, ResourceState::ShaderRead, error))
             return false;
         const auto fullscreen_pass = [&](rhi::TextureHandle target, rhi::GraphicsPipelineHandle pipeline,
-                                         const char* name, float clear) {
+                                         const char* name, float clear, rhi::BindGroupHandle group,
+                                         std::uint32_t targetWidth, std::uint32_t targetHeight) {
             if (!device_->transition_texture(commands, target, ResourceState::ShaderRead, ResourceState::RenderTarget, error))
                 return false;
             rhi::RenderPassDesc pass;
@@ -666,17 +733,53 @@ public:
             pass.colors.push_back({target, true, clear, clear, clear, clear});
             if (!device_->begin_render_pass(commands, pass, error) ||
                 !device_->bind_graphics_pipeline(commands, pipeline, error) ||
-                !device_->bind_graphics_bind_group(commands, 0U, aoGroup_, error) ||
-                !device_->set_viewport(commands, {0.0F, 0.0F, static_cast<float>(width_), static_cast<float>(height_), 0.0F, 1.0F}, error) ||
-                !device_->set_scissor(commands, {0, 0, width_, height_}, error) ||
+                !device_->bind_graphics_bind_group(commands, 0U, group, error) ||
+                !device_->set_viewport(commands, {0.0F, 0.0F, static_cast<float>(targetWidth), static_cast<float>(targetHeight), 0.0F, 1.0F}, error) ||
+                !device_->set_scissor(commands, {0, 0, targetWidth, targetHeight}, error) ||
                 !device_->bind_index_buffer(commands, triangleIndices_, 0U, rhi::IndexFormat::Uint32, error) ||
                 !device_->draw_indexed(commands, 3U, 1U, 0U, 0, 0U, error) ||
                 !device_->end_render_pass(commands, error)) return false;
             return device_->transition_texture(commands, target, ResourceState::RenderTarget, ResourceState::ShaderRead, error);
         };
-        if (aoOn && !fullscreen_pass(aoTexture_, aoTraced ? tracedAoPipeline_ : aoPipeline_, "player ambient occlusion", 1.0F))
+        if (aoOn && !fullscreen_pass(aoTexture_, aoTraced ? tracedAoPipeline_ : aoPipeline_, "player ambient occlusion", 1.0F, aoGroup_, width_, height_))
             return false;
-        if (giTraced && !fullscreen_pass(giTexture_, giPipeline_, "player traced indirect light", 0.0F)) return false;
+        if (giCascades) {
+            // Top level first: each level reads the one above it.
+            const float maxDistance = std::max(environment.globalIlluminationMaxDistanceMeters, 0.1F);
+            const float firstLength = std::max(maxDistance / 85.0F, 2.0F * grid_.cell_meters());
+            const auto dirRes0 = static_cast<float>(kRcBaseDirections);
+            for (std::size_t i = kRcLevels; i-- > 0U;) {
+                const std::uint32_t spacing = kRcBaseSpacing << i;
+                const std::uint32_t dirRes = kRcBaseDirections << i;
+                const std::uint32_t probesX = (static_cast<std::uint32_t>(width_) + spacing - 1U) / spacing;
+                const std::uint32_t probesY = (static_cast<std::uint32_t>(height_) + spacing - 1U) / spacing;
+                const bool top = i + 1U == kRcLevels;
+                SsaoConstants level = constants;
+                const float fi = static_cast<float>(i);
+                const float start = firstLength * (std::pow(4.0F, fi) - 1.0F) / 3.0F;
+                const float end = top ? std::max(maxDistance, start + firstLength)
+                                      : std::min(firstLength * (std::pow(4.0F, fi + 1.0F) - 1.0F) / 3.0F, maxDistance);
+                level.rcLevel = {fi, static_cast<float>(dirRes), static_cast<float>(spacing), static_cast<float>(kRcLevels)};
+                level.rcProbes = {static_cast<float>(probesX), static_cast<float>(probesY),
+                                  static_cast<float>((static_cast<std::uint32_t>(width_) + spacing * 2U - 1U) / (spacing * 2U)),
+                                  static_cast<float>((static_cast<std::uint32_t>(height_) + spacing * 2U - 1U) / (spacing * 2U))};
+                level.rcInterval = {start, std::max(end, start + 1.0e-3F), static_cast<float>(dirRes * 2U), top ? 1.0F : 0.0F};
+                if (!device_->write_buffer(rcConstants_[i], 0U, std::as_bytes(std::span(&level, 1U)), error)) return false;
+                if (!fullscreen_pass(rcTextures_[i], rcCascadePipeline_, "player radiance cascade", 0.0F, rcGroups_[i],
+                                     probesX * dirRes, probesY * dirRes))
+                    return false;
+            }
+            SsaoConstants gather = constants;
+            gather.rcLevel = {0.0F, dirRes0, static_cast<float>(kRcBaseSpacing), static_cast<float>(kRcLevels)};
+            gather.rcProbes = {static_cast<float>((static_cast<std::uint32_t>(width_) + kRcBaseSpacing - 1U) / kRcBaseSpacing),
+                               static_cast<float>((static_cast<std::uint32_t>(height_) + kRcBaseSpacing - 1U) / kRcBaseSpacing),
+                               0.0F, 0.0F};
+            if (!device_->write_buffer(rcConstants_[kRcLevels], 0U, std::as_bytes(std::span(&gather, 1U)), error)) return false;
+            if (!fullscreen_pass(giTexture_, rcGatherPipeline_, "player radiance cascade gather", 0.0F,
+                                 rcGroups_[kRcLevels], width_, height_)) return false;
+        } else if (giTraced &&
+                   !fullscreen_pass(giTexture_, giPipeline_, "player traced indirect light", 0.0F, aoGroup_, width_, height_))
+            return false;
         if (!device_->transition_texture(commands, depth_, ResourceState::ShaderRead, ResourceState::DepthWrite, error))
             return false;
         return static_cast<bool>(device_->submit(commands, error));
@@ -918,6 +1021,12 @@ private:
         if (giView_) (void)device_->destroy_texture_view(giView_, &ignored);
         if (giTexture_) (void)device_->destroy_texture(giTexture_, &ignored);
         giView_ = {}; giTexture_ = {};
+        for (rhi::BindGroupHandle& g : rcGroups_) if (g) { (void)device_->destroy_bind_group(g, &ignored); g = {}; }
+        for (std::size_t i = 0; i < kRcLevels; ++i) {
+            if (rcViews_[i]) (void)device_->destroy_texture_view(rcViews_[i], &ignored);
+            if (rcTextures_[i]) (void)device_->destroy_texture(rcTextures_[i], &ignored);
+            rcViews_[i] = {}; rcTextures_[i] = {};
+        }
         if (presentGroup_) (void)device_->destroy_bind_group(presentGroup_, &ignored);
         if (hdrView_) (void)device_->destroy_texture_view(hdrView_, &ignored);
         if (hdr_) (void)device_->destroy_texture(hdr_, &ignored);
@@ -950,6 +1059,17 @@ private:
     rhi::GraphicsPipelineHandle aoPipeline_{};
     rhi::GraphicsPipelineHandle tracedAoPipeline_{};
     rhi::GraphicsPipelineHandle giPipeline_{};
+    static constexpr std::size_t kRcLevels = 4U;
+    static constexpr std::uint32_t kRcBaseSpacing = 8U;      // pixels between level-0 probes
+    static constexpr std::uint32_t kRcBaseDirections = 4U;   // level-0 direction map is 4 x 4
+    rhi::GraphicsPipelineHandle rcCascadePipeline_{};
+    rhi::GraphicsPipelineHandle rcGatherPipeline_{};
+    std::array<rhi::BufferHandle, kRcLevels + 1U> rcConstants_{};
+    std::array<rhi::BindGroupHandle, kRcLevels + 1U> rcGroups_{};
+    std::array<rhi::TextureHandle, kRcLevels> rcTextures_{};
+    std::array<rhi::TextureViewHandle, kRcLevels> rcViews_{};
+    rhi::TextureHandle rcDummy_{};
+    rhi::TextureViewHandle rcDummyView_{};
     rhi::BufferHandle gridPalette_{};
     rhi::TextureHandle giTexture_{};
     rhi::TextureViewHandle giView_{};

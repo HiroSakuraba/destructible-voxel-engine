@@ -267,6 +267,11 @@ int run() {
         std::unique_ptr<IPlayerRenderer> giGpu = make_vulkan_player_renderer(giOptions, &error);
         require(giGpu != nullptr, "GI renderer creation failed: " + error);
         require(giGpu->resize(kWidth, kHeight, &error), error);
+        VulkanPlayerRendererOptions rcOptions;
+        rcOptions.globalIllumination = PlayerGlobalIlluminationMode::RadianceCascades;
+        std::unique_ptr<IPlayerRenderer> rcGpu = make_vulkan_player_renderer(rcOptions, &error);
+        require(rcGpu != nullptr, "radiance cascade renderer creation failed: " + error);
+        require(rcGpu->resize(kWidth, kHeight, &error), error);
         CpuPlayerRendererOptions refOptions;
         refOptions.quality = CpuRenderQuality::Reference;
         refOptions.threadCount = 2U;
@@ -295,12 +300,25 @@ int run() {
             require(bounceDiff.meanAbsoluteError < 1.5 && bounceDiff.meanAbsoluteError < ambientDiff.meanAbsoluteError,
                     std::string("traced one-bounce GI (sun ") + (sunOn ? "on" : "off") +
                         ") is not closer to the CPU reference than ambient-only light");
+            const bool rcOk = rcGpu->render(giView, &error) && rcGpu->present(&error);
+            require(rcOk, "GPU radiance cascade frame failed: " + error);
+            const Rgba8Image cascades = *rcGpu->readback();
+            Rgba8Image rcDiffImage;
+            const Diff rcDiff = compare(reference, cascades, rcDiffImage);
+            std::cout << "radiance cascades (sun " << (sunOn ? "on" : "off") << "): mean |error| "
+                      << rcDiff.meanAbsoluteError << " vs CPU one-bounce reference\n";
             if (const char* dir = std::getenv("DVE_PLAYER_GPU_DIFF_DIR")) {
                 const std::string tag = sunOn ? "sun" : "nosun";
+                save_ppm(std::filesystem::path(dir) / ("gpu_rc_" + tag + ".ppm"), cascades);
                 save_ppm(std::filesystem::path(dir) / ("cpu_gi_" + tag + ".ppm"), reference);
                 save_ppm(std::filesystem::path(dir) / ("gpu_gi_" + tag + ".ppm"), bounce);
                 save_ppm(std::filesystem::path(dir) / ("gpu_ambient_" + tag + ".ppm"), ambient);
             }
+            // The test scene's indirect light is faint, so the bar is "close to the CPU reference
+            // and to the full one-bounce result", not "better than ambient" (which already is close).
+            require(rcDiff.meanAbsoluteError < 1.5 && rcDiff.meanAbsoluteError < ambientDiff.meanAbsoluteError + 0.1,
+                    std::string("radiance cascades (sun ") + (sunOn ? "on" : "off") +
+                        ") differ too much from the CPU one-bounce reference");
         }
     }
 

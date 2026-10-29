@@ -19,6 +19,9 @@ DVE_LIVE_BIND(1,0) cbuffer PlayerSsaoConstants : register(b0) {
     float4 gSunColor;        // rgb sun colour; w sun-visibility ray length m
     float4 gSkyColor;        // rgb sky colour (Colours sky mode); w indirect ray length m
     float4 gGroundColor;     // rgb ground colour; w indirect sample count (1..16)
+    float4 gRcLevel;         // radiance cascades: x level, y direction map size, z probe spacing px, w level count
+    float4 gRcProbes;        // x probes across, y probes down, z / w the same for the level above
+    float4 gRcInterval;      // x ray interval start m, y end m, z direction map size above, w 1 on the top level
 };
 
 float3 WorldFromUv(float2 uv, float depth) {

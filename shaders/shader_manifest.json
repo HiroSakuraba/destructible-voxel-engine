@@ -3743,6 +3743,108 @@
           "register": "t3"
         }
       ]
+    },
+    {
+      "name": "player_rc_cascade_ps",
+      "source": "player_rc_cascade_ps.hlsl",
+      "stage": "pixel",
+      "entry": "main",
+      "profile": "ps_6_0",
+      "bindings": [
+        {
+          "name": "PlayerSsaoConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b0"
+        },
+        {
+          "name": "gDepthSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s0"
+        },
+        {
+          "name": "gRcUpperSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s4"
+        },
+        {
+          "name": "gDepth",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "gGridCells",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t2"
+        },
+        {
+          "name": "gGridPalette",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t3"
+        },
+        {
+          "name": "gRcUpper",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t4"
+        }
+      ]
+    },
+    {
+      "name": "player_rc_gather_ps",
+      "source": "player_rc_gather_ps.hlsl",
+      "stage": "pixel",
+      "entry": "main",
+      "profile": "ps_6_0",
+      "bindings": [
+        {
+          "name": "PlayerSsaoConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b0"
+        },
+        {
+          "name": "gDepthSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s0"
+        },
+        {
+          "name": "gRcUpperSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s4"
+        },
+        {
+          "name": "gDepth",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "gGridCells",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t2"
+        },
+        {
+          "name": "gGridPalette",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t3"
+        },
+        {
+          "name": "gRcUpper",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t4"
+        }
+      ]
     }
   ]
 }

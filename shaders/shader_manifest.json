@@ -3626,6 +3626,12 @@
           "register": "s2"
         },
         {
+          "name": "gSkyBackgroundSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s3"
+        },
+        {
           "name": "gSceneColor",
           "kind": "sampled_texture",
           "access": "read",
@@ -3636,6 +3642,12 @@
           "kind": "sampled_texture",
           "access": "read",
           "register": "t2"
+        },
+        {
+          "name": "gSkyBackground",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t3"
         }
       ]
     },
@@ -3725,6 +3737,18 @@
           "register": "s0"
         },
         {
+          "name": "gSkyRadianceSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s5"
+        },
+        {
+          "name": "gSkyIrradianceSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s6"
+        },
+        {
           "name": "gDepth",
           "kind": "sampled_texture",
           "access": "read",
@@ -3741,6 +3765,18 @@
           "kind": "storage_buffer",
           "access": "read",
           "register": "t3"
+        },
+        {
+          "name": "gSkyRadiance",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t5"
+        },
+        {
+          "name": "gSkyIrradiance",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t6"
         }
       ]
     },
@@ -3770,6 +3806,18 @@
           "register": "s4"
         },
         {
+          "name": "gSkyRadianceSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s5"
+        },
+        {
+          "name": "gSkyIrradianceSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s6"
+        },
+        {
           "name": "gDepth",
           "kind": "sampled_texture",
           "access": "read",
@@ -3792,6 +3840,18 @@
           "kind": "sampled_texture",
           "access": "read",
           "register": "t4"
+        },
+        {
+          "name": "gSkyRadiance",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t5"
+        },
+        {
+          "name": "gSkyIrradiance",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t6"
         }
       ]
     },
@@ -3821,6 +3881,18 @@
           "register": "s4"
         },
         {
+          "name": "gSkyRadianceSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s5"
+        },
+        {
+          "name": "gSkyIrradianceSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s6"
+        },
+        {
           "name": "gDepth",
           "kind": "sampled_texture",
           "access": "read",
@@ -3843,6 +3915,18 @@
           "kind": "sampled_texture",
           "access": "read",
           "register": "t4"
+        },
+        {
+          "name": "gSkyRadiance",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t5"
+        },
+        {
+          "name": "gSkyIrradiance",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t6"
         }
       ]
     }

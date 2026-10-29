@@ -322,6 +322,46 @@ int run() {
         }
     }
 
+    // Physical sky: background, sky light and sun colour come from the atmosphere model, like the CPU.
+    {
+        PlayerRenderView skyView = view;
+        skyView.environment.skyMode = SkyMode::Physical;
+        skyView.environment.globalIlluminationMode = GlobalIlluminationMode::VoxelOneBounce;
+        skyView.environment.globalIlluminationSamples = 16U;
+        skyView.environment.globalIlluminationMaxDistanceMeters = 8.0F;
+        CpuPlayerRendererOptions refOptions;
+        refOptions.quality = CpuRenderQuality::Reference;
+        refOptions.threadCount = 2U;
+        std::unique_ptr<IPlayerRenderer> cpuSky = make_cpu_player_renderer(nullptr, refOptions);
+        require(cpuSky->resize(kWidth, kHeight, &error), error);
+        const bool refOk = cpuSky->render(skyView, &error) && cpuSky->present(&error);
+        require(refOk, "CPU physical-sky reference failed: " + error);
+        const Rgba8Image reference = *cpuSky->readback();
+        VulkanPlayerRendererOptions skyOptions;
+        skyOptions.globalIllumination = PlayerGlobalIlluminationMode::VoxelOneBounce;
+        std::unique_ptr<IPlayerRenderer> skyGpu = make_vulkan_player_renderer(skyOptions, &error);
+        require(skyGpu != nullptr && skyGpu->resize(kWidth, kHeight, &error), "physical-sky renderer: " + error);
+        const bool skyOk = skyGpu->render(skyView, &error) && skyGpu->present(&error);
+        require(skyOk, "GPU physical-sky frame failed: " + error);
+        const Rgba8Image physical = *skyGpu->readback();
+        PlayerRenderView colourView = skyView;
+        colourView.environment.skyMode = SkyMode::Colors;
+        const bool colourOk = skyGpu->render(colourView, &error) && skyGpu->present(&error);
+        require(colourOk, "GPU colour-sky frame failed: " + error);
+        const Rgba8Image colours = *skyGpu->readback();
+        Rgba8Image diffImage;
+        const Diff physicalDiff = compare(reference, physical, diffImage);
+        const Diff colourDiff = compare(reference, colours, diffImage);
+        std::cout << "physical sky: GPU mean |error| vs CPU " << physicalDiff.meanAbsoluteError
+                  << " (colour-sky GPU frame: " << colourDiff.meanAbsoluteError << ")\n";
+        if (const char* dir = std::getenv("DVE_PLAYER_GPU_DIFF_DIR")) {
+            save_ppm(std::filesystem::path(dir) / "cpu_physical.ppm", reference);
+            save_ppm(std::filesystem::path(dir) / "gpu_physical.ppm", physical);
+        }
+        require(physicalDiff.meanAbsoluteError < 4.0 && physicalDiff.meanAbsoluteError < colourDiff.meanAbsoluteError,
+                "GPU physical sky does not match the CPU reference");
+    }
+
     // Same view again: cached meshes, identical frame.
     const bool again = gpu->render(view, &error) && gpu->present(&error);
     require(again, error);

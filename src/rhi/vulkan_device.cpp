@@ -3429,7 +3429,7 @@ FenceHandle VulkanDevice::submit(CommandListHandle commands, std::string* error)
                 // -> readback chains); transfer writes are not visible to later transfer reads
                 // without this dependency. Software rasterizers hide the hazard, real GPUs do not.
                 if (lastWasCopy) {
-                    const vk::MemoryBarrier memory{vk::StructureTypeMemoryBarrier, nullptr,
+                    const vk::GlobalMemoryBarrier memory{vk::StructureTypeMemoryBarrier, nullptr,
                                                    vk::AccessTransferWriteBit,
                                                    vk::AccessTransferReadBit | vk::AccessTransferWriteBit};
                     impl_->fn.cmdPipelineBarrier(native, vk::PipelineStageTransferBit,

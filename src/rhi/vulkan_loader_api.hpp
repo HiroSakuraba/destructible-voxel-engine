@@ -596,7 +596,7 @@ struct CommandBufferBeginInfo {
     const CommandBufferInheritanceInfo* pInheritanceInfo;
 };
 struct BufferCopy { DeviceSize srcOffset; DeviceSize dstOffset; DeviceSize size; };
-struct MemoryBarrier { StructureType sType; const void* pNext; AccessFlags srcAccessMask; AccessFlags dstAccessMask; };
+struct GlobalMemoryBarrier { StructureType sType; const void* pNext; AccessFlags srcAccessMask; AccessFlags dstAccessMask; };
 struct BufferMemoryBarrier {
     StructureType sType;
     const void* pNext;

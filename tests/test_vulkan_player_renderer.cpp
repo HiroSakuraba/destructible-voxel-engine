@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -28,6 +29,7 @@
 #include "dve/player/player_renderer.hpp"
 #include "dve/player/vulkan_player_renderer.hpp"
 #include "dve/voxel_object.hpp"
+#include "dve/voxel_textures.hpp"
 
 namespace {
 
@@ -186,6 +188,124 @@ int run() {
     require(diff.meanAbsoluteError < 2.0, "GPU shading differs too much from the CPU reference (mean " +
                                                std::to_string(diff.meanAbsoluteError) + ")");
 
+    // A live edit must update the GPU mesh even when the material table retains its address.
+    std::vector<VoxelMaterialDefinition> editedMaterials(10);
+    for (std::size_t i = 0; i < editedMaterials.size(); ++i)
+        editedMaterials[i] = default_voxel_material(static_cast<MaterialId>(i));
+    editedMaterials[9].baseColor = {1.0F, 0.0F, 0.0F, 1.0F};
+    scene.objects[1].materials = editedMaterials;
+    require(gpu->render(view, &error) && gpu->present(&error), "red material frame failed: " + error);
+    const Rgba8Image redFrame = *gpu->readback();
+    editedMaterials[9].baseColor = {0.0F, 1.0F, 0.0F, 1.0F};
+    require(gpu->render(view, &error) && gpu->present(&error), "green material frame failed: " + error);
+    const Rgba8Image greenFrame = *gpu->readback();
+    std::size_t editedPixels = 0;
+    for (std::size_t i = 0; i < redFrame.pixels.size(); i += 4U)
+        if (redFrame.pixels[i] != greenFrame.pixels[i] || redFrame.pixels[i + 1U] != greenFrame.pixels[i + 1U])
+            ++editedPixels;
+    require(editedPixels > 100U, "in-place material edit did not change the GPU frame");
+    scene.objects[1].materials = {};
+
+    // Shared material fixtures: save both renderers' images and report differences. These are
+    // observations, not parity claims: glass transmission is not implemented by this GPU path.
+    struct MaterialCase { const char* name; VoxelMaterialDefinition material; };
+    std::vector<MaterialCase> cases;
+    auto baseMaterial = default_voxel_material(9);
+    baseMaterial.baseColor = {0.65F, 0.3F, 0.12F, 1.0F};
+    baseMaterial.metallic = 1.0F; baseMaterial.roughness = 0.15F;
+    cases.push_back({"metal_smooth", baseMaterial});
+    baseMaterial.roughness = 0.85F; cases.push_back({"metal_rough", baseMaterial});
+    baseMaterial.metallic = 0.0F; cases.push_back({"dielectric_rough", baseMaterial});
+    baseMaterial.emissive = {1.2F, 0.1F, 0.05F}; cases.push_back({"emissive", baseMaterial});
+    baseMaterial.emissive = {}; baseMaterial.baseColor = {1, 1, 1, 1};
+    baseMaterial.baseColorMap = make_voxel_image("checker", 2, 2,
+        {255, 30, 30, 255, 30, 255, 30, 255, 30, 255, 30, 255, 255, 30, 30, 255}, VoxelImageRole::Color);
+    baseMaterial.textureTileMeters = 0.4F; cases.push_back({"textured", baseMaterial});
+    baseMaterial.baseColorMap.reset();
+    baseMaterial.roughness = 1.0F; baseMaterial.metallic = 1.0F;
+    baseMaterial.ormMap = make_voxel_image("orm", 2, 2,
+        {255, 30, 255, 255, 255, 220, 0, 255, 255, 220, 0, 255, 255, 30, 255, 255}, VoxelImageRole::Data);
+    cases.push_back({"orm_texture", baseMaterial});
+    baseMaterial.ormMap.reset(); baseMaterial.metallic = 0.0F; baseMaterial.emissive = {1.0F, 1.0F, 1.0F};
+    baseMaterial.emissiveMap = make_voxel_image("emission", 2, 2,
+        {255, 20, 20, 255, 20, 20, 255, 255, 20, 20, 255, 255, 255, 20, 20, 255}, VoxelImageRole::Color);
+    cases.push_back({"emissive_texture", baseMaterial});
+    baseMaterial.emissiveMap.reset(); baseMaterial.emissive = {};
+    baseMaterial.normalMap = make_voxel_image("tilted normal", 1, 1, {220, 128, 220, 255}, VoxelImageRole::Normal);
+    cases.push_back({"normal_map", baseMaterial});
+    baseMaterial.normalMap.reset();
+    editedMaterials[1].baseColor = {0.05F, 0.8F, 0.1F, 1.0F};
+    baseMaterial.baseColor = {0.8F, 0.05F, 0.05F, 1.0F};
+    baseMaterial.layers.push_back({1U, 0.5F});
+    cases.push_back({"layered", baseMaterial});
+    baseMaterial.layers.clear(); baseMaterial.baseColor = {1, 1, 1, 1};
+    baseMaterial.transmission = 0.9F;
+    baseMaterial.roughness = 0.05F; baseMaterial.indexOfRefraction = 1.5F;
+    cases.push_back({"glass", baseMaterial});
+    for (const auto& fixture : cases) {
+        editedMaterials[9] = fixture.material;
+        scene.objects[1].materials = editedMaterials;
+        error.clear();
+        const bool gpuMaterialOk = gpu->render(view, &error) && gpu->present(&error);
+        if (std::string_view(fixture.name) == "glass") {
+            require(!gpuMaterialOk && error.find("GPU transmission requires") != std::string::npos,
+                    "glass must report unsupported GPU transmission: " + error);
+            const bool cpuGlassOk = cpu->render(view, &error) && cpu->present(&error);
+            require(cpuGlassOk, "glass CPU: " + error);
+            std::cout << "material glass: GPU transmission unsupported; CPU reference rendered\n";
+            if (const char* dir = std::getenv("DVE_PLAYER_GPU_DIFF_DIR"))
+                save_ppm(std::filesystem::path(dir) / "glass_cpu.ppm", *cpu->readback());
+            continue;
+        }
+        require(gpuMaterialOk, std::string(fixture.name) + " GPU: " + error);
+        const Rgba8Image gpuMaterial = *gpu->readback();
+        if (std::string_view(fixture.name) == "textured" || std::string_view(fixture.name) == "normal_map") {
+            editedMaterials[9].baseColorMap.reset();
+            editedMaterials[9].normalMap.reset();
+            const bool plainOk = gpu->render(view, &error) && gpu->present(&error);
+            require(plainOk, "untextured control GPU: " + error);
+            const auto* plain = gpu->readback();
+            std::size_t changed = 0;
+            for (std::size_t i = 0; i < plain->pixels.size(); i += 4U)
+                if (plain->pixels[i] != gpuMaterial.pixels[i] || plain->pixels[i + 1U] != gpuMaterial.pixels[i + 1U]) ++changed;
+            require(changed > 100U, "voxel map did not change the Vulkan image");
+            editedMaterials[9] = fixture.material;
+        }
+        const bool cpuMaterialOk = cpu->render(view, &error) && cpu->present(&error);
+        require(cpuMaterialOk, std::string(fixture.name) + " CPU: " + error);
+        const Rgba8Image cpuMaterial = *cpu->readback();
+        Rgba8Image difference;
+        const Diff fixtureDiff = compare(cpuMaterial, gpuMaterial, difference);
+        std::cout << "material " << fixture.name << ": mean error " << fixtureDiff.meanAbsoluteError
+                  << ", shared pixels " << fixtureDiff.geometryPixels << "\n";
+        if (const char* dir = std::getenv("DVE_PLAYER_GPU_DIFF_DIR")) {
+            save_ppm(std::filesystem::path(dir) / (std::string(fixture.name) + "_cpu.ppm"), cpuMaterial);
+            save_ppm(std::filesystem::path(dir) / (std::string(fixture.name) + "_gpu.ppm"), gpuMaterial);
+            save_ppm(std::filesystem::path(dir) / (std::string(fixture.name) + "_diff.ppm"), difference);
+        }
+    }
+    scene.objects[1].materials = {};
+
+    // ORM red is baked occlusion, independent of its roughness and metallic channels.
+    PlayerRenderView bakedView = view;
+    bakedView.environment.sunIntensity = 0.0F;
+    editedMaterials[9] = default_voxel_material(9);
+    editedMaterials[9].baseColor = {0.8F, 0.8F, 0.8F, 1.0F};
+    editedMaterials[9].ormMap = make_voxel_image("open ORM", 1, 1, {255, 255, 255, 255}, VoxelImageRole::Data);
+    scene.objects[1].materials = editedMaterials;
+    bool bakedOk = gpu->render(bakedView, &error) && gpu->present(&error);
+    require(bakedOk, "open baked occlusion frame: " + error);
+    const Rgba8Image openOrm = *gpu->readback();
+    editedMaterials[9].ormMap = make_voxel_image("occluded ORM", 1, 1, {0, 255, 255, 255}, VoxelImageRole::Data);
+    bakedOk = gpu->render(bakedView, &error) && gpu->present(&error);
+    require(bakedOk, "occluded baked frame: " + error);
+    const Rgba8Image darkOrm = *gpu->readback();
+    std::size_t darkenedPixels = 0;
+    for (std::size_t i = 0; i < openOrm.pixels.size(); i += 4U)
+        if (int(openOrm.pixels[i]) > int(darkOrm.pixels[i]) + 4) ++darkenedPixels;
+    require(darkenedPixels > 100U, "baked ORM occlusion must darken GPU ambient lighting");
+    scene.objects[1].materials = {};
+
     // Ambient occlusion on: crevices (tower base, under the crate) darken on both renderers.
     // The sun is off so the image is ambient light only, which is what AO scales.
     PlayerRenderView flatView = view;
@@ -286,7 +406,10 @@ int run() {
             const bool refOk = cpuRef->render(giView, &error) && cpuRef->present(&error);
             require(refOk, "CPU one-bounce reference failed: " + error);
             const Rgba8Image reference = *cpuRef->readback();
-            const bool bounceOk = giGpu->render(giView, &error) && giGpu->present(&error);
+            // The GPU one-bounce GI accumulates over frames (half-resolution rays + history).
+            bool bounceOk = true;
+            for (int frame = 0; frame < 12 && bounceOk; ++frame)
+                bounceOk = giGpu->render(giView, &error) && giGpu->present(&error);
             require(bounceOk, "GPU one-bounce frame failed: " + error);
             const Rgba8Image bounce = *giGpu->readback();
             const bool ambientOk = gpu->render(giView, &error) && gpu->present(&error);
@@ -320,6 +443,83 @@ int run() {
                     std::string("radiance cascades (sun ") + (sunOn ? "on" : "off") +
                         ") differ too much from the CPU one-bounce reference");
         }
+    }
+
+    // Physical sky: background, sky light and sun colour come from the atmosphere model, like the CPU.
+    {
+        PlayerRenderView skyView = view;
+        skyView.environment.skyMode = SkyMode::Physical;
+        skyView.environment.globalIlluminationMode = GlobalIlluminationMode::VoxelOneBounce;
+        skyView.environment.globalIlluminationSamples = 16U;
+        skyView.environment.globalIlluminationMaxDistanceMeters = 8.0F;
+        CpuPlayerRendererOptions refOptions;
+        refOptions.quality = CpuRenderQuality::Reference;
+        refOptions.threadCount = 2U;
+        std::unique_ptr<IPlayerRenderer> cpuSky = make_cpu_player_renderer(nullptr, refOptions);
+        require(cpuSky->resize(kWidth, kHeight, &error), error);
+        const bool refOk = cpuSky->render(skyView, &error) && cpuSky->present(&error);
+        require(refOk, "CPU physical-sky reference failed: " + error);
+        const Rgba8Image reference = *cpuSky->readback();
+        VulkanPlayerRendererOptions skyOptions;
+        skyOptions.globalIllumination = PlayerGlobalIlluminationMode::VoxelOneBounce;
+        std::unique_ptr<IPlayerRenderer> skyGpu = make_vulkan_player_renderer(skyOptions, &error);
+        require(skyGpu != nullptr && skyGpu->resize(kWidth, kHeight, &error), "physical-sky renderer: " + error);
+        const bool skyOk = skyGpu->render(skyView, &error) && skyGpu->present(&error);
+        require(skyOk, "GPU physical-sky frame failed: " + error);
+        const Rgba8Image physical = *skyGpu->readback();
+        // The sun moves: the sky is rebuilt without recreating the live renderer.
+        for (const float elevation : {0.9F, 0.6F, 0.35F}) {
+            PlayerRenderView moved = skyView;
+            moved.environment.sunDirection = {std::cos(elevation), std::sin(elevation), 0.2F};
+            const auto t0 = std::chrono::steady_clock::now();
+            const bool movedOk = skyGpu->render(moved, &error) && skyGpu->present(&error);
+            require(movedOk, "GPU frame after the sun moved failed: " + error);
+            std::cout << "physical sky, sun elevation " << elevation << ": frame "
+                      << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() << " ms\n";
+        }
+        // Aerial perspective: exaggerated (the test scene is ten metres across) so the haze shows.
+        {
+            PlayerRenderView hazy = skyView;
+            hazy.environment.aerialPerspectiveScale = 600.0F;
+            hazy.environment.atmosphereMieScale = 4.0F;
+            const bool hazyRefOk = cpuSky->render(hazy, &error) && cpuSky->present(&error);
+            require(hazyRefOk, "CPU aerial-perspective reference failed: " + error);
+            const Rgba8Image hazyReference = *cpuSky->readback();
+            bool hazyOk = true;
+            for (int frame = 0; frame < 3 && hazyOk; ++frame) hazyOk = skyGpu->render(hazy, &error) && skyGpu->present(&error);
+            require(hazyOk, "GPU aerial-perspective frame failed: " + error);
+            const Rgba8Image hazyGpu = *skyGpu->readback();
+            const bool clearOk = skyGpu->render(skyView, &error) && skyGpu->present(&error);
+            require(clearOk, "GPU clear-air frame failed: " + error);
+            const Rgba8Image clearGpu = *skyGpu->readback();
+            Rgba8Image hazyDiffImage;
+            const Diff hazyDiff = compare(hazyReference, hazyGpu, hazyDiffImage);
+            const Diff clearDiff = compare(hazyReference, clearGpu, hazyDiffImage);
+            std::cout << "aerial perspective: GPU mean |error| vs CPU " << hazyDiff.meanAbsoluteError
+                      << " (same view without haze: " << clearDiff.meanAbsoluteError << ")\n";
+            if (const char* dir = std::getenv("DVE_PLAYER_GPU_DIFF_DIR")) {
+                save_ppm(std::filesystem::path(dir) / "cpu_haze.ppm", hazyReference);
+                save_ppm(std::filesystem::path(dir) / "gpu_haze.ppm", hazyGpu);
+            }
+            require(hazyDiff.meanAbsoluteError < clearDiff.meanAbsoluteError * 0.5 + 0.5,
+                    "GPU aerial perspective does not match the CPU reference");
+        }
+        PlayerRenderView colourView = skyView;
+        colourView.environment.skyMode = SkyMode::Colors;
+        const bool colourOk = skyGpu->render(colourView, &error) && skyGpu->present(&error);
+        require(colourOk, "GPU colour-sky frame failed: " + error);
+        const Rgba8Image colours = *skyGpu->readback();
+        Rgba8Image diffImage;
+        const Diff physicalDiff = compare(reference, physical, diffImage);
+        const Diff colourDiff = compare(reference, colours, diffImage);
+        std::cout << "physical sky: GPU mean |error| vs CPU " << physicalDiff.meanAbsoluteError
+                  << " (colour-sky GPU frame: " << colourDiff.meanAbsoluteError << ")\n";
+        if (const char* dir = std::getenv("DVE_PLAYER_GPU_DIFF_DIR")) {
+            save_ppm(std::filesystem::path(dir) / "cpu_physical.ppm", reference);
+            save_ppm(std::filesystem::path(dir) / "gpu_physical.ppm", physical);
+        }
+        require(physicalDiff.meanAbsoluteError < 4.0 && physicalDiff.meanAbsoluteError < colourDiff.meanAbsoluteError,
+                "GPU physical sky does not match the CPU reference");
     }
 
     // Same view again: cached meshes, identical frame.

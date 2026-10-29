@@ -22,7 +22,25 @@ DVE_LIVE_BIND(1,0) cbuffer PlayerSsaoConstants : register(b0) {
     float4 gRcLevel;         // radiance cascades: x level, y direction map size, z probe spacing px, w level count
     float4 gRcProbes;        // x probes across, y probes down, z / w the same for the level above
     float4 gRcInterval;      // x ray interval start m, y end m, z direction map size above, w 1 on the top level
+    float4 gSkyMode;         // x 0: sky/ground colours, 1: physical sky (sampled from gSkyRadiance / gSkyIrradiance)
+    float4x4 gPreviousViewProjection;
+    float4 gPreviousCamera;  // xyz previous frame camera position, w frame counter (uint bits)
+    float4 gGiTemporal;      // x history blend, y 1 when there is no usable history, zw half-resolution size (px)
 };
+
+// One-bounce GI runs at half resolution: raw rays (gGiRaw), the accumulated history (gGiHistory),
+// both RGBA16F with the camera distance of the surface in alpha (raw: 1 = traced, 0 = no surface).
+DVE_LIVE_IMAGE(7,0) Texture2D<float4> gGiRaw : register(t7);
+DVE_LIVE_IMAGE(7,0) SamplerState gGiRawSampler : register(s7);
+DVE_LIVE_IMAGE(8,0) Texture2D<float4> gGiHistory : register(t8);
+DVE_LIVE_IMAGE(8,0) SamplerState gGiHistorySampler : register(s8);
+
+// The full-resolution pixel a half-resolution texel traces this frame (2x2 jitter over 4 frames).
+int2 HalfTexelPixel(int2 texel) {
+    const uint phase = asuint(gPreviousCamera.w) & 3u;
+    const int2 jitter = phase == 0u ? int2(0, 0) : phase == 1u ? int2(1, 1) : phase == 2u ? int2(1, 0) : int2(0, 1);
+    return min(texel * 2 + jitter, int2(gTarget.xy) - 1);
+}
 
 float3 WorldFromUv(float2 uv, float depth) {
     const float4 ndc = float4(uv.x * 2.0F - 1.0F, uv.y * 2.0F - 1.0F, depth, 1.0F);

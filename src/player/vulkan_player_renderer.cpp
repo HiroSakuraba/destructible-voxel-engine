@@ -4,6 +4,8 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <numbers>
 #include <span>
@@ -14,6 +16,7 @@
 #include "dve/environment_lighting.hpp"
 #include "dve/game_world.hpp"
 #include "dve/gpu_render_environment.hpp"
+#include "dve/render/atmosphere.hpp"
 #include "dve/render/cascaded_shadow_atlas.hpp"
 #include "dve/render/cascaded_shadow_map.hpp"
 #include "dve/render/environment_lighting_gpu.hpp"
@@ -138,8 +141,30 @@ std::array<float, 16> rigid_matrix(const RigidTransform& transform) noexcept {
 
 // Sky light from the environment's sky/ground colours: the same hemisphere the CPU renderer
 // uses for ambient (ShadeAmbient), as a small cube the IBL baker integrates.
-EnvironmentLightingAsset sky_environment_asset(Float3 sky, Float3 ground) {
-    constexpr std::uint32_t kResolution = 16U;
+// The environment's sky model. Physical sky: built for the sun at azimuth 0 and an elevation
+// rounded to whole degrees, and queried with directions rotated by the sun's real azimuth, so
+// turning the sun costs no new atmosphere tables (a new elevation builds them, ~0.2 s).
+struct SkySampler {
+    RenderEnvironment environment;
+    bool physical{};
+    float cosAzimuth{1.0F}, sinAzimuth{};
+
+    [[nodiscard]] Float3 canonical(Float3 d) const noexcept {
+        return {d.x * cosAzimuth + d.z * sinAzimuth, d.y, -d.x * sinAzimuth + d.z * cosAzimuth};
+    }
+    [[nodiscard]] Float3 radiance(Float3 d) const { return render::sky_radiance(environment, physical ? canonical(d) : d); }
+    [[nodiscard]] Float3 irradiance(Float3 d) const { return render::sky_irradiance(environment, physical ? canonical(d) : d); }
+    // Colour x intensity x transmittance at the observer (colour x intensity in Colours mode).
+    [[nodiscard]] Float3 sun_light() const {
+        if (physical) return render::sun_irradiance(environment);
+        return {environment.sunColor.x * environment.sunIntensity, environment.sunColor.y * environment.sunIntensity,
+                environment.sunColor.z * environment.sunIntensity};
+    }
+};
+
+EnvironmentLightingAsset sky_environment_asset(const SkySampler& sky) {
+    const bool physical = sky.physical;
+    const std::uint32_t kResolution = physical ? 32U : 16U;
     EnvironmentLightingAsset asset;
     asset.name = "Player sky";
     asset.sourceRadiance.resolution = kResolution;
@@ -149,11 +174,10 @@ EnvironmentLightingAsset sky_environment_asset(Float3 sky, Float3 ground) {
             for (std::uint32_t x = 0; x < kResolution; ++x) {
                 const Float3 d = cube_lookup_to_direction(static_cast<CubeFace>(face),
                     {(static_cast<float>(x) + 0.5F) / kResolution, (static_cast<float>(y) + 0.5F) / kResolution});
-                const float t = std::clamp(0.5F + 0.5F * d.y, 0.0F, 1.0F);
+                // Colours mode: the sky/ground blend; Physical: the atmosphere (same convention).
                 asset.sourceRadiance.texels[asset.sourceRadiance.face_offset(static_cast<CubeFace>(face)) +
-                                            static_cast<std::size_t>(y) * kResolution + x] = {
-                    ground.x + (sky.x - ground.x) * t, ground.y + (sky.y - ground.y) * t,
-                    ground.z + (sky.z - ground.z) * t};
+                                            static_cast<std::size_t>(y) * kResolution + x] =
+                    sky.radiance(d);
             }
     IblBakeSettings settings;
     settings.irradianceResolution = 8U;
@@ -164,6 +188,21 @@ EnvironmentLightingAsset sky_environment_asset(Float3 sky, Float3 ground) {
     asset.baked = bake_image_based_lighting(asset.sourceRadiance, settings);
     asset.recompute_content_hash();
     return asset;
+}
+
+std::uint16_t float_to_half(float value) noexcept {
+    std::uint32_t bits;
+    std::memcpy(&bits, &value, sizeof(bits));
+    const std::uint32_t sign = (bits >> 16U) & 0x8000U;
+    const std::int32_t exponent = static_cast<std::int32_t>((bits >> 23U) & 0xFFU) - 127 + 15;
+    std::uint32_t mantissa = bits & 0x7FFFFFU;
+    if (exponent >= 31) return static_cast<std::uint16_t>(sign | 0x7BFFU);   // clamp to the largest finite half
+    if (exponent <= 0) {
+        if (exponent < -10) return static_cast<std::uint16_t>(sign);
+        mantissa = (mantissa | 0x800000U) >> static_cast<std::uint32_t>(1 - exponent);
+        return static_cast<std::uint16_t>(sign | ((mantissa + 0x1000U) >> 13U));
+    }
+    return static_cast<std::uint16_t>(sign | (static_cast<std::uint32_t>(exponent) << 10U) | ((mantissa + 0x1000U) >> 13U));
 }
 
 const std::array<VoxelMaterialDefinition, 256>& default_palette() {
@@ -192,10 +231,22 @@ public:
         if (presentSampler_) (void)device_->destroy_sampler(presentSampler_, &ignored);
         if (depthSampler_) (void)device_->destroy_sampler(depthSampler_, &ignored);
         if (giPipeline_) (void)device_->destroy_graphics_pipeline(giPipeline_, &ignored);
+        if (giTemporalPipeline_) (void)device_->destroy_graphics_pipeline(giTemporalPipeline_, &ignored);
+        if (giUpsamplePipeline_) (void)device_->destroy_graphics_pipeline(giUpsamplePipeline_, &ignored);
         if (rcCascadePipeline_) (void)device_->destroy_graphics_pipeline(rcCascadePipeline_, &ignored);
         if (rcGatherPipeline_) (void)device_->destroy_graphics_pipeline(rcGatherPipeline_, &ignored);
         for (rhi::BufferHandle& buffer : rcConstants_)
             if (buffer) { (void)device_->destroy_buffer(buffer, &ignored); buffer = {}; }
+        if (aerialTransmittanceView_) (void)device_->destroy_texture_view(aerialTransmittanceView_, &ignored);
+        if (aerialInscatterView_) (void)device_->destroy_texture_view(aerialInscatterView_, &ignored);
+        if (aerialTransmittance_) (void)device_->destroy_texture(aerialTransmittance_, &ignored);
+        if (aerialInscatter_) (void)device_->destroy_texture(aerialInscatter_, &ignored);
+        if (aerialSampler_) (void)device_->destroy_sampler(aerialSampler_, &ignored);
+        if (skyRadianceView_) (void)device_->destroy_texture_view(skyRadianceView_, &ignored);
+        if (skyIrradianceView_) (void)device_->destroy_texture_view(skyIrradianceView_, &ignored);
+        if (skyRadianceTexture_) (void)device_->destroy_texture(skyRadianceTexture_, &ignored);
+        if (skyIrradianceTexture_) (void)device_->destroy_texture(skyIrradianceTexture_, &ignored);
+        if (skySampler_) (void)device_->destroy_sampler(skySampler_, &ignored);
         if (rcDummyView_) (void)device_->destroy_texture_view(rcDummyView_, &ignored);
         if (rcDummy_) (void)device_->destroy_texture(rcDummy_, &ignored);
         if (gridPalette_) (void)device_->destroy_buffer(gridPalette_, &ignored);
@@ -254,11 +305,52 @@ public:
         sampler.debugName = "player depth sampler";
         depthSampler_ = device_->create_sampler(sampler, error);
         if (!depthSampler_) return false;
+        {
+            rhi::SamplerDesc skySampler;
+            skySampler.addressU = rhi::AddressMode::Repeat;
+            skySampler.addressV = skySampler.addressW = rhi::AddressMode::ClampToEdge;
+            skySampler.mipmapFilter = rhi::MipmapFilterMode::Nearest;
+            skySampler.debugName = "player sky sampler";
+            skySampler_ = device_->create_sampler(skySampler, error);
+            if (!skySampler_) return false;
+            const auto sky_texture = [&](std::uint32_t w, std::uint32_t h, const char* name, rhi::TextureHandle& texture,
+                                         rhi::TextureViewHandle& viewHandle) {
+                rhi::TextureDesc desc;
+                desc.format = rhi::TextureFormat::RGBA16Float;
+                desc.width = w; desc.height = h;
+                desc.usage = rhi::TextureUsage::Sampled | rhi::TextureUsage::CopyDestination;
+                desc.initialState = ResourceState::ShaderRead;
+                desc.debugName = name;
+                texture = device_->create_texture(desc, error);
+                if (!texture) return false;
+                viewHandle = device_->create_texture_view({texture, 0U, 1U, 0U, 1U, name}, error);
+                if (!viewHandle) return false;
+                const std::vector<std::uint16_t> zeros(static_cast<std::size_t>(w) * h * 4U, 0U);
+                return device_->write_texture(texture, 0U, 0U, std::as_bytes(std::span(zeros)),
+                                              static_cast<std::size_t>(w) * 8U, error);
+            };
+            rhi::SamplerDesc aerialSampler;
+            aerialSampler.addressU = aerialSampler.addressV = aerialSampler.addressW = rhi::AddressMode::ClampToEdge;
+            aerialSampler.mipmapFilter = rhi::MipmapFilterMode::Nearest;
+            aerialSampler.debugName = "player aerial perspective sampler";
+            aerialSampler_ = device_->create_sampler(aerialSampler, error);
+            if (!aerialSampler_) return false;
+            if (!sky_texture(kAerialSlices * kAerialHeights, kAerialDistances, "player aerial transmittance",
+                             aerialTransmittance_, aerialTransmittanceView_) ||
+                !sky_texture(kAerialSlices * kAerialHeights, kAerialDistances, "player aerial in-scatter",
+                             aerialInscatter_, aerialInscatterView_)) return false;
+            if (!sky_texture(kSkyWidth, kSkyHeight, "player sky radiance", skyRadianceTexture_, skyRadianceView_) ||
+                !sky_texture(kSkyIrradianceWidth, kSkyIrradianceHeight, "player sky irradiance", skyIrradianceTexture_,
+                             skyIrradianceView_)) return false;
+        }
         rhi::BindGroupLayoutDesc layout;
         layout.debugName = "player present layout";
         layout.bindings = {{0U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment},
                            {1U, rhi::BindingType::UniformBuffer, rhi::ShaderStage::Fragment},
-                           {2U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment}};
+                           {2U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment},
+                           {3U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment},
+                           {4U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment},
+                           {5U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment}};
         presentLayout_ = device_->create_bind_group_layout(layout, error);
         if (!presentLayout_) return false;
         aoConstants_ = device_->create_buffer({512U, rhi::BufferUsage::Constant, rhi::MemoryDomain::Upload,
@@ -293,7 +385,11 @@ public:
                              {1U, rhi::BindingType::UniformBuffer, rhi::ShaderStage::Fragment},
                              {2U, rhi::BindingType::StorageBufferReadOnly, rhi::ShaderStage::Fragment},
                              {3U, rhi::BindingType::StorageBufferReadOnly, rhi::ShaderStage::Fragment},
-                             {4U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment}};
+                             {4U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment},
+                             {5U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment},
+                             {6U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment},
+                             {7U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment},
+                             {8U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment}};
         aoLayout_ = device_->create_bind_group_layout(aoLayout, error);
         if (!aoLayout_) return false;
         {
@@ -318,6 +414,16 @@ public:
             desc.colorFormat = rhi::TextureFormat::RGBA16Float;
             giPipeline_ = device_->create_graphics_pipeline(desc, error);
             if (!giPipeline_) return false;
+            if (shader_blobs::player_gi_temporal_ps().size() > 0U && shader_blobs::player_gi_upsample_ps().size() > 0U) {
+                desc.debugName = "player GI temporal";
+                desc.fragmentBytecode = copy_bytes(shader_blobs::player_gi_temporal_ps());
+                giTemporalPipeline_ = device_->create_graphics_pipeline(desc, error);
+                if (!giTemporalPipeline_) return false;
+                desc.debugName = "player GI upsample";
+                desc.fragmentBytecode = copy_bytes(shader_blobs::player_gi_upsample_ps());
+                giUpsamplePipeline_ = device_->create_graphics_pipeline(desc, error);
+                if (!giUpsamplePipeline_) return false;
+            }
             if (shader_blobs::player_rc_cascade_ps().size() > 0U && shader_blobs::player_rc_gather_ps().size() > 0U) {
                 desc.debugName = "player radiance cascade";
                 desc.fragmentBytecode = copy_bytes(shader_blobs::player_rc_cascade_ps());
@@ -395,7 +501,9 @@ public:
         group.layout = presentLayout_;
         group.debugName = "player present group";
         group.entries = {{0U, {}, hdrView_, 0U, 0U, presentSampler_}, {1U, presentConstants_, {}, 0U, 256U, {}},
-                         {2U, {}, depthView_, 0U, 0U, depthSampler_}};
+                         {2U, {}, depthView_, 0U, 0U, depthSampler_}, {3U, {}, skyRadianceView_, 0U, 0U, skySampler_},
+                         {4U, {}, aerialTransmittanceView_, 0U, 0U, aerialSampler_},
+                         {5U, {}, aerialInscatterView_, 0U, 0U, aerialSampler_}};
         presentGroup_ = device_->create_bind_group(group, error);
         if (!presentGroup_) return false;
         rhi::TextureDesc ao;
@@ -415,6 +523,24 @@ public:
         if (!giTexture_) return false;
         giView_ = device_->create_texture_view({giTexture_, 0U, 1U, 0U, 1U, "player indirect light view"}, error);
         if (!giView_) return false;
+        {
+            rhi::TextureDesc half = ao;
+            half.format = rhi::TextureFormat::RGBA16Float;
+            half.width = halfWidth(); half.height = halfHeight();
+            half.debugName = "player GI raw";
+            giRaw_ = device_->create_texture(half, error);
+            if (!giRaw_) return false;
+            giRawView_ = device_->create_texture_view({giRaw_, 0U, 1U, 0U, 1U, "player GI raw view"}, error);
+            if (!giRawView_) return false;
+            for (std::size_t i = 0; i < 2U; ++i) {
+                half.debugName = "player GI history";
+                giHistory_[i] = device_->create_texture(half, error);
+                if (!giHistory_[i]) return false;
+                giHistoryViews_[i] = device_->create_texture_view({giHistory_[i], 0U, 1U, 0U, 1U, "player GI history view"}, error);
+                if (!giHistoryViews_[i]) return false;
+            }
+            historyValid_ = false;
+        }
         for (std::size_t level = 0; level < kRcLevels; ++level) {
             const std::uint32_t spacing = kRcBaseSpacing << level;
             const std::uint32_t dirRes = kRcBaseDirections << level;
@@ -453,9 +579,27 @@ public:
         exposure_ = options_.exposure * (environment.exposure > 0.0F ? environment.exposure : 1.0F);
         tonemapOperator_ = static_cast<std::uint32_t>(environment.tonemapOperator);
         skyColor_ = environment.skyColor;
+        presentSky_ = {};
 
         const float aspect = static_cast<float>(width_) / static_cast<float>(height_);
         const CameraFrame camera = camera_frame(view.camera, aspect);
+        if (environment.skyMode == SkyMode::Physical) {
+            presentSky_.background = 3U;
+            presentSky_.inverseViewProjection = invert(camera.viewProjection);
+            presentSky_.cameraPosition = {camera.position.x, camera.position.y, camera.position.z, 1.0F};
+            const Float3 sun = unit(environment.sunDirection, {0.0F, 1.0F, 0.0F});
+            presentSky_.sunDirection = {sun.x, sun.y, sun.z, std::cos(render::kSunAngularRadius)};
+            if (!update_aerial(view, environment, error)) return false;
+            if (environment.sunDisc > 0.0F) {
+                // The disc's radiance: sun irradiance over its solid angle, drawn as pi x radiance (CPU background_radiance).
+                const double solidAngle = 2.0 * std::numbers::pi * (1.0 - std::cos(static_cast<double>(render::kSunAngularRadius)));
+                const Float3 irradiance = sky_.sun_light();
+                const float scale = static_cast<float>(std::numbers::pi / solidAngle) * environment.sunDisc;
+                presentSky_.sunDisc = {irradiance.x * scale, irradiance.y * scale, irradiance.z * scale, 0.0F};
+            } else {
+                presentSky_.sunDirection[3] = 2.0F;
+            }
+        }
 
         // Geometry: voxel objects -> cached greedy meshes, polygons -> cached uploads.
         draws_.clear();
@@ -521,9 +665,11 @@ public:
         head[19] = static_cast<float>(std::max(lighting_.specularMipLevels, 1U) - 1U);
         head[20] = camera.position.x; head[21] = camera.position.y; head[22] = camera.position.z; head[23] = 1.0F;
         std::memcpy(constants.data(), head.data(), sizeof(head));
+        // Physical sky: the sun's colour is what reaches the ground (transmittance applied).
+        const Float3 sunLight = sky_.sun_light();
         const render::GpuLiveSunConstants sun = render::make_live_sun_constants(
-            shadowsOn ? &plan : nullptr, environment.sunDirection, environment.sunColor,
-            sunOn ? environment.sunIntensity * std::numbers::pi_v<float> : 0.0F,
+            shadowsOn ? &plan : nullptr, environment.sunDirection, sunLight,
+            sunOn ? std::numbers::pi_v<float> : 0.0F,
             environment.shadowStrength, camera.forward);
         std::memcpy(constants.data() + render::kLiveSunConstantsOffset, &sun, sizeof(sun));
 
@@ -533,12 +679,11 @@ public:
                           environment.globalIlluminationMode != GlobalIlluminationMode::Off && !draws_.empty();
         const bool aoTraced = aoOn && options_.ambientOcclusionMode == PlayerAmbientOcclusionMode::VoxelTraced &&
                               shader_blobs::player_traced_ao_ps().size() > 0U;
-        // Traced indirect light (Colours sky only: the traced sky is the sky/ground blend).
+        // Traced indirect light; sky misses read the sky tables in Physical mode.
         const bool giTraced = options_.globalIllumination != PlayerGlobalIlluminationMode::Ambient &&
                               environment.globalIlluminationMode != GlobalIlluminationMode::Off &&
                               environment.globalIlluminationIntensity > 0.0F &&
-                              environment.skyMode == SkyMode::Colors && !draws_.empty() &&
-                              shader_blobs::player_traced_gi_ps().size() > 0U;
+                              !draws_.empty() && shader_blobs::player_traced_gi_ps().size() > 0U;
         const bool giCascades = giTraced && options_.globalIllumination == PlayerGlobalIlluminationMode::RadianceCascades &&
                                 rcCascadePipeline_ && rcGatherPipeline_ && rcViews_[0];
         if ((aoTraced || giTraced) && !update_scene_grid(view, view.camera.position, error))
@@ -602,9 +747,30 @@ public:
         group.entries = {{0U, {}, depthView_, 0U, 0U, depthSampler_}, {1U, aoConstants_, {}, 0U, 512U, {}},
                          {2U, gridBuffer_, {}, 0U, gridCapacity_, {}},
                          {3U, gridPalette_, {}, 0U, 256U * sizeof(render::SceneGridMaterial), {}},
-                         {4U, {}, rcDummyView_, 0U, 0U, depthSampler_}};
+                         {4U, {}, rcDummyView_, 0U, 0U, depthSampler_},
+                         {5U, {}, skyRadianceView_, 0U, 0U, skySampler_},
+                         {6U, {}, skyIrradianceView_, 0U, 0U, skySampler_},
+                         {7U, {}, rcDummyView_, 0U, 0U, depthSampler_},
+                         {8U, {}, rcDummyView_, 0U, 0U, depthSampler_}};
         aoGroup_ = device_->create_bind_group(group, error);
         if (!aoGroup_) return false;
+        // One-bounce GI denoise groups.
+        for (std::size_t i = 0; i < 2U; ++i) {
+            if (giTemporalGroups_[i]) { (void)device_->destroy_bind_group(giTemporalGroups_[i], &ignored); giTemporalGroups_[i] = {}; }
+            if (giUpsampleGroups_[i]) { (void)device_->destroy_bind_group(giUpsampleGroups_[i], &ignored); giUpsampleGroups_[i] = {}; }
+            if (!giRawView_ || !giHistoryViews_[i]) continue;
+            rhi::BindGroupDesc temporal = group;
+            temporal.debugName = "player GI temporal group";
+            temporal.entries[7] = {7U, {}, giRawView_, 0U, 0U, depthSampler_};
+            temporal.entries[8] = {8U, {}, giHistoryViews_[i], 0U, 0U, depthSampler_};
+            giTemporalGroups_[i] = device_->create_bind_group(temporal, error);
+            if (!giTemporalGroups_[i]) return false;
+            rhi::BindGroupDesc upsample = group;
+            upsample.debugName = "player GI upsample group";
+            upsample.entries[8] = {8U, {}, giHistoryViews_[i], 0U, 0U, depthSampler_};
+            giUpsampleGroups_[i] = device_->create_bind_group(upsample, error);
+            if (!giUpsampleGroups_[i]) return false;
+        }
         // Radiance cascade groups: one per level (reads the level above) and one for the gather.
         for (std::size_t i = 0; i < kRcLevels + 1U; ++i) {
             if (rcGroups_[i]) { (void)device_->destroy_bind_group(rcGroups_[i], &ignored); rcGroups_[i] = {}; }
@@ -642,9 +808,24 @@ public:
         if (grid_.empty()) return true;
         if (!changed && gridUploaded_) return true;
         const auto cells = grid_.cells();
-        if (!ensure_grid_buffer(cells.size(), error)) return false;
+        // Fine cells, padded to whole words, then one occupancy byte per 8x8x8 block (see
+        // scene_voxel_trace.hlsli).
+        const auto dims = grid_.dimensions();
+        const std::array<std::uint32_t, 3> coarseDims{(dims[0] + 7U) / 8U, (dims[1] + 7U) / 8U, (dims[2] + 7U) / 8U};
         std::vector<std::uint8_t> padded(cells.begin(), cells.end());
         padded.resize((padded.size() + 3U) & ~std::size_t{3U});
+        coarseOffsetWords_ = static_cast<std::uint32_t>(padded.size() / 4U);
+        std::vector<std::uint8_t> coarse(static_cast<std::size_t>(coarseDims[0]) * coarseDims[1] * coarseDims[2], 0U);
+        for (std::uint32_t z = 0; z < dims[2]; ++z)
+            for (std::uint32_t y = 0; y < dims[1]; ++y) {
+                const std::size_t row = (static_cast<std::size_t>(z) * dims[1] + y) * dims[0];
+                const std::size_t coarseRow = (static_cast<std::size_t>(z / 8U) * coarseDims[1] + y / 8U) * coarseDims[0];
+                for (std::uint32_t x = 0; x < dims[0]; ++x)
+                    if (cells[row + x] != 0U) coarse[coarseRow + x / 8U] = 1U;
+            }
+        padded.insert(padded.end(), coarse.begin(), coarse.end());
+        padded.resize((padded.size() + 3U) & ~std::size_t{3U});
+        if (!ensure_grid_buffer(padded.size(), error)) return false;
         if (!device_->write_buffer(gridBuffer_, 0U, std::as_bytes(std::span(padded)), error)) return false;
         const auto palette = grid_.palette();
         if (!palette.empty() &&
@@ -689,6 +870,10 @@ public:
             std::array<float, 4> rcLevel;      // x level, y direction map size, z probe spacing px, w level count
             std::array<float, 4> rcProbes;     // x, y probes of this level; z, w of the level above
             std::array<float, 4> rcInterval;   // x start m, y end m, z direction map size above, w top level
+            std::array<float, 4> skyMode;      // x 0 colours, 1 physical (sky tables)
+            Matrix previousViewProjection;
+            std::array<float, 4> previousCamera;   // xyz position, w frame counter (uint bits)
+            std::array<float, 4> giTemporal;       // x history blend, y 1: no history, zw half-resolution size
         } constants{};
         constants.viewProjection = camera.viewProjection;
         constants.inverseViewProjection = invert(camera.viewProjection);
@@ -699,24 +884,55 @@ public:
         constants.params = {static_cast<float>(std::min(environment.ambientOcclusionSamples, 64U)),
                             environment.ambientOcclusionMaxDistanceMeters, std::max(environment.shadowBiasMeters, 1.0e-3F),
                             seedBits};
+        // History is only good while the lighting is: colour/intensity changes restart it, a moving
+        // sun just weights new rays more.
+        float historyBlend = 0.12F;
+        {
+            const std::vector<float> lightKey{environment.sunIntensity, environment.sunColor.x, environment.sunColor.y,
+                                              environment.sunColor.z, environment.skyColor.x, environment.skyColor.y,
+                                              environment.skyColor.z, environment.groundColor.x, environment.groundColor.y,
+                                              environment.groundColor.z, environment.globalIlluminationIntensity,
+                                              environment.skyMode == SkyMode::Physical ? 1.0F : 0.0F};
+            if (lightKey != giLightKey_) { historyValid_ = false; giLightKey_ = lightKey; }
+            const Float3 sun = unit(environment.sunDirection, {0.0F, 1.0F, 0.0F});
+            const float moved = sun.x * giSunDirection_.x + sun.y * giSunDirection_.y + sun.z * giSunDirection_.z;
+            if (moved < 0.9999F) historyBlend = 0.35F;
+            giSunDirection_ = sun;
+        }
+        constants.previousViewProjection = historyValid_ ? previousViewProjection_ : camera.viewProjection;
+        {
+            const auto frameBits = static_cast<std::uint32_t>(frameIndex_);
+            float frameFloat{};
+            std::memcpy(&frameFloat, &frameBits, sizeof(frameFloat));
+            constants.previousCamera = {previousCamera_.x, previousCamera_.y, previousCamera_.z, frameFloat};
+            constants.giTemporal = {historyBlend, historyValid_ ? 0.0F : 1.0F, static_cast<float>(halfWidth()),
+                                    static_cast<float>(halfHeight())};
+        }
         constants.target = {static_cast<float>(width_), static_cast<float>(height_), 1.0F / static_cast<float>(width_),
                             1.0F / static_cast<float>(height_)};
         {
             const Float3 sun = unit(environment.sunDirection, {0.0F, 1.0F, 0.0F});
             constants.sunDirection = {sun.x, sun.y, sun.z, environment.sunIntensity};
-            constants.sunColor = {environment.sunColor.x, environment.sunColor.y, environment.sunColor.z,
-                                  std::max(environment.shadowMaxDistanceMeters, 0.1F)};
+            Float3 sunTint = environment.sunColor;
+            if (environment.skyMode == SkyMode::Physical && environment.sunIntensity > 1.0e-6F) {
+                const Float3 reaching = sky_.sun_light();   // colour x intensity x transmittance
+                sunTint = {reaching.x / environment.sunIntensity, reaching.y / environment.sunIntensity,
+                           reaching.z / environment.sunIntensity};
+            }
+            constants.skyMode = {environment.skyMode == SkyMode::Physical ? 1.0F : 0.0F, 0.0F, 0.0F, 0.0F};
+            constants.sunColor = {sunTint.x, sunTint.y, sunTint.z, std::max(environment.shadowMaxDistanceMeters, 0.1F)};
             constants.skyColor = {environment.skyColor.x, environment.skyColor.y, environment.skyColor.z,
                                   environment.globalIlluminationMaxDistanceMeters};
             constants.groundColor = {environment.groundColor.x, environment.groundColor.y, environment.groundColor.z,
-                                     static_cast<float>(std::clamp(environment.globalIlluminationSamples, 1U, 16U))};
+                                     static_cast<float>(std::clamp(options_.globalIlluminationRays > 0U ? options_.globalIlluminationRays : environment.globalIlluminationSamples, 1U, 128U))};
             if (!aoOn) constants.params[2] = std::max(environment.shadowBiasMeters, 1.0e-3F);
         }
         if ((aoTraced || giTraced) && !grid_.empty()) {
             const Float3 origin = grid_.origin();
             const auto dims = grid_.dimensions();
             constants.gridOrigin = {origin.x, origin.y, origin.z, grid_.cell_meters()};
-            constants.gridSize = {static_cast<float>(dims[0]), static_cast<float>(dims[1]), static_cast<float>(dims[2]), 0.0F};
+            constants.gridSize = {static_cast<float>(dims[0]), static_cast<float>(dims[1]), static_cast<float>(dims[2]),
+                                  static_cast<float>(coarseOffsetWords_)};
         }
         if (!device_->write_buffer(aoConstants_, 0U, std::as_bytes(std::span(&constants, 1U)), error)) return false;
         const rhi::CommandListHandle commands = device_->begin_commands(rhi::QueueKind::Graphics, "player ambient occlusion", error);
@@ -777,9 +993,23 @@ public:
             if (!device_->write_buffer(rcConstants_[kRcLevels], 0U, std::as_bytes(std::span(&gather, 1U)), error)) return false;
             if (!fullscreen_pass(giTexture_, rcGatherPipeline_, "player radiance cascade gather", 0.0F,
                                  rcGroups_[kRcLevels], width_, height_)) return false;
-        } else if (giTraced &&
-                   !fullscreen_pass(giTexture_, giPipeline_, "player traced indirect light", 0.0F, aoGroup_, width_, height_))
-            return false;
+        } else if (giTraced) {
+            const std::size_t current = 1U - giHistoryIndex_;
+            const std::size_t previous = giHistoryIndex_;
+            if (giTemporalPipeline_ && giUpsamplePipeline_ && giRaw_) {
+                if (!fullscreen_pass(giRaw_, giPipeline_, "player GI rays", 0.0F, aoGroup_, halfWidth(), halfHeight()) ||
+                    !fullscreen_pass(giHistory_[current], giTemporalPipeline_, "player GI temporal", 0.0F,
+                                     giTemporalGroups_[previous], halfWidth(), halfHeight()) ||
+                    !fullscreen_pass(giTexture_, giUpsamplePipeline_, "player GI upsample", 0.0F,
+                                     giUpsampleGroups_[current], width_, height_))
+                    return false;
+                giHistoryIndex_ = current;
+                historyValid_ = true;
+                previousViewProjection_ = camera.viewProjection;
+                previousCamera_ = camera.position;
+            }
+        }
+        if (!giTraced || giCascades) historyValid_ = false;
         if (!device_->transition_texture(commands, depth_, ResourceState::ShaderRead, ResourceState::DepthWrite, error))
             return false;
         return static_cast<bool>(device_->submit(commands, error));
@@ -812,6 +1042,7 @@ private:
         Float3 cell{};
         const VoxelMaterialDefinition* materials{};
         std::size_t materialCount{};
+        std::uint64_t materialHash{};
         CookedPolygonAsset asset;
         std::unique_ptr<render::MeshRhiMirror> mirror;
         std::uint64_t lastFrame{};
@@ -842,29 +1073,154 @@ private:
 
     // The sky light is baked from the environment's sky and ground colours; the live renderer's
     // bind groups reference the IBL textures, so a new sky rebuilds both.
+    // Chooses the sky model for this frame (see SkySampler); a new sun elevation is adopted at
+    // most every 300 ms so holding the elevation key does not rebuild the atmosphere every frame.
+    void update_sky(const RenderEnvironment& environment) {
+        sky_.environment = environment;
+        sky_.physical = environment.skyMode == SkyMode::Physical;
+        if (!sky_.physical) return;
+        const Float3 sun = unit(environment.sunDirection, {0.0F, 1.0F, 0.0F});
+        const int elevation = static_cast<int>(std::lround(std::asin(std::clamp(sun.y, -1.0F, 1.0F)) * 57.29578F));
+        const auto now = Clock::now();
+        if (!skyModelValid_ || (elevation != skyElevationDegrees_ &&
+                                std::chrono::duration<double, std::milli>(now - skyModelTime_).count() > 300.0)) {
+            skyElevationDegrees_ = elevation;
+            skyModelTime_ = now;
+            skyModelValid_ = true;
+        }
+        const float e = static_cast<float>(skyElevationDegrees_) * 0.017453293F;
+        sky_.environment.sunDirection = {std::cos(e), std::sin(e), 0.0F};
+        const float length = std::sqrt(sun.x * sun.x + sun.z * sun.z);
+        sky_.cosAzimuth = length > 1.0e-4F ? sun.x / length : 1.0F;
+        sky_.sinAzimuth = length > 1.0e-4F ? sun.z / length : 0.0F;
+    }
+
+    // Aerial perspective tables (see player_present_ps.hlsl): rebuilt when the sun elevation,
+    // the atmosphere, the camera's altitude band or the view range change.
+    bool update_aerial(const PlayerRenderView& view, const RenderEnvironment& environment, std::string* error) {
+        presentSky_.aerial = {};
+        if (!(environment.aerialPerspectiveScale > 0.0F)) return true;
+        const float range = std::clamp(view.camera.farPlane, 100.0F, 20000.0F);
+        const float altitude = environment.observerAltitudeMeters + view.camera.position.y;
+        const float altitudeBand = std::round(altitude / 25.0F) * 25.0F;
+        const std::vector<float> key{static_cast<float>(skyElevationDegrees_), environment.atmosphereRayleighScale,
+                                     environment.atmosphereMieScale, environment.atmosphereOzoneScale,
+                                     environment.atmosphereMieAnisotropy, environment.atmosphereGroundAlbedo,
+                                     environment.observerAltitudeMeters, altitudeBand, range};
+        if (key != aerialKey_) {
+            const auto model = render::atmosphere_model(sky_.environment);
+            if (!model) return true;
+            const std::uint32_t width = kAerialSlices * kAerialHeights;
+            std::vector<std::uint16_t> transmittance(static_cast<std::size_t>(width) * kAerialDistances * 4U);
+            std::vector<std::uint16_t> inscatter(transmittance.size());
+            const float pi = std::numbers::pi_v<float>;
+            for (std::uint32_t slice = 0; slice < kAerialSlices; ++slice)
+                for (std::uint32_t height = 0; height < kAerialHeights; ++height)
+                    for (std::uint32_t step = 0; step < kAerialDistances; ++step) {
+                        const float azimuth = static_cast<float>(slice) * pi / static_cast<float>(kAerialSlices - 1U);
+                        const float y = static_cast<float>(height) / static_cast<float>(kAerialHeights - 1U) * 2.0F - 1.0F;
+                        const float horizontal = std::sqrt(std::max(0.0F, 1.0F - y * y));
+                        const Float3 direction{horizontal * std::cos(azimuth), y, horizontal * std::sin(azimuth)};
+                        const float t = static_cast<float>(step) / static_cast<float>(kAerialDistances - 1U);
+                        const auto segment = model->segment(std::max(altitudeBand, 0.0F), direction, range * t * t, 12U);
+                        const std::size_t texel = (static_cast<std::size_t>(step) * width + slice * kAerialHeights + height) * 4U;
+                        const Float3 tr = step == 0U ? Float3{1.0F, 1.0F, 1.0F} : segment.transmittance;
+                        const Float3 in = step == 0U ? Float3{} : segment.inscattered;
+                        transmittance[texel] = float_to_half(tr.x); transmittance[texel + 1U] = float_to_half(tr.y);
+                        transmittance[texel + 2U] = float_to_half(tr.z); transmittance[texel + 3U] = float_to_half(1.0F);
+                        inscatter[texel] = float_to_half(in.x); inscatter[texel + 1U] = float_to_half(in.y);
+                        inscatter[texel + 2U] = float_to_half(in.z); inscatter[texel + 3U] = float_to_half(1.0F);
+                    }
+            device_->wait_idle();
+            if (!device_->write_texture(aerialTransmittance_, 0U, 0U, std::as_bytes(std::span(transmittance)),
+                                        static_cast<std::size_t>(width) * 8U, error) ||
+                !device_->write_texture(aerialInscatter_, 0U, 0U, std::as_bytes(std::span(inscatter)),
+                                        static_cast<std::size_t>(width) * 8U, error)) return false;
+            aerialKey_ = key;
+        }
+        constexpr float kPi = std::numbers::pi_v<float>;
+        presentSky_.aerial = {1.0F, range, environment.aerialPerspectiveScale, sky_.cosAzimuth};
+        presentSky_.aerialSun = {environment.sunColor.x * environment.sunIntensity * kPi,
+                                 environment.sunColor.y * environment.sunIntensity * kPi,
+                                 environment.sunColor.z * environment.sunIntensity * kPi, sky_.sinAzimuth};
+        return true;
+    }
+
     bool ensure_environment(const RenderEnvironment& environment, std::string* error) {
-        const std::array<float, 6> key{environment.skyColor.x, environment.skyColor.y, environment.skyColor.z,
-                                       environment.groundColor.x, environment.groundColor.y, environment.groundColor.z};
+        update_sky(environment);
+        const bool physical = sky_.physical;
+        std::vector<float> key{environment.skyColor.x, environment.skyColor.y, environment.skyColor.z,
+                               environment.groundColor.x, environment.groundColor.y, environment.groundColor.z,
+                               physical ? 1.0F : 0.0F};
+        if (physical) {
+            // The physical sky depends on the sun, the atmosphere and the observer: sample it.
+            static constexpr std::array<Float3, 7> kProbes{{{0.0F, 1.0F, 0.0F}, {1.0F, 0.3F, 0.0F}, {-1.0F, 0.1F, 0.4F},
+                                                              {0.2F, 0.05F, -1.0F}, {0.5F, 0.6F, 0.5F}, {0.0F, -1.0F, 0.0F},
+                                                              {0.7F, 0.0F, -0.7F}}};
+            for (const Float3& probe : kProbes) {
+                const Float3 d = unit(probe, {0.0F, 1.0F, 0.0F});
+                const Float3 radiance = sky_.radiance(d);
+                key.insert(key.end(), {radiance.x, radiance.y, radiance.z});
+            }
+            const Float3 sunLight = sky_.sun_light();
+            key.insert(key.end(), {sunLight.x, sunLight.y, sunLight.z, environment.sunDisc});
+        }
         if (lighting_.valid() && key == skyKey_) return true;
         device_->wait_idle();
-        if (live_.valid() && !render::destroy_live_environment_renderer(*device_, live_, error)) return false;
-        if (lighting_.valid() && !render::destroy_environment_lighting(*device_, lighting_, error)) return false;
-        // Cached meshes keep their GPU buffers; only material descriptor tables lived in live_,
-        // and the new live renderer rebuilds those on first use.
-        const EnvironmentLightingAsset asset = sky_environment_asset(environment.skyColor, environment.groundColor);
-        if (!render::upload_environment_lighting(*device_, asset, lighting_, error)) return false;
-        skyKey_ = key;
+        const EnvironmentLightingAsset asset = sky_environment_asset(sky_);
+        // A new sky (the sun moved, ...) rewrites the baked cubes in place: the live renderer's
+        // pipelines and bind groups keep pointing at the same textures.
+        if (lighting_.valid() && live_.valid()) {
+            std::string refreshError;
+            if (!render::refresh_environment_lighting(*device_, asset, lighting_, &refreshError)) {
+                set_error(error, refreshError);
+                return false;
+            }
+        } else {
+            if (live_.valid() && !render::destroy_live_environment_renderer(*device_, live_, error)) return false;
+            if (lighting_.valid() && !render::destroy_environment_lighting(*device_, lighting_, error)) return false;
+            if (!render::upload_environment_lighting(*device_, asset, lighting_, error)) return false;
+        }
+        if (physical && !upload_sky_tables(error)) return false;
+        skyKey_ = std::move(key);
         return true;
+    }
+
+    // Equirectangular radiance (by direction) and irradiance (by normal) tables of the physical sky.
+    bool upload_sky_tables(std::string* error) {
+        const auto fill = [&](std::uint32_t w, std::uint32_t h, bool irradiance, rhi::TextureHandle texture) {
+            std::vector<std::uint16_t> texels(static_cast<std::size_t>(w) * h * 4U);
+            for (std::uint32_t y = 0; y < h; ++y)
+                for (std::uint32_t x = 0; x < w; ++x) {
+                    const float phi = ((static_cast<float>(x) + 0.5F) / static_cast<float>(w) - 0.5F) * 2.0F * std::numbers::pi_v<float>;
+                    const float theta = (static_cast<float>(y) + 0.5F) / static_cast<float>(h) * std::numbers::pi_v<float>;
+                    const Float3 d{std::sin(theta) * std::cos(phi), std::cos(theta), std::sin(theta) * std::sin(phi)};
+                    const Float3 value = irradiance ? sky_.irradiance(d) : sky_.radiance(d);
+                    std::uint16_t* texel = &texels[(static_cast<std::size_t>(y) * w + x) * 4U];
+                    texel[0] = float_to_half(value.x); texel[1] = float_to_half(value.y);
+                    texel[2] = float_to_half(value.z); texel[3] = float_to_half(1.0F);
+                }
+            return device_->write_texture(texture, 0U, 0U, std::as_bytes(std::span(texels)),
+                                          static_cast<std::size_t>(w) * 8U, error);
+        };
+        return fill(kSkyWidth, kSkyHeight, false, skyRadianceTexture_) &&
+               fill(kSkyIrradianceWidth, kSkyIrradianceHeight, true, skyIrradianceTexture_);
     }
 
     VoxelMesh* voxel_mesh(const GameRenderObject& object, Float3 cell, std::string* error) {
         std::span<const VoxelMaterialDefinition> materials = object.materials;
         if (materials.empty()) materials = default_palette();
+        // A caller may edit a material in place without changing the table address.
+        // Reuse the asset's canonical material hashing, including extended material fields.
+        CookedPolygonAsset materialKey;
+        if (!object.materials.empty()) materialKey.materials.assign(materials.begin(), materials.end());
+        const std::uint64_t materialHash = object.materials.empty() ? 0U : polygon_asset_content_hash(materialKey);
         auto& mesh = voxelMeshes_[object.id];
         mesh.lastFrame = frameIndex_;
         const bool stale = !mesh.mirror || mesh.object != object.voxels || mesh.revision != object.voxels->revision() ||
                            mesh.cell.x != cell.x || mesh.cell.y != cell.y || mesh.cell.z != cell.z ||
-                           mesh.materials != materials.data() || mesh.materialCount != materials.size();
+                           mesh.materials != materials.data() || mesh.materialCount != materials.size() ||
+                           mesh.materialHash != materialHash;
         if (!stale) return &mesh;
         const std::uint64_t previousHash = mesh.asset.contentHash;
         render::VoxelSurfaceMeshOptions options;
@@ -880,6 +1236,7 @@ private:
         mesh.cell = cell;
         mesh.materials = materials.data();
         mesh.materialCount = materials.size();
+        mesh.materialHash = materialHash;
         return &mesh;
     }
 
@@ -926,9 +1283,17 @@ private:
             std::array<float, 4> tintExposure;
             std::array<std::uint32_t, 4> options;
             std::array<float, 4> skyColor;
+            Matrix inverseViewProjection;
+            std::array<float, 4> cameraPosition;
+            std::array<float, 4> sunDirection;
+            std::array<float, 4> sunDisc;
+            std::array<float, 4> aerial;
+            std::array<float, 4> aerialSun;
         } constants{{1.0F, 1.0F, 1.0F, exposure_},
-                    {tonemapOperator_, options_.skyGradient ? 2U : 1U, 0U, 0U},
-                    {skyColor_.x, skyColor_.y, skyColor_.z, 0.0F}};
+                    {tonemapOperator_, presentSky_.background != 0U ? presentSky_.background : (options_.skyGradient ? 2U : 1U), 0U, 0U},
+                    {skyColor_.x, skyColor_.y, skyColor_.z, 0.0F},
+                    presentSky_.inverseViewProjection, presentSky_.cameraPosition, presentSky_.sunDirection,
+                    presentSky_.sunDisc, presentSky_.aerial, presentSky_.aerialSun};
         if (!device_->write_buffer(presentConstants_, 0U, std::as_bytes(std::span(&constants, 1U)), error)) return false;
         const rhi::CommandListHandle commands = device_->begin_commands(rhi::QueueKind::Graphics, "player present", error);
         if (!commands) return false;
@@ -1021,6 +1386,17 @@ private:
         if (giView_) (void)device_->destroy_texture_view(giView_, &ignored);
         if (giTexture_) (void)device_->destroy_texture(giTexture_, &ignored);
         giView_ = {}; giTexture_ = {};
+        for (rhi::BindGroupHandle& g : giTemporalGroups_) if (g) { (void)device_->destroy_bind_group(g, &ignored); g = {}; }
+        for (rhi::BindGroupHandle& g : giUpsampleGroups_) if (g) { (void)device_->destroy_bind_group(g, &ignored); g = {}; }
+        for (std::size_t i = 0; i < 2U; ++i) {
+            if (giHistoryViews_[i]) (void)device_->destroy_texture_view(giHistoryViews_[i], &ignored);
+            if (giHistory_[i]) (void)device_->destroy_texture(giHistory_[i], &ignored);
+            giHistoryViews_[i] = {}; giHistory_[i] = {};
+        }
+        if (giRawView_) (void)device_->destroy_texture_view(giRawView_, &ignored);
+        if (giRaw_) (void)device_->destroy_texture(giRaw_, &ignored);
+        giRawView_ = {}; giRaw_ = {};
+        historyValid_ = false;
         for (rhi::BindGroupHandle& g : rcGroups_) if (g) { (void)device_->destroy_bind_group(g, &ignored); g = {}; }
         for (std::size_t i = 0; i < kRcLevels; ++i) {
             if (rcViews_[i]) (void)device_->destroy_texture_view(rcViews_[i], &ignored);
@@ -1059,6 +1435,24 @@ private:
     rhi::GraphicsPipelineHandle aoPipeline_{};
     rhi::GraphicsPipelineHandle tracedAoPipeline_{};
     rhi::GraphicsPipelineHandle giPipeline_{};
+    rhi::GraphicsPipelineHandle giTemporalPipeline_{};
+    rhi::GraphicsPipelineHandle giUpsamplePipeline_{};
+    // One-bounce GI at half resolution: raw rays, then an accumulated history (two, alternating).
+    rhi::TextureHandle giRaw_{};
+    rhi::TextureViewHandle giRawView_{};
+    std::array<rhi::TextureHandle, 2> giHistory_{};
+    std::array<rhi::TextureViewHandle, 2> giHistoryViews_{};
+    std::array<rhi::BindGroupHandle, 2> giTemporalGroups_{};   // reads giRaw_ + history[i]
+    std::array<rhi::BindGroupHandle, 2> giUpsampleGroups_{};   // reads history[i]
+    std::size_t giHistoryIndex_{};   // history written last frame
+    std::uint32_t coarseOffsetWords_{};   // where the block occupancy bytes start in the grid buffer
+    bool historyValid_{};
+    std::vector<float> giLightKey_;
+    Float3 giSunDirection_{0.0F, 1.0F, 0.0F};
+    Matrix previousViewProjection_{};
+    Float3 previousCamera_{};
+    [[nodiscard]] std::uint32_t halfWidth() const noexcept { return std::max(1U, (width_ + 1U) / 2U); }
+    [[nodiscard]] std::uint32_t halfHeight() const noexcept { return std::max(1U, (height_ + 1U) / 2U); }
     static constexpr std::size_t kRcLevels = 4U;
     static constexpr std::uint32_t kRcBaseSpacing = 8U;      // pixels between level-0 probes
     static constexpr std::uint32_t kRcBaseDirections = 4U;   // level-0 direction map is 4 x 4
@@ -1087,7 +1481,29 @@ private:
     render::EnvironmentLightingGpuResources lighting_{};
     render::CascadedShadowAtlasResources atlas_{};
     render::LiveEnvironmentRendererResources live_{};
-    std::array<float, 6> skyKey_{};
+    std::vector<float> skyKey_;
+    SkySampler sky_;
+    int skyElevationDegrees_{};
+    bool skyModelValid_{};
+    Clock::time_point skyModelTime_{};
+    static constexpr std::uint32_t kSkyWidth = 128U, kSkyHeight = 64U, kSkyIrradianceWidth = 32U, kSkyIrradianceHeight = 16U;
+    rhi::TextureHandle skyRadianceTexture_{}, skyIrradianceTexture_{};
+    rhi::TextureViewHandle skyRadianceView_{}, skyIrradianceView_{};
+    rhi::SamplerHandle skySampler_{};
+    struct PresentSky {
+        std::uint32_t background{};          // 0 follow the options, 3 physical sky
+        Matrix inverseViewProjection{};
+        std::array<float, 4> cameraPosition{};
+        std::array<float, 4> sunDirection{0.0F, 1.0F, 0.0F, 2.0F};   // w: cos of the disc radius (2: no disc)
+        std::array<float, 4> sunDisc{};
+        std::array<float, 4> aerial{};      // x 1: on, y table range m, z distance scale, w sun-azimuth cos
+        std::array<float, 4> aerialSun{};   // rgb sun top-of-atmosphere light x pi, w sun-azimuth sin
+    } presentSky_;
+    static constexpr std::uint32_t kAerialSlices = 9U, kAerialHeights = 16U, kAerialDistances = 24U;
+    rhi::TextureHandle aerialTransmittance_{}, aerialInscatter_{};
+    rhi::TextureViewHandle aerialTransmittanceView_{}, aerialInscatterView_{};
+    rhi::SamplerHandle aerialSampler_{};
+    std::vector<float> aerialKey_;
     std::unordered_map<GameObjectId, VoxelMesh> voxelMeshes_;
     std::unordered_map<const CookedPolygonAsset*, PolygonMesh> polygonMeshes_;
     std::vector<render::LivePolygonDraw> draws_;

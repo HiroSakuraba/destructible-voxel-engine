@@ -162,7 +162,9 @@ float4 main(float4 position : SV_Position, float3 worldPosition : TEXCOORD0,
     // render target, so SV_Position pixels map straight to its texels.
     uint aoWidth, aoHeight;
     gAmbientOcclusion.GetDimensions(aoWidth, aoHeight);
-    const float ambientOcclusion = saturate(gAmbientOcclusion.SampleLevel(
+    const float bakedOcclusion = (mapping.mappingFlags & kMaterialFlagVoxelOrmOcclusion) != 0u
+        ? saturate(metallicRoughnessSample.r) : 1.0F;
+    const float ambientOcclusion = bakedOcclusion * saturate(gAmbientOcclusion.SampleLevel(
         gAmbientOcclusionSampler, position.xy / float2(max(aoWidth, 1u), max(aoHeight, 1u)), 0.0F).r);
     uint giWidth, giHeight;
     gIndirectLight.GetDimensions(giWidth, giHeight);

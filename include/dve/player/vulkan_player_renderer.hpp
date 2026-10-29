@@ -65,6 +65,9 @@ struct VulkanPlayerRendererOptions {
     bool ambientOcclusion{true};
     PlayerAmbientOcclusionMode ambientOcclusionMode{PlayerAmbientOcclusionMode::ScreenSpace};
     PlayerGlobalIlluminationMode globalIllumination{PlayerGlobalIlluminationMode::Ambient};
+    // Rays per traced-GI texel (one-bounce GI runs at half resolution, so this is 4x per pixel
+    // averaged over a few frames of accumulation). 0 uses the environment's globalIlluminationSamples.
+    std::uint32_t globalIlluminationRays{32U};
     // VoxelTraced: grid cell size in metres (0 = the smallest voxel in the scene) and the largest
     // grid per axis; scenes beyond that keep a window around the camera.
     float tracedAoCellMeters{0.0F};

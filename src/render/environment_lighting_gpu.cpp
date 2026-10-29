@@ -45,6 +45,15 @@ bool upload_cube(rhi::IDevice& device,rhi::TextureHandle texture,const Environme
 
 bool EnvironmentLightingGpuResources::valid() const noexcept {return diffuseIrradiance&&diffuseIrradianceView&&specularPrefilter&&specularPrefilterView&&brdfLut&&brdfLutView&&sampler&&bindGroupLayout&&bindGroup&&specularMipLevels>0U;}
 
+bool refresh_environment_lighting(rhi::IDevice& device,const EnvironmentLightingAsset& asset,EnvironmentLightingGpuResources& resources,std::string* error){
+    std::string validation;if(!asset.validate(&validation)){set_error(error,validation);return false;}
+    if(!resources.valid()||asset.baked.diffuseIrradiance.resolution==0U){set_error(error,"environment lighting resources are not created");return false;}
+    if(asset.baked.specularPrefilter.levels.size()!=resources.specularMipLevels){set_error(error,"environment lighting refresh: mip count changed");return false;}
+    std::uint64_t bytes=0U;std::string local;
+    if(!upload_cube(device,resources.diffuseIrradiance,asset.baked.diffuseIrradiance,bytes,&local)||!upload_cube(device,resources.specularPrefilter,asset.baked.specularPrefilter,bytes,&local)){set_error(error,local);return false;}
+    resources.uploadedBytes+=bytes;return true;
+}
+
 bool destroy_environment_lighting(rhi::IDevice& device,EnvironmentLightingGpuResources& r,std::string* error){bool ok=true;std::string local;auto fail=[&](bool result){if(!result){ok=false;if(error&&error->empty())*error=local;}local.clear();};if(r.bindGroup)fail(device.destroy_bind_group(r.bindGroup,&local));if(r.bindGroupLayout)fail(device.destroy_bind_group_layout(r.bindGroupLayout,&local));if(r.diffuseIrradianceView)fail(device.destroy_texture_view(r.diffuseIrradianceView,&local));if(r.specularPrefilterView)fail(device.destroy_texture_view(r.specularPrefilterView,&local));if(r.brdfLutView)fail(device.destroy_texture_view(r.brdfLutView,&local));if(r.sampler)fail(device.destroy_sampler(r.sampler,&local));if(r.diffuseIrradiance)fail(device.destroy_texture(r.diffuseIrradiance,&local));if(r.specularPrefilter)fail(device.destroy_texture(r.specularPrefilter,&local));if(r.brdfLut)fail(device.destroy_texture(r.brdfLut,&local));r={};return ok;}
 
 bool upload_environment_lighting(rhi::IDevice& device,const EnvironmentLightingAsset& asset,EnvironmentLightingGpuResources& out,std::string* error){std::string validation;if(!asset.validate(&validation)){set_error(error,validation);return false;}EnvironmentLightingGpuResources r;auto fail=[&](std::string message){std::string ignored;(void)destroy_environment_lighting(device,r,&ignored);set_error(error,std::move(message));return false;};

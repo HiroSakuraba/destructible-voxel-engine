@@ -20,4 +20,6 @@ namespace dve::player::shader_blobs {
 [[nodiscard]] std::span<const std::byte> player_traced_gi_ps() noexcept;
 [[nodiscard]] std::span<const std::byte> player_rc_cascade_ps() noexcept;
 [[nodiscard]] std::span<const std::byte> player_rc_gather_ps() noexcept;
+[[nodiscard]] std::span<const std::byte> player_gi_temporal_ps() noexcept;
+[[nodiscard]] std::span<const std::byte> player_gi_upsample_ps() noexcept;
 } // namespace dve::player::shader_blobs

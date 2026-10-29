@@ -235,7 +235,11 @@ bool MainMaterialDescriptorTable::ensure_asset_records(const CookedPolygonAsset&
     }
     for (std::size_t index = 0U; index < asset.materials.size(); ++index) {
         const auto materialRecord = pack_gpu_material_record(asset.materials[index]);
-        const auto mappingRecord = pack_gpu_polygon_material_mapping(asset.materialBindings[index]);
+        auto mappingRecord = pack_gpu_polygon_material_mapping(asset.materialBindings[index]);
+        // Voxel ORM stores baked occlusion in red. Ordinary glTF metallic/roughness
+        // textures do not imply an occlusion channel and must not be darkened.
+        if (asset.materials[index].ormMap && asset.materialBindings[index].metallicRoughness.texture)
+            mappingRecord.mappingFlags |= kGpuMaterialMappingVoxelOrmOcclusion;
         const auto surfaceRecord=pack_gpu_material_surface_detail(asset.materials[index].surfaceDetail);
         if (!device_.write_buffer(created.materialRecords, index * created.materialStride,
                                   std::as_bytes(std::span(&materialRecord, 1U)), &local) ||

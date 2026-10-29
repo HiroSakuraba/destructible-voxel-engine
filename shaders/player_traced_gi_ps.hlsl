@@ -12,24 +12,26 @@
 //   * the pixel's indirect light is the mean over its rays.
 // The result (radiance, what a white diffuse surface would draw, intensity not applied) goes to
 // the live material shader, which uses it in place of the environment's diffuse integral.
-// Colours sky mode only (the sky is the sky/ground colour blend, as CPU colour_blend).
+// Runs at half resolution with a few rays per texel; player_gi_temporal_ps accumulates frames and
+// player_gi_upsample_ps filters the result up to full resolution.
 #include "common/player_screen_geometry.hlsli"
 #include "common/random_sampling.hlsli"
 #include "common/player_gi_common.hlsli"
 
 float4 main(float4 position : SV_Position, float2 uv : TEXCOORD0) : SV_Target0 {
-    const int2 pixel = int2(position.xy);
+    // Half resolution: each texel traces one pixel of its 2x2 block, a different one each frame.
+    const int2 pixel = HalfTexelPixel(int2(position.xy));
     float3 centre, normal;
     if (gGridOrigin.w <= 0.0F || !SurfaceAtPixel(pixel, centre, normal)) return float4(0.0F, 0.0F, 0.0F, 0.0F);
 
-    const uint sampleCount = clamp((uint)gGroundColor.w, 1u, 16u);
+    const uint sampleCount = clamp((uint)gGroundColor.w, 1u, 128u);
     const float maxDistance = max(gSkyColor.w, 1.0e-3F);
     // Grid cells are as coarse as the voxels: start far enough off the surface that the cell
     // holding the surface itself is not counted as the first hit.
     const float lift = max(max(1.0e-3F, gParams.z), 1.1F * gGridOrigin.w);
     const float3 origin = centre + normal * lift;
-    const uint pixelIndex = (uint)pixel.y * (uint)gTarget.x + (uint)pixel.x;
-    const uint seed = asuint(gParams.w);
+    const uint pixelIndex = (uint)position.y * (uint)gGiTemporal.z + (uint)position.x;
+    const uint seed = asuint(gPreviousCamera.w) * 2654435761u;
     float3 accumulated = 0.0F.xxx;
     for (uint i = 0u; i < sampleCount; ++i) {
         const float3 direction = CosineWeightedHemisphereSample(

@@ -16,6 +16,7 @@ static const uint kMaterialFlagBaseColorSrgb = 1u << 1u;
 static const uint kMaterialFlagEmissiveSrgb = 1u << 2u;
 static const uint kMaterialFlagDetailBaseColorSrgb = 1u << 3u;
 static const uint kMaterialFlagNormalBc5 = 1u << 4u;
+static const uint kMaterialFlagVoxelOrmOcclusion = 1u << 5u;
 
 // Returns a legacy-compatible [0,1] XYZ normal. BC5_UNORM supplies just RG;
 // the original Z is discarded by compression and must be reconstructed from

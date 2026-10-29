@@ -30,6 +30,15 @@ struct EnvironmentLightingGpuResources {
     EnvironmentLightingGpuResources& resources,
     std::string* error = nullptr);
 
+// Rewrites the baked cubes of existing resources in place (same resolutions and mip count as the
+// upload that created them); views, samplers and bind groups stay valid. Callers must make sure
+// the GPU is not reading the textures.
+[[nodiscard]] bool refresh_environment_lighting(
+    rhi::IDevice& device,
+    const EnvironmentLightingAsset& asset,
+    EnvironmentLightingGpuResources& resources,
+    std::string* error = nullptr);
+
 [[nodiscard]] bool destroy_environment_lighting(
     rhi::IDevice& device,
     EnvironmentLightingGpuResources& resources,

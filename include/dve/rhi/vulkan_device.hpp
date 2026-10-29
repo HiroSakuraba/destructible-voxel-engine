@@ -8,10 +8,16 @@
 
 namespace dve::rhi {
 
-// Vulkan 1.0 offscreen graphics backend. v1.34 certifies buffer and texture transfer,
-// color/depth targets, shader modules, render passes, dynamic viewport/scissor state, and
-// indexed/instanced draws. Presentation, descriptor binding, compute, and timestamps remain
-// explicit unsupported operations until their dedicated work packages.
+// Vulkan 1.0 graphics/compute backend: buffer and texture transfer, color/depth targets,
+// shader modules, render passes, descriptor binding, compute, timestamps, and window
+// presentation (VK_KHR_swapchain on Win32, Xlib, Wayland, Metal and headless surfaces).
+//
+// Environment:
+//   DVE_VULKAN_VALIDATION=1   enable VK_LAYER_KHRONOS_validation when installed; messages are
+//                             printed to stderr and counted (validation_*_count()).
+//   DVE_VULKAN_ADAPTER=text   pick the adapter whose name contains `text` (case-insensitive);
+//                             otherwise discrete > integrated > virtual > CPU.
+//   DVE_PSO_CACHE_FILE=path   persistent driver pipeline cache (default constructor).
 // Durations measure actual vkCreate*Pipelines driver calls, not shader compilation,
 // GPU execution or disk-cache hits. Cache-load success means validated seed accepted,
 // not that any individual PSO was a hit.
@@ -31,6 +37,10 @@ public:
     explicit VulkanDevice(std::filesystem::path pipelineCacheFile);
     [[nodiscard]] VulkanPipelineCacheStats pipeline_cache_stats() const noexcept;
     [[nodiscard]] bool flush_pipeline_cache() noexcept;
+    // Validation-layer messages seen since creation (0 when the layer is off).
+    [[nodiscard]] bool validation_enabled() const noexcept;
+    [[nodiscard]] std::uint64_t validation_warning_count() const noexcept;
+    [[nodiscard]] std::uint64_t validation_error_count() const noexcept;
     ~VulkanDevice() override;
     VulkanDevice(const VulkanDevice&) = delete;
     VulkanDevice& operator=(const VulkanDevice&) = delete;
@@ -60,6 +70,10 @@ public:
 
     [[nodiscard]] SwapchainHandle create_swapchain(const SwapchainDesc&, std::string* = nullptr) override;
     bool destroy_swapchain(SwapchainHandle, std::string* = nullptr) override;
+    bool resize_swapchain(SwapchainHandle, std::uint32_t, std::uint32_t, std::string* = nullptr) override;
+    [[nodiscard]] std::uint32_t swapchain_image_count(SwapchainHandle) const noexcept override;
+    [[nodiscard]] TextureFormat swapchain_format(SwapchainHandle) const noexcept override;
+    [[nodiscard]] bool swapchain_size(SwapchainHandle, std::uint32_t&, std::uint32_t&) const noexcept override;
     [[nodiscard]] AcquiredSwapchainImage acquire_next_image(SwapchainHandle, std::string* = nullptr) override;
     [[nodiscard]] PresentResult present(SwapchainHandle, FenceHandle, std::string* = nullptr) override;
 

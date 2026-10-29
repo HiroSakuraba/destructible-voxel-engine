@@ -5,6 +5,9 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <cstdio>
+#include <cctype>
 #include <cmath>
 #include <chrono>
 #include <cstdlib>
@@ -31,6 +34,37 @@
 
 namespace dve::rhi {
 namespace {
+
+bool environment_flag(const char* name) noexcept {
+    const char* value = std::getenv(name);
+    return value != nullptr && *value != '\0' && std::strcmp(value, "0") != 0;
+}
+
+std::string environment_text(const char* name) {
+    const char* value = std::getenv(name);
+    return value != nullptr ? std::string(value) : std::string();
+}
+
+struct ValidationCounters {
+    std::atomic<std::uint64_t> warnings{};
+    std::atomic<std::uint64_t> errors{};
+};
+
+#if defined(_WIN32)
+#define DVE_VK_CALLBACK __stdcall
+#else
+#define DVE_VK_CALLBACK
+#endif
+vk::Bool32 DVE_VK_CALLBACK validation_callback(vk::Flags severity, vk::Flags,
+    const vk::DebugUtilsMessengerCallbackDataEXT* data, void* user) {
+    auto* counters = static_cast<ValidationCounters*>(user);
+    const bool isError = (severity & vk::DebugUtilsMessageSeverityErrorBitEXT) != 0U;
+    if (counters) (isError ? counters->errors : counters->warnings).fetch_add(1U);
+    std::fprintf(stderr, "[dve vulkan %s] %s\n", isError ? "error" : "warning",
+                 data && data->pMessage ? data->pMessage : "(no message)");
+    return 0U;
+}
+#undef DVE_VK_CALLBACK
 
 void set_error(std::string* error, std::string_view message) {
     if (error != nullptr) error->assign(message.begin(), message.end());
@@ -447,6 +481,28 @@ struct VulkanDevice::Impl {
         vk::PFN_QueueSubmit queueSubmit{};
         vk::PFN_WaitForFences waitForFences{};
         vk::PFN_DeviceWaitIdle deviceWaitIdle{};
+        vk::PFN_ResetFences resetFences{};
+        // Presentation and diagnostics: all optional, loaded only when their extension is on.
+        vk::PFN_EnumerateInstanceLayerProperties enumerateInstanceLayerProperties{};
+        vk::PFN_EnumerateDeviceExtensionProperties enumerateDeviceExtensionProperties{};
+        vk::PFN_DestroySurfaceKHR destroySurface{};
+        vk::PFN_GetPhysicalDeviceSurfaceSupportKHR getSurfaceSupport{};
+        vk::PFN_GetPhysicalDeviceSurfaceCapabilitiesKHR getSurfaceCapabilities{};
+        vk::PFN_GetPhysicalDeviceSurfaceFormatsKHR getSurfaceFormats{};
+        vk::PFN_GetPhysicalDeviceSurfacePresentModesKHR getSurfacePresentModes{};
+        vk::PFN_CreateWin32SurfaceKHR createWin32Surface{};
+        vk::PFN_CreateXlibSurfaceKHR createXlibSurface{};
+        vk::PFN_CreateWaylandSurfaceKHR createWaylandSurface{};
+        vk::PFN_CreateMetalSurfaceEXT createMetalSurface{};
+        vk::PFN_CreateHeadlessSurfaceEXT createHeadlessSurface{};
+        vk::PFN_CreateSwapchainKHR createSwapchain{};
+        vk::PFN_DestroySwapchainKHR destroySwapchain{};
+        vk::PFN_GetSwapchainImagesKHR getSwapchainImages{};
+        vk::PFN_AcquireNextImageKHR acquireNextImage{};
+        vk::PFN_QueuePresentKHR queuePresent{};
+        vk::PFN_CreateDebugUtilsMessengerEXT createDebugMessenger{};
+        vk::PFN_DestroyDebugUtilsMessengerEXT destroyDebugMessenger{};
+        vk::PFN_SetDebugUtilsObjectNameEXT setObjectName{};
     } fn;
 
     struct BufferSlot {
@@ -467,6 +523,8 @@ struct VulkanDevice::Impl {
         vk::Image image{};
         vk::DeviceMemory memory{};
         vk::DeviceSize allocationBytes{};
+        // Image belongs to a VkSwapchainKHR: never destroyed or freed through the texture API.
+        bool swapchainOwned{};
     };
     struct TextureViewSlot {
         std::uint32_t generation{1};
@@ -571,6 +629,20 @@ struct VulkanDevice::Impl {
         std::vector<BindGroupHandle> computeBindGroups;
         std::vector<BindGroupHandle> graphicsBindGroups;
     };
+    struct SwapchainSlot {
+        std::uint32_t generation{1};
+        bool alive{};
+        SwapchainDesc desc;
+        vk::SurfaceKHR surface{};
+        vk::SwapchainKHR swapchain{};
+        vk::Fence acquireFence{};
+        std::vector<TextureHandle> images;
+        TextureFormat format{TextureFormat::BGRA8Unorm};
+        std::uint32_t width{};
+        std::uint32_t height{};
+        bool acquired{};
+        std::uint32_t acquiredIndex{};
+    };
     struct RawBuffer {
         vk::Buffer buffer{};
         vk::DeviceMemory memory{};
@@ -608,6 +680,14 @@ struct VulkanDevice::Impl {
     std::vector<GraphicsPipelineSlot> graphicsPipelines;
     std::vector<TimestampPoolSlot> timestampPools;
     std::vector<CommandSlot> commandLists;
+    std::vector<SwapchainSlot> swapchains;
+    // Instance/device extensions actually enabled (each is optional).
+    bool surfaceExtension{}, win32SurfaceExtension{}, xlibSurfaceExtension{},
+         waylandSurfaceExtension{}, metalSurfaceExtension{}, headlessSurfaceExtension{},
+         swapchainExtension{}, validationLayer{};
+    vk::DebugUtilsMessengerEXT messenger{};
+    ValidationCounters validationCounters;
+    std::uint32_t requestedApiVersion{vk::ApiVersion10};
     std::uint64_t nextFence{1U};
     std::uint64_t completedFence{};
 
@@ -662,10 +742,11 @@ struct VulkanDevice::Impl {
         if (!fn.getInstanceProcAddr) { reason = "Vulkan loader does not export vkGetInstanceProcAddr"; return; }
         if (!load_global(fn.createInstance, "vkCreateInstance")) return;
 
-        // VK_EXT_debug_utils is optional: enable it at instance creation
-        // when the loader advertises it so command-buffer labels can reach a
-        // GPU debugger. Absence is normal and never fatal.
-        bool debugUtilsAvailable = false;
+        // Every instance extension is optional. VK_EXT_debug_utils carries command labels to a
+        // GPU debugger (and the validation messenger); the surface extensions are enabled for
+        // every window system the loader supports so a swapchain can be created later for
+        // whichever window the host hands over. Absence is normal and never fatal.
+        std::vector<std::string> availableExtensions;
         if (load_global(fn.enumerateInstanceExtensionProperties,
                         "vkEnumerateInstanceExtensionProperties")) {
             std::uint32_t extensionCount = 0U;
@@ -674,27 +755,111 @@ struct VulkanDevice::Impl {
                 std::vector<vk::ExtensionProperties> extensions(extensionCount);
                 if (fn.enumerateInstanceExtensionProperties(
                         nullptr, &extensionCount, extensions.data()) == vk::Success) {
-                    for (const auto& extension : extensions) {
-                        if (std::strcmp(extension.extensionName,
-                                        "VK_EXT_debug_utils") == 0) {
-                            debugUtilsAvailable = true;
+                    for (std::uint32_t index = 0U; index < extensionCount; ++index)
+                        availableExtensions.emplace_back(extensions[index].extensionName);
+                }
+            }
+        }
+        const auto has_extension = [&](std::string_view name) {
+            return std::find(availableExtensions.begin(), availableExtensions.end(), name) !=
+                   availableExtensions.end();
+        };
+        std::vector<const char*> enabledExtensions;
+        const bool debugUtilsAvailable = has_extension("VK_EXT_debug_utils");
+        if (debugUtilsAvailable) enabledExtensions.push_back("VK_EXT_debug_utils");
+        surfaceExtension = has_extension("VK_KHR_surface");
+        if (surfaceExtension) {
+            enabledExtensions.push_back("VK_KHR_surface");
+            win32SurfaceExtension = has_extension("VK_KHR_win32_surface");
+            xlibSurfaceExtension = has_extension("VK_KHR_xlib_surface");
+            waylandSurfaceExtension = has_extension("VK_KHR_wayland_surface");
+            metalSurfaceExtension = has_extension("VK_EXT_metal_surface");
+            headlessSurfaceExtension = has_extension("VK_EXT_headless_surface");
+            if (win32SurfaceExtension) enabledExtensions.push_back("VK_KHR_win32_surface");
+            if (xlibSurfaceExtension) enabledExtensions.push_back("VK_KHR_xlib_surface");
+            if (waylandSurfaceExtension) enabledExtensions.push_back("VK_KHR_wayland_surface");
+            if (metalSurfaceExtension) enabledExtensions.push_back("VK_EXT_metal_surface");
+            if (headlessSurfaceExtension) enabledExtensions.push_back("VK_EXT_headless_surface");
+        }
+
+        // DVE_VULKAN_VALIDATION=1 enables the Khronos validation layer when it is installed
+        // (Vulkan SDK, distribution package). Messages go to stderr and are counted.
+        std::vector<const char*> enabledLayers;
+        if (environment_flag("DVE_VULKAN_VALIDATION") &&
+            load_global(fn.enumerateInstanceLayerProperties, "vkEnumerateInstanceLayerProperties")) {
+            std::uint32_t layerCount = 0U;
+            if (fn.enumerateInstanceLayerProperties(&layerCount, nullptr) == vk::Success && layerCount > 0U) {
+                std::vector<vk::LayerProperties> layers(layerCount);
+                if (fn.enumerateInstanceLayerProperties(&layerCount, layers.data()) == vk::Success) {
+                    for (std::uint32_t index = 0U; index < layerCount; ++index) {
+                        if (std::strcmp(layers[index].layerName, "VK_LAYER_KHRONOS_validation") == 0) {
+                            validationLayer = true;
+                            enabledLayers.push_back("VK_LAYER_KHRONOS_validation");
                             break;
                         }
                     }
                 }
             }
+            if (!validationLayer)
+                std::fprintf(stderr, "[dve vulkan] DVE_VULKAN_VALIDATION is set but VK_LAYER_KHRONOS_validation is not installed\n");
         }
-        const char* enabledExtensions[] = {"VK_EXT_debug_utils"};
 
+        // DVE's shaders are compiled for the Vulkan 1.2 environment (dxc -fspv-target-env=vulkan1.2,
+        // SPIR-V 1.5), which a Vulkan 1.0 instance may not consume. Ask for 1.2 whenever the loader
+        // is 1.1+ (vkEnumerateInstanceVersion exists); 1.0 loaders keep the 1.0 instance.
+        std::uint32_t apiVersion = vk::ApiVersion10;
+        if (const auto enumerateVersion = function_pointer<vk::PFN_EnumerateInstanceVersion>(
+                fn.getInstanceProcAddr(nullptr, "vkEnumerateInstanceVersion"))) {
+            std::uint32_t loaderVersion = vk::ApiVersion10;
+            if (enumerateVersion(&loaderVersion) == vk::Success && loaderVersion >= vk::ApiVersion12)
+                apiVersion = vk::ApiVersion12;
+        }
+        requestedApiVersion = apiVersion;
         const vk::ApplicationInfo application{
             vk::StructureTypeApplicationInfo, nullptr, "DVE Vulkan graphics validation", 1U,
-            "Destructible Voxel Engine", 13400U, vk::ApiVersion10};
+            "Destructible Voxel Engine", 13400U, apiVersion};
         const vk::InstanceCreateInfo createInfo{
             vk::StructureTypeInstanceCreateInfo, nullptr, 0U, &application,
-            0U, nullptr,
-            debugUtilsAvailable ? 1U : 0U,
-            debugUtilsAvailable ? enabledExtensions : nullptr};
+            static_cast<std::uint32_t>(enabledLayers.size()),
+            enabledLayers.empty() ? nullptr : enabledLayers.data(),
+            static_cast<std::uint32_t>(enabledExtensions.size()),
+            enabledExtensions.empty() ? nullptr : enabledExtensions.data()};
         if (!check(fn.createInstance(&createInfo, nullptr, &instance), "vkCreateInstance")) return;
+        if (validationLayer && debugUtilsAvailable) {
+            fn.createDebugMessenger = function_pointer<vk::PFN_CreateDebugUtilsMessengerEXT>(
+                fn.getInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT"));
+            fn.destroyDebugMessenger = function_pointer<vk::PFN_DestroyDebugUtilsMessengerEXT>(
+                fn.getInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT"));
+            if (fn.createDebugMessenger && fn.destroyDebugMessenger) {
+                const vk::DebugUtilsMessengerCreateInfoEXT messengerInfo{
+                    vk::StructureTypeDebugUtilsMessengerCreateInfoEXT, nullptr, 0U,
+                    vk::DebugUtilsMessageSeverityWarningBitEXT | vk::DebugUtilsMessageSeverityErrorBitEXT,
+                    vk::DebugUtilsMessageTypeGeneralBitEXT | vk::DebugUtilsMessageTypeValidationBitEXT |
+                        vk::DebugUtilsMessageTypePerformanceBitEXT,
+                    &validation_callback, &validationCounters};
+                if (fn.createDebugMessenger(instance, &messengerInfo, nullptr, &messenger) != vk::Success)
+                    messenger = {};
+            }
+        }
+        if (surfaceExtension) {
+            const auto instance_function = [&](auto& destination, const char* name) {
+                destination = function_pointer<std::remove_reference_t<decltype(destination)>>(
+                    fn.getInstanceProcAddr(instance, name));
+            };
+            instance_function(fn.destroySurface, "vkDestroySurfaceKHR");
+            instance_function(fn.getSurfaceSupport, "vkGetPhysicalDeviceSurfaceSupportKHR");
+            instance_function(fn.getSurfaceCapabilities, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR");
+            instance_function(fn.getSurfaceFormats, "vkGetPhysicalDeviceSurfaceFormatsKHR");
+            instance_function(fn.getSurfacePresentModes, "vkGetPhysicalDeviceSurfacePresentModesKHR");
+            if (win32SurfaceExtension) instance_function(fn.createWin32Surface, "vkCreateWin32SurfaceKHR");
+            if (xlibSurfaceExtension) instance_function(fn.createXlibSurface, "vkCreateXlibSurfaceKHR");
+            if (waylandSurfaceExtension) instance_function(fn.createWaylandSurface, "vkCreateWaylandSurfaceKHR");
+            if (metalSurfaceExtension) instance_function(fn.createMetalSurface, "vkCreateMetalSurfaceEXT");
+            if (headlessSurfaceExtension) instance_function(fn.createHeadlessSurface, "vkCreateHeadlessSurfaceEXT");
+            if (!fn.destroySurface || !fn.getSurfaceSupport || !fn.getSurfaceCapabilities ||
+                !fn.getSurfaceFormats || !fn.getSurfacePresentModes)
+                surfaceExtension = false;
+        }
 
         if (!load_instance(fn.destroyInstance, "vkDestroyInstance") ||
             !load_instance(fn.enumeratePhysicalDevices, "vkEnumeratePhysicalDevices") ||
@@ -714,8 +879,35 @@ struct VulkanDevice::Impl {
         if (!check(fn.enumeratePhysicalDevices(instance, &physicalCount, devices.data()),
                    "vkEnumeratePhysicalDevices")) return;
 
+        // Adapter choice: DVE_VULKAN_ADAPTER (case-insensitive substring of the device name)
+        // wins; otherwise prefer discrete > integrated > virtual > CPU, so a machine with a
+        // GPU never lands on a software rasterizer (llvmpipe/SwiftShader) by enumeration order.
+        const auto lowercase = [](std::string text) {
+            for (char& c : text) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            return text;
+        };
+        const std::string adapterFilter = lowercase(environment_text("DVE_VULKAN_ADAPTER"));
+        const auto adapter_rank = [](std::int32_t type) {
+            switch (type) {
+            case vk::PhysicalDeviceTypeDiscreteGpu: return 4;
+            case vk::PhysicalDeviceTypeIntegratedGpu: return 3;
+            case vk::PhysicalDeviceTypeVirtualGpu: return 2;
+            case vk::PhysicalDeviceTypeCpu: return 1;
+            default: return 0;
+            }
+        };
         bool found{};
+        int bestRank = -1;
         for (vk::PhysicalDevice candidate : devices) {
+            vk::PhysicalDeviceProperties candidateProperties{};
+            fn.getPhysicalDeviceProperties(candidate, &candidateProperties);
+            int rank = adapter_rank(candidateProperties.deviceType);
+            if (!adapterFilter.empty()) {
+                if (lowercase(candidateProperties.deviceName).find(adapterFilter) == std::string::npos)
+                    continue;
+                rank += 100;
+            }
+            if (rank <= bestRank) continue;
             std::uint32_t familyCount{};
             fn.getQueueFamilyProperties(candidate, &familyCount, nullptr);
             std::vector<vk::QueueFamilyProperties> families(familyCount);
@@ -728,10 +920,13 @@ struct VulkanDevice::Impl {
                     queueFamily = family;
                     timestampValidBits = families[family].timestampValidBits;
                     found = true;
+                    bestRank = rank;
                     break;
                 }
             }
-            if (found) break;
+        }
+        if (!found && !adapterFilter.empty()) {
+            reason = "no Vulkan adapter matches DVE_VULKAN_ADAPTER='" + adapterFilter + "'"; return;
         }
         if (!found) { reason = "Vulkan device has no graphics, compute, and transfer queue"; return; }
         capabilities.queueFamilyIndex = queueFamily;
@@ -807,9 +1002,29 @@ struct VulkanDevice::Impl {
         const float priority = 1.0F;
         const vk::DeviceQueueCreateInfo queueInfo{
             vk::StructureTypeDeviceQueueCreateInfo, nullptr, 0U, queueFamily, 1U, &priority};
+        // VK_KHR_swapchain only when an instance surface extension is on and the adapter has it.
+        std::vector<const char*> deviceExtensions;
+        if (surfaceExtension) {
+            fn.enumerateDeviceExtensionProperties = function_pointer<vk::PFN_EnumerateDeviceExtensionProperties>(
+                fn.getInstanceProcAddr(instance, "vkEnumerateDeviceExtensionProperties"));
+            std::uint32_t count = 0U;
+            if (fn.enumerateDeviceExtensionProperties &&
+                fn.enumerateDeviceExtensionProperties(physicalDevice, nullptr, &count, nullptr) == vk::Success &&
+                count > 0U) {
+                std::vector<vk::ExtensionProperties> extensions(count);
+                if (fn.enumerateDeviceExtensionProperties(physicalDevice, nullptr, &count, extensions.data()) ==
+                    vk::Success) {
+                    for (std::uint32_t index = 0U; index < count; ++index)
+                        if (std::strcmp(extensions[index].extensionName, "VK_KHR_swapchain") == 0)
+                            swapchainExtension = true;
+                }
+            }
+            if (swapchainExtension) deviceExtensions.push_back("VK_KHR_swapchain");
+        }
         const vk::DeviceCreateInfo deviceInfo{
             vk::StructureTypeDeviceCreateInfo, nullptr, 0U, 1U, &queueInfo,
-            0U, nullptr, 0U, nullptr, &enabledFeatures};
+            0U, nullptr, static_cast<std::uint32_t>(deviceExtensions.size()),
+            deviceExtensions.empty() ? nullptr : deviceExtensions.data(), &enabledFeatures};
         if (!check(fn.createDevice(physicalDevice, &deviceInfo, nullptr, &device),
                    "vkCreateDevice")) return;
 
@@ -878,7 +1093,18 @@ struct VulkanDevice::Impl {
             !load_device(fn.destroyFence, "vkDestroyFence") ||
             !load_device(fn.queueSubmit, "vkQueueSubmit") ||
             !load_device(fn.waitForFences, "vkWaitForFences") ||
-            !load_device(fn.deviceWaitIdle, "vkDeviceWaitIdle")) return;
+            !load_device(fn.deviceWaitIdle, "vkDeviceWaitIdle") ||
+            !load_device(fn.resetFences, "vkResetFences")) return;
+        if (swapchainExtension) {
+            fn.createSwapchain = function_pointer<vk::PFN_CreateSwapchainKHR>(fn.getDeviceProcAddr(device, "vkCreateSwapchainKHR"));
+            fn.destroySwapchain = function_pointer<vk::PFN_DestroySwapchainKHR>(fn.getDeviceProcAddr(device, "vkDestroySwapchainKHR"));
+            fn.getSwapchainImages = function_pointer<vk::PFN_GetSwapchainImagesKHR>(fn.getDeviceProcAddr(device, "vkGetSwapchainImagesKHR"));
+            fn.acquireNextImage = function_pointer<vk::PFN_AcquireNextImageKHR>(fn.getDeviceProcAddr(device, "vkAcquireNextImageKHR"));
+            fn.queuePresent = function_pointer<vk::PFN_QueuePresentKHR>(fn.getDeviceProcAddr(device, "vkQueuePresentKHR"));
+            swapchainExtension = fn.createSwapchain && fn.destroySwapchain && fn.getSwapchainImages &&
+                                 fn.acquireNextImage && fn.queuePresent;
+        }
+        capabilities.presentation = surfaceExtension && swapchainExtension;
 
         // Pipeline-cache failure cannot prevent startup. A driver can refuse a
         // seemingly compatible saved blob: retry with a fresh empty cache.
@@ -923,6 +1149,8 @@ struct VulkanDevice::Impl {
                 fn.getDeviceProcAddr(device, "vkCmdEndDebugUtilsLabelEXT"));
             debugUtilsLabels = fn.cmdBeginDebugUtilsLabel != nullptr &&
                                fn.cmdEndDebugUtilsLabel != nullptr;
+            fn.setObjectName = function_pointer<vk::PFN_SetDebugUtilsObjectNameEXT>(
+                fn.getDeviceProcAddr(device, "vkSetDebugUtilsObjectNameEXT"));
             capabilities.debugLabels = debugUtilsLabels;
         }
         if (!queue) { reason = "vkGetDeviceQueue returned a null queue"; return; }
@@ -959,6 +1187,14 @@ struct VulkanDevice::Impl {
         if (device && fn.deviceWaitIdle) (void)fn.deviceWaitIdle(device);
         (void)flush_pipeline_cache();
         if (device) {
+            for (auto& slot : swapchains) {
+                if (!slot.alive) continue;
+                release_swapchain_images(slot);
+                if (slot.swapchain && fn.destroySwapchain) fn.destroySwapchain(device, slot.swapchain, nullptr);
+                if (slot.acquireFence && fn.destroyFence) fn.destroyFence(device, slot.acquireFence, nullptr);
+                if (slot.surface && fn.destroySurface) fn.destroySurface(instance, slot.surface, nullptr);
+                slot = {};
+            }
             if (fn.destroyQueryPool) {
                 for (auto& slot : timestampPools) {
                     if (slot.alive && slot.pool) fn.destroyQueryPool(device, slot.pool, nullptr);
@@ -1009,6 +1245,7 @@ struct VulkanDevice::Impl {
             if (fn.destroyImage && fn.freeMemory) {
                 for (auto& slot : textures) {
                     if (!slot.alive) continue;
+                    if (slot.swapchainOwned) { slot.alive = false; continue; }
                     if (slot.image) fn.destroyImage(device, slot.image, nullptr);
                     if (slot.memory) fn.freeMemory(device, slot.memory, nullptr);
                     slot.alive = false;
@@ -1029,6 +1266,9 @@ struct VulkanDevice::Impl {
         if (device && commandPool && fn.destroyCommandPool)
             fn.destroyCommandPool(device, commandPool, nullptr);
         if (device && fn.destroyDevice) fn.destroyDevice(device, nullptr);
+        if (instance && messenger && fn.destroyDebugMessenger)
+            fn.destroyDebugMessenger(instance, messenger, nullptr);
+        messenger = {};
         if (instance && fn.destroyInstance) fn.destroyInstance(instance, nullptr);
         close_vulkan_loader(loader);
         commandPool = {};
@@ -1498,6 +1738,209 @@ struct VulkanDevice::Impl {
                      "vkCreateRenderPass", error);
     }
 
+    // Debugger-visible names (RenderDoc, Nsight, validation messages). Best effort.
+    void name_object(vk::ObjectType type, std::uint64_t handle, const std::string& name) noexcept {
+        if (!fn.setObjectName || name.empty() || handle == 0U) return;
+        const vk::DebugUtilsObjectNameInfoEXT info{
+            vk::StructureTypeDebugUtilsObjectNameInfoEXT, nullptr, type, handle, name.c_str()};
+        (void)fn.setObjectName(device, &info);
+    }
+
+    SwapchainSlot* swapchain_slot(SwapchainHandle handle, std::string* error) {
+        if (!handle || handle.index >= swapchains.size()) {
+            set_error(error, "invalid Vulkan swapchain handle"); return nullptr;
+        }
+        auto& slot = swapchains[handle.index];
+        if (!slot.alive || slot.generation != handle.generation) {
+            set_error(error, "stale Vulkan swapchain handle"); return nullptr;
+        }
+        return &slot;
+    }
+
+    // Retire the texture slots that wrapped this swapchain's images (the images themselves
+    // are owned and destroyed by the swapchain).
+    void release_swapchain_images(SwapchainSlot& slot) noexcept {
+        for (const TextureHandle image : slot.images) {
+            if (image.index >= textures.size()) continue;
+            auto& texture = textures[image.index];
+            if (!texture.alive || texture.generation != image.generation) continue;
+            texture.desc = {}; texture.image = {}; texture.swapchainOwned = false;
+            retire_slot(texture);
+        }
+        slot.images.clear();
+        slot.acquired = false;
+    }
+
+    bool create_surface(const platform::NativeSurfaceHandle& handle, vk::SurfaceKHR& surface,
+                        std::string* error) {
+        using platform::NativeSurfaceKind;
+        const auto missing = [&](std::string_view extension) {
+            set_error(error, std::string("Vulkan loader does not provide ") + std::string(extension) +
+                             " for a " + std::string(platform::native_surface_kind_name(handle.kind)) +
+                             " window");
+            return false;
+        };
+        switch (handle.kind) {
+        case NativeSurfaceKind::Win32: {
+            if (!fn.createWin32Surface) return missing("VK_KHR_win32_surface");
+            const vk::Win32SurfaceCreateInfoKHR info{
+                vk::StructureTypeWin32SurfaceCreateInfoKHR, nullptr, 0U, handle.instance, handle.window};
+            return check(fn.createWin32Surface(instance, &info, nullptr, &surface), "vkCreateWin32SurfaceKHR", error);
+        }
+        case NativeSurfaceKind::Xlib: {
+            if (!fn.createXlibSurface) return missing("VK_KHR_xlib_surface");
+            const vk::XlibSurfaceCreateInfoKHR info{
+                vk::StructureTypeXlibSurfaceCreateInfoKHR, nullptr, 0U, handle.display,
+                static_cast<unsigned long>(handle.xlibWindow)};
+            return check(fn.createXlibSurface(instance, &info, nullptr, &surface), "vkCreateXlibSurfaceKHR", error);
+        }
+        case NativeSurfaceKind::Wayland: {
+            if (!fn.createWaylandSurface) return missing("VK_KHR_wayland_surface");
+            const vk::WaylandSurfaceCreateInfoKHR info{
+                vk::StructureTypeWaylandSurfaceCreateInfoKHR, nullptr, 0U, handle.display, handle.window};
+            return check(fn.createWaylandSurface(instance, &info, nullptr, &surface), "vkCreateWaylandSurfaceKHR", error);
+        }
+        case NativeSurfaceKind::Metal: {
+            if (!fn.createMetalSurface) return missing("VK_EXT_metal_surface");
+            const vk::MetalSurfaceCreateInfoEXT info{
+                vk::StructureTypeMetalSurfaceCreateInfoEXT, nullptr, 0U, handle.window};
+            return check(fn.createMetalSurface(instance, &info, nullptr, &surface), "vkCreateMetalSurfaceEXT", error);
+        }
+        case NativeSurfaceKind::Headless: {
+            if (!fn.createHeadlessSurface) return missing("VK_EXT_headless_surface");
+            const vk::HeadlessSurfaceCreateInfoEXT info{
+                vk::StructureTypeHeadlessSurfaceCreateInfoEXT, nullptr, 0U};
+            return check(fn.createHeadlessSurface(instance, &info, nullptr, &surface), "vkCreateHeadlessSurfaceEXT", error);
+        }
+        case NativeSurfaceKind::Unavailable: break;
+        }
+        set_error(error, "swapchain needs a native surface handle (SwapchainDesc::surface)");
+        return false;
+    }
+
+    static std::optional<TextureFormat> texture_format_of(vk::Format format) noexcept {
+        if (format == vk::FormatB8G8R8A8Unorm) return TextureFormat::BGRA8Unorm;
+        if (format == vk::FormatR8G8B8A8Unorm) return TextureFormat::RGBA8Unorm;
+        if (format == vk::FormatR8G8B8A8Srgb) return TextureFormat::RGBA8Srgb;
+        return std::nullopt;
+    }
+
+    // (Re)build the VkSwapchainKHR for slot.surface at width x height, wrapping its images as
+    // texture slots in ResourceState::Present. The previous swapchain is handed to the driver
+    // as oldSwapchain and destroyed afterwards. Requires an idle queue.
+    bool build_swapchain(SwapchainSlot& slot, std::uint32_t width, std::uint32_t height,
+                         std::string* error) {
+        vk::SurfaceCapabilitiesKHR caps{};
+        if (!check(fn.getSurfaceCapabilities(physicalDevice, slot.surface, &caps),
+                   "vkGetPhysicalDeviceSurfaceCapabilitiesKHR", error)) return false;
+
+        std::uint32_t formatCount = 0U;
+        if (!check(fn.getSurfaceFormats(physicalDevice, slot.surface, &formatCount, nullptr),
+                   "vkGetPhysicalDeviceSurfaceFormatsKHR", error)) return false;
+        std::vector<vk::SurfaceFormatKHR> formats(formatCount);
+        if (formatCount > 0U &&
+            !check(fn.getSurfaceFormats(physicalDevice, slot.surface, &formatCount, formats.data()),
+                   "vkGetPhysicalDeviceSurfaceFormatsKHR", error)) return false;
+        // Requested format first, then the UNORM formats DVE's tonemap pass encodes for.
+        const vk::Format wanted[] = {vulkan_format(slot.desc.format), vk::FormatB8G8R8A8Unorm,
+                                     vk::FormatR8G8B8A8Unorm};
+        std::optional<vk::SurfaceFormatKHR> chosen;
+        for (const vk::Format candidate : wanted) {
+            for (const auto& offered : formats) {
+                if (offered.format == candidate && offered.colorSpace == vk::ColorSpaceSrgbNonlinearKHR &&
+                    texture_format_of(offered.format)) { chosen = offered; break; }
+            }
+            if (chosen) break;
+        }
+        if (!chosen) { set_error(error, "Vulkan surface offers no BGRA8/RGBA8 sRGB-nonlinear format"); return false; }
+
+        vk::Extent2D extent = caps.currentExtent;
+        if (extent.width == 0xFFFFFFFFU) {
+            extent.width = std::clamp(width, caps.minImageExtent.width, caps.maxImageExtent.width);
+            extent.height = std::clamp(height, caps.minImageExtent.height, caps.maxImageExtent.height);
+        }
+        if (extent.width == 0U || extent.height == 0U) {
+            set_error(error, "Vulkan surface has zero size (minimized window)"); return false;
+        }
+
+        std::uint32_t imageCount = std::max(slot.desc.imageCount, caps.minImageCount);
+        if (caps.maxImageCount != 0U) imageCount = std::min(imageCount, caps.maxImageCount);
+
+        std::uint32_t modeCount = 0U;
+        std::vector<vk::PresentModeKHR> modes;
+        if (fn.getSurfacePresentModes(physicalDevice, slot.surface, &modeCount, nullptr) == vk::Success &&
+            modeCount > 0U) {
+            modes.resize(modeCount);
+            if (fn.getSurfacePresentModes(physicalDevice, slot.surface, &modeCount, modes.data()) != vk::Success)
+                modes.clear();
+        }
+        vk::PresentModeKHR presentMode = vk::PresentModeFifoKHR; // always supported
+        const vk::PresentModeKHR requested = slot.desc.presentMode == PresentMode::Immediate
+            ? vk::PresentModeImmediateKHR
+            : slot.desc.presentMode == PresentMode::Mailbox ? vk::PresentModeMailboxKHR
+                                                            : vk::PresentModeFifoKHR;
+        if (std::find(modes.begin(), modes.end(), requested) != modes.end()) presentMode = requested;
+
+        vk::CompositeAlphaFlagBitsKHR alpha = vk::CompositeAlphaOpaqueBitKHR;
+        for (const vk::CompositeAlphaFlagBitsKHR candidate :
+             {vk::CompositeAlphaOpaqueBitKHR, vk::CompositeAlphaInheritBitKHR,
+              vk::CompositeAlphaPreMultipliedBitKHR, vk::CompositeAlphaPostMultipliedBitKHR}) {
+            if ((caps.supportedCompositeAlpha & candidate) != 0U) { alpha = candidate; break; }
+        }
+        vk::ImageUsageFlags usage = vk::ImageUsageColorAttachmentBit;
+        TextureUsage textureUsage = TextureUsage::RenderTarget | TextureUsage::Present;
+        if ((caps.supportedUsageFlags & vk::ImageUsageTransferSourceBit) != 0U) {
+            usage |= vk::ImageUsageTransferSourceBit; textureUsage = textureUsage | TextureUsage::CopySource;
+        }
+        if ((caps.supportedUsageFlags & vk::ImageUsageTransferDestinationBit) != 0U) {
+            usage |= vk::ImageUsageTransferDestinationBit; textureUsage = textureUsage | TextureUsage::CopyDestination;
+        }
+
+        const vk::SwapchainKHR previous = slot.swapchain;
+        const vk::SwapchainCreateInfoKHR info{
+            vk::StructureTypeSwapchainCreateInfoKHR, nullptr, 0U, slot.surface, imageCount,
+            chosen->format, chosen->colorSpace, extent, 1U, usage, vk::SharingModeExclusive,
+            0U, nullptr, caps.currentTransform, alpha, presentMode, 1U, previous};
+        vk::SwapchainKHR created{};
+        if (!check(fn.createSwapchain(device, &info, nullptr, &created), "vkCreateSwapchainKHR", error))
+            return false;
+        release_swapchain_images(slot);
+        if (previous) fn.destroySwapchain(device, previous, nullptr);
+        slot.swapchain = created;
+
+        std::uint32_t count = 0U;
+        if (!check(fn.getSwapchainImages(device, created, &count, nullptr), "vkGetSwapchainImagesKHR", error))
+            return false;
+        std::vector<vk::Image> images(count);
+        if (!check(fn.getSwapchainImages(device, created, &count, images.data()), "vkGetSwapchainImagesKHR", error))
+            return false;
+        slot.format = *texture_format_of(chosen->format);
+        slot.width = extent.width;
+        slot.height = extent.height;
+        for (std::uint32_t index = 0U; index < count; ++index) {
+            const auto textureIndex = allocate_slot(textures);
+            auto& texture = textures[textureIndex];
+            texture.alive = true;
+            texture.swapchainOwned = true;
+            texture.desc = {};
+            texture.desc.format = slot.format;
+            texture.desc.width = extent.width;
+            texture.desc.height = extent.height;
+            texture.desc.usage = textureUsage;
+            texture.desc.debugName = slot.desc.debugName + " image " + std::to_string(index);
+            texture.state = ResourceState::Undefined;
+            texture.image = images[index];
+            texture.memory = {};
+            texture.allocationBytes = 0U;
+            name_object(vk::ObjectTypeImage, texture.image, texture.desc.debugName);
+            slot.images.push_back({textureIndex, texture.generation});
+        }
+        // Present is the resting state of every image the application does not hold, but a
+        // presentable image may only be touched after vkAcquireNextImageKHR returns it: each
+        // image moves Undefined -> Present on its first acquire (see acquire_next_image).
+        return true;
+    }
+
     bool unsupported(std::string_view feature, std::string* error) const {
         set_error(error, std::string("Vulkan v1.34 backend does not yet implement ") +
                          std::string(feature));
@@ -1585,6 +2028,7 @@ BufferHandle VulkanDevice::create_buffer(const BufferDesc& desc, std::string* er
     slot.memory = raw.memory;
     slot.allocationBytes = raw.bytes;
     slot.memoryProperties = raw.properties;
+    impl_->name_object(vk::ObjectTypeBuffer, raw.buffer, desc.debugName);
     ++impl_->statistics.buffersCreated;
     return {index, slot.generation};
 }
@@ -1782,6 +2226,7 @@ TextureHandle VulkanDevice::create_texture(const TextureDesc& desc, std::string*
     auto& slot = impl_->textures[index];
     slot.alive = true; slot.desc = desc; slot.state = ResourceState::Undefined;
     slot.image = image; slot.memory = memory; slot.allocationBytes = allocationBytes;
+    impl_->name_object(vk::ObjectTypeImage, image, desc.debugName);
     if (desc.initialState != ResourceState::Undefined) {
         if (!impl_->record_immediate([&](vk::CommandBuffer commandBuffer) {
             return impl_->image_barrier(commandBuffer, slot, ResourceState::Undefined,
@@ -1798,6 +2243,7 @@ TextureHandle VulkanDevice::create_texture(const TextureDesc& desc, std::string*
 
 bool VulkanDevice::destroy_texture(TextureHandle handle, std::string* error) {
     auto* slot = impl_->texture(handle, error); if (!slot) return false;
+    if (slot->swapchainOwned) { set_error(error, "swapchain images are owned by their swapchain"); return false; }
     for (const auto& view : impl_->textureViews) {
         if (view.alive && view.desc.texture == handle) {
             set_error(error, "Vulkan texture still has a live view"); return false;
@@ -1908,17 +2354,180 @@ bool VulkanDevice::destroy_sampler(SamplerHandle handle, std::string* error) {
     return true;
 }
 
-SwapchainHandle VulkanDevice::create_swapchain(const SwapchainDesc&, std::string* error) {
-    impl_->unsupported("swapchains", error); return {};
+SwapchainHandle VulkanDevice::create_swapchain(const SwapchainDesc& desc, std::string* error) {
+    if (!impl_->ready(error)) return {};
+    if (!impl_->capabilities.presentation) {
+        set_error(error, impl_->surfaceExtension
+            ? "Vulkan adapter does not support VK_KHR_swapchain"
+            : "Vulkan loader does not provide VK_KHR_surface");
+        return {};
+    }
+    if (desc.width == 0U || desc.height == 0U || desc.imageCount < 2U || desc.imageCount > 4U) {
+        set_error(error, "swapchain requires positive dimensions and two to four images"); return {};
+    }
+    Impl::SwapchainSlot candidate;
+    candidate.desc = desc;
+    if (!impl_->create_surface(desc.surface, candidate.surface, error)) return {};
+    const auto discard = [&] {
+        if (candidate.swapchain) impl_->fn.destroySwapchain(impl_->device, candidate.swapchain, nullptr);
+        if (candidate.acquireFence) impl_->fn.destroyFence(impl_->device, candidate.acquireFence, nullptr);
+        impl_->fn.destroySurface(impl_->instance, candidate.surface, nullptr);
+    };
+    vk::Bool32 supported = 0U;
+    if (!impl_->check(impl_->fn.getSurfaceSupport(impl_->physicalDevice, impl_->queueFamily,
+                                                  candidate.surface, &supported),
+                      "vkGetPhysicalDeviceSurfaceSupportKHR", error)) { discard(); return {}; }
+    if (supported == 0U) {
+        set_error(error, "the Vulkan graphics queue cannot present to this window");
+        discard(); return {};
+    }
+    const vk::FenceCreateInfo fenceInfo{vk::StructureTypeFenceCreateInfo, nullptr, 0U};
+    if (!impl_->check(impl_->fn.createFence(impl_->device, &fenceInfo, nullptr, &candidate.acquireFence),
+                      "vkCreateFence(acquire)", error)) { discard(); return {}; }
+    const auto index = allocate_slot(impl_->swapchains);
+    auto& slot = impl_->swapchains[index];
+    const std::uint32_t generation = slot.generation;
+    slot = std::move(candidate);
+    slot.generation = generation;
+    slot.alive = true;
+    if (!impl_->build_swapchain(slot, desc.width, desc.height, error)) {
+        impl_->release_swapchain_images(slot);
+        if (slot.swapchain) impl_->fn.destroySwapchain(impl_->device, slot.swapchain, nullptr);
+        impl_->fn.destroyFence(impl_->device, slot.acquireFence, nullptr);
+        impl_->fn.destroySurface(impl_->instance, slot.surface, nullptr);
+        slot.swapchain = {}; slot.acquireFence = {}; slot.surface = {}; slot.desc = {};
+        retire_slot(slot);
+        return {};
+    }
+    ++impl_->statistics.swapchainsCreated;
+    return {index, slot.generation};
 }
-bool VulkanDevice::destroy_swapchain(SwapchainHandle, std::string* error) { return impl_->unsupported("swapchains", error); }
-AcquiredSwapchainImage VulkanDevice::acquire_next_image(SwapchainHandle, std::string* error) {
-    impl_->unsupported("swapchain acquisition", error); return {};
+
+bool VulkanDevice::destroy_swapchain(SwapchainHandle handle, std::string* error) {
+    auto* slot = impl_->swapchain_slot(handle, error); if (!slot) return false;
+    for (const TextureHandle image : slot->images) {
+        for (const auto& view : impl_->textureViews) {
+            if (view.alive && view.desc.texture == image) {
+                set_error(error, "a swapchain image still has a live view"); return false;
+            }
+        }
+    }
+    if (impl_->device && impl_->fn.deviceWaitIdle) (void)impl_->fn.deviceWaitIdle(impl_->device);
+    impl_->release_swapchain_images(*slot);
+    if (slot->swapchain) impl_->fn.destroySwapchain(impl_->device, slot->swapchain, nullptr);
+    if (slot->acquireFence) impl_->fn.destroyFence(impl_->device, slot->acquireFence, nullptr);
+    if (slot->surface) impl_->fn.destroySurface(impl_->instance, slot->surface, nullptr);
+    slot->swapchain = {}; slot->acquireFence = {}; slot->surface = {}; slot->desc = {};
+    retire_slot(*slot);
+    ++impl_->statistics.swapchainsDestroyed;
+    return true;
 }
-PresentResult VulkanDevice::present(SwapchainHandle, FenceHandle, std::string* error) {
-    impl_->unsupported("presentation", error);
-    return impl_->status == DeviceStatus::Lost ? PresentResult::DeviceLost : PresentResult::Error;
+
+bool VulkanDevice::resize_swapchain(SwapchainHandle handle, std::uint32_t width, std::uint32_t height,
+                                    std::string* error) {
+    if (!impl_->ready(error)) return false;
+    auto* slot = impl_->swapchain_slot(handle, error); if (!slot) return false;
+    if (slot->acquired) { set_error(error, "cannot resize a swapchain while an image is acquired"); return false; }
+    if (width == 0U || height == 0U) { set_error(error, "swapchain resize needs a nonzero size"); return false; }
+    for (const TextureHandle image : slot->images) {
+        for (const auto& view : impl_->textureViews) {
+            if (view.alive && view.desc.texture == image) {
+                set_error(error, "a swapchain image still has a live view"); return false;
+            }
+        }
+    }
+    (void)impl_->fn.deviceWaitIdle(impl_->device);
+    slot->desc.width = width;
+    slot->desc.height = height;
+    return impl_->build_swapchain(*slot, width, height, error);
 }
+
+std::uint32_t VulkanDevice::swapchain_image_count(SwapchainHandle handle) const noexcept {
+    if (!handle || handle.index >= impl_->swapchains.size()) return 0U;
+    const auto& slot = impl_->swapchains[handle.index];
+    return slot.alive && slot.generation == handle.generation
+        ? static_cast<std::uint32_t>(slot.images.size()) : 0U;
+}
+
+TextureFormat VulkanDevice::swapchain_format(SwapchainHandle handle) const noexcept {
+    if (!handle || handle.index >= impl_->swapchains.size()) return TextureFormat::BGRA8Unorm;
+    const auto& slot = impl_->swapchains[handle.index];
+    return slot.alive && slot.generation == handle.generation ? slot.format : TextureFormat::BGRA8Unorm;
+}
+
+bool VulkanDevice::swapchain_size(SwapchainHandle handle, std::uint32_t& width, std::uint32_t& height) const noexcept {
+    width = height = 0U;
+    if (!handle || handle.index >= impl_->swapchains.size()) return false;
+    const auto& slot = impl_->swapchains[handle.index];
+    if (!slot.alive || slot.generation != handle.generation) return false;
+    width = slot.width; height = slot.height;
+    return true;
+}
+
+AcquiredSwapchainImage VulkanDevice::acquire_next_image(SwapchainHandle handle, std::string* error) {
+    if (!impl_->ready(error)) return {};
+    auto* slot = impl_->swapchain_slot(handle, error); if (!slot) return {};
+    if (slot->acquired) { set_error(error, "swapchain image already acquired"); return {}; }
+    std::uint32_t index = 0U;
+    // A fence (not a semaphore) because the RHI's submit() completes on the CPU timeline:
+    // waiting here guarantees the presentation engine released the image before recording.
+    const vk::Result result = impl_->fn.acquireNextImage(impl_->device, slot->swapchain,
+        std::numeric_limits<std::uint64_t>::max(), vk::Semaphore{}, slot->acquireFence, &index);
+    AcquiredSwapchainImage acquired;
+    if (result == vk::ErrorOutOfDateKHR) { acquired.outOfDate = true; return acquired; }
+    if (result != vk::Success && result != vk::SuboptimalKHR) {
+        (void)impl_->check(result, "vkAcquireNextImageKHR", error); return {};
+    }
+    if (!impl_->check(impl_->fn.waitForFences(impl_->device, 1U, &slot->acquireFence, 1U,
+                                              std::numeric_limits<std::uint64_t>::max()),
+                      "vkWaitForFences(acquire)", error) ||
+        !impl_->check(impl_->fn.resetFences(impl_->device, 1U, &slot->acquireFence),
+                      "vkResetFences(acquire)", error)) return {};
+    if (index >= slot->images.size()) { set_error(error, "driver returned an invalid swapchain image index"); return {}; }
+    slot->acquired = true;
+    slot->acquiredIndex = index;
+    if (auto* image = impl_->texture(slot->images[index], error); image != nullptr &&
+        image->state == ResourceState::Undefined) {
+        if (!impl_->record_immediate([&](vk::CommandBuffer commandBuffer) {
+                return impl_->image_barrier(commandBuffer, *image, ResourceState::Undefined,
+                                            ResourceState::Present, error);
+            }, error)) { slot->acquired = false; return {}; }
+    }
+    acquired.texture = slot->images[index];
+    acquired.imageIndex = index;
+    acquired.suboptimal = result == vk::SuboptimalKHR;
+    return acquired;
+}
+
+PresentResult VulkanDevice::present(SwapchainHandle handle, FenceHandle waitFence, std::string* error) {
+    if (!impl_->ready(error)) return PresentResult::DeviceLost;
+    auto* slot = impl_->swapchain_slot(handle, error); if (!slot) return PresentResult::Error;
+    if (!slot->acquired) { set_error(error, "present called without acquiring an image"); return PresentResult::Error; }
+    if (waitFence && !fence_complete(waitFence)) { set_error(error, "present wait fence is incomplete"); return PresentResult::Error; }
+    const auto* image = impl_->texture(slot->images[slot->acquiredIndex], error);
+    if (!image) return PresentResult::Error;
+    if (image->state != ResourceState::Present) {
+        set_error(error, "swapchain image is not in Present state"); return PresentResult::Error;
+    }
+    slot->acquired = false;
+    vk::Result presentResult = vk::Success;
+    const vk::PresentInfoKHR info{vk::StructureTypePresentInfoKHR, nullptr, 0U, nullptr, 1U,
+                                  &slot->swapchain, &slot->acquiredIndex, &presentResult};
+    const vk::Result result = impl_->fn.queuePresent(impl_->queue, &info);
+    if (result == vk::Success) { ++impl_->statistics.presents; return PresentResult::Presented; }
+    if (result == vk::SuboptimalKHR) { ++impl_->statistics.presents; return PresentResult::Suboptimal; }
+    if (result == vk::ErrorOutOfDateKHR) return PresentResult::OutOfDate;
+    (void)impl_->check(result, "vkQueuePresentKHR", error);
+    return result == vk::ErrorDeviceLost ? PresentResult::DeviceLost : PresentResult::Error;
+}
+
+std::uint64_t VulkanDevice::validation_warning_count() const noexcept {
+    return impl_->validationCounters.warnings.load();
+}
+std::uint64_t VulkanDevice::validation_error_count() const noexcept {
+    return impl_->validationCounters.errors.load();
+}
+bool VulkanDevice::validation_enabled() const noexcept { return impl_->validationLayer; }
 BindGroupLayoutHandle VulkanDevice::create_bind_group_layout(
     const BindGroupLayoutDesc& desc, std::string* error) {
     if (!impl_->ready(error)) return {};
@@ -2658,7 +3267,10 @@ bool VulkanDevice::draw_indexed(CommandListHandle commands, std::uint32_t indexC
     auto* list = impl_->command(commands, error); if (!list) return false;
     const auto* indexBuffer = impl_->buffer(list->indexBuffer, error);
     const auto* pipeline = impl_->graphics_pipeline(list->graphicsPipeline, error);
-    if (!list->renderPassOpen || !list->graphicsPipeline || !pipeline || !list->vertexBuffer ||
+    // A vertex buffer is required only by pipelines that declare vertex input; fullscreen
+    // passes generate positions from SV_VertexID.
+    if (!list->renderPassOpen || !list->graphicsPipeline || !pipeline ||
+        (pipeline && pipeline->desc.vertexBuffer && !list->vertexBuffer) ||
         !list->indexBuffer || !list->viewportSet || !list->scissorSet || !indexBuffer ||
         (pipeline->desc.vertexBuffer && list->vertexStride != pipeline->desc.vertexBuffer->stride) ||
         list->graphicsBindGroups.size() < pipeline->desc.bindGroupLayouts.size() ||
@@ -2807,14 +3419,28 @@ FenceHandle VulkanDevice::submit(CommandListHandle commands, std::string* error)
         if (!pool) { recorded = false; break; }
         impl_->fn.cmdResetQueryPool(native, pool->pool, timestamp->index, 1U);
     }
+    bool lastWasCopy = false;
     for (const auto& command : list->commands) {
         if (!recorded) break;
+        if (!std::holds_alternative<Impl::CopyCommand>(command)) lastWasCopy = false;
         recorded = std::visit([&](const auto& item) -> bool {
             using T = std::decay_t<decltype(item)>;
             if constexpr (std::is_same_v<T, Impl::CopyCommand>) {
                 const auto* src = impl_->buffer(item.source, error);
                 const auto* dst = impl_->buffer(item.destination, error);
                 if (!src || !dst) return false;
+                // Back-to-back copies may read what the previous copy wrote (upload -> device
+                // -> readback chains); transfer writes are not visible to later transfer reads
+                // without this dependency. Software rasterizers hide the hazard, real GPUs do not.
+                if (lastWasCopy) {
+                    const vk::GlobalMemoryBarrier memory{vk::StructureTypeMemoryBarrier, nullptr,
+                                                   vk::AccessTransferWriteBit,
+                                                   vk::AccessTransferReadBit | vk::AccessTransferWriteBit};
+                    impl_->fn.cmdPipelineBarrier(native, vk::PipelineStageTransferBit,
+                                                 vk::PipelineStageTransferBit, 0U,
+                                                 1U, &memory, 0U, nullptr, 0U, nullptr);
+                }
+                lastWasCopy = true;
                 const vk::BufferCopy copy{item.sourceOffset, item.destinationOffset, item.bytes};
                 impl_->fn.cmdCopyBuffer(native, src->buffer, dst->buffer, 1U, &copy);
                 return true;
@@ -3046,7 +3672,23 @@ FenceHandle VulkanDevice::submit(CommandListHandle commands, std::string* error)
             }
             return false;
         }, command);
-        if (!recorded) break;
+        if (!recorded) {
+            // Replay rejects inconsistent command streams; say which command so callers are
+            // not left with an empty error string.
+            if (error && error->empty()) {
+                static constexpr std::array<const char*, std::variant_size_v<Impl::RecordedCommand>> kNames{
+                    "copy_buffer", "transition_buffer", "transition_texture", "begin_render_pass",
+                    "end_render_pass", "bind_graphics_pipeline", "bind_compute_bind_group",
+                    "bind_graphics_bind_group", "dispatch", "set_viewport", "set_scissor",
+                    "clear_depth_region", "bind_vertex_buffer", "bind_index_buffer", "draw_indexed",
+                    "write_timestamp", "debug_label"};
+                *error = std::string("Vulkan command list '") + list->debugName + "' rejected " +
+                         kNames[command.index()] + " (command " +
+                         std::to_string(&command - list->commands.data()) +
+                         "): bind groups or pipeline state do not match at submission";
+            }
+            break;
+        }
     }
     if (recorded && nativePassOpen) {
         set_error(error, "Vulkan native render pass remained open"); recorded = false;

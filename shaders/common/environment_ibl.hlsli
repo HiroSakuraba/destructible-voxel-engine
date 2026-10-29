@@ -11,7 +11,7 @@ float3 RotateEnvironmentDirectionY(float3 direction, float rotationRadians) {
                  -sineValue * direction.x + cosineValue * direction.z);
 }
 
-float3 EvaluateImageBasedLightingSeparateSamplers(
+float3 EvaluateImageBasedLightingWithIndirect(
     TextureCube<float4> diffuseIrradiance,
     TextureCube<float4> specularPrefilter,
     Texture2D<float2> brdfLut,
@@ -24,7 +24,8 @@ float3 EvaluateImageBasedLightingSeparateSamplers(
     float specular,
     float ambientOcclusion,
     float maximumSpecularLod,
-    float environmentRotationRadians) {
+    float environmentRotationRadians,
+    float4 indirectDiffuse) {
     float3 N = normalize(normal);
     float3 V = normalize(viewDirection);
     float NdotV = saturate(dot(N, V));
@@ -33,6 +34,9 @@ float3 EvaluateImageBasedLightingSeparateSamplers(
     float3 F0 = lerp(dielectricF0, max(baseColor, 0.0F.xxx), saturate(metallic));
     float3 irradiance = diffuseIrradiance.SampleLevel(diffuseSampler,
         RotateEnvironmentDirectionY(N, environmentRotationRadians), 0.0F).rgb;
+    // Traced indirect light (.rgb radiance, .a 1 where valid) replaces the environment's diffuse
+    // integral; it already sees occluders, so diffuse AO is not applied on top of it.
+    irradiance = lerp(irradiance, indirectDiffuse.rgb * kPi, saturate(indirectDiffuse.a));
     float3 diffuse = irradiance * max(baseColor, 0.0F.xxx) * (1.0F - saturate(metallic)) / kPi;
     float3 prefiltered = specularPrefilter.SampleLevel(specularSampler,
         RotateEnvironmentDirectionY(R, environmentRotationRadians),
@@ -49,7 +53,20 @@ float3 EvaluateImageBasedLightingSeparateSamplers(
     // preserves narrow reflections while still occluding rough reflections in cavities.
     float specularOcclusion = saturate(pow(NdotV + ao, exp2(-16.0F * saturate(roughness) - 1.0F))
                                        - 1.0F + ao);
-    return diffuse * ao + specularLighting * specularOcclusion;
+    return diffuse * lerp(ao, 1.0F, saturate(indirectDiffuse.a)) + specularLighting * specularOcclusion;
+}
+
+float3 EvaluateImageBasedLightingSeparateSamplers(
+    TextureCube<float4> diffuseIrradiance,
+    TextureCube<float4> specularPrefilter,
+    Texture2D<float2> brdfLut,
+    SamplerState diffuseSampler, SamplerState specularSampler, SamplerState brdfSampler,
+    float3 normal, float3 viewDirection, float3 baseColor, float metallic, float roughness,
+    float specular, float ambientOcclusion, float maximumSpecularLod, float environmentRotationRadians) {
+    return EvaluateImageBasedLightingWithIndirect(diffuseIrradiance, specularPrefilter, brdfLut,
+        diffuseSampler, specularSampler, brdfSampler, normal, viewDirection, baseColor, metallic,
+        roughness, specular, ambientOcclusion, maximumSpecularLod, environmentRotationRadians,
+        float4(0.0F, 0.0F, 0.0F, 0.0F));
 }
 
 float3 EvaluateImageBasedLighting(TextureCube<float4> diffuseIrradiance,TextureCube<float4> specularPrefilter,

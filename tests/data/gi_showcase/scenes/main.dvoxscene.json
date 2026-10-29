@@ -1,0 +1,11 @@
+{
+  "format": "DVOXSCENE",
+  "version": 1,
+  "name": "GiShowcase",
+  "objects": [
+    {"index":0,"id":3001,"name":"Room","nodePath":"/Room","file":"room.dvox","parent":null,"anchored":true,"structural":true,"generateCollision":true,"worldMatrix":[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]},
+    {"index":1,"id":3002,"name":"TallBox","nodePath":"/TallBox","file":"tall_box.dvox","parent":null,"anchored":true,"structural":false,"generateCollision":true,"worldMatrix":[0.951057,0,-0.309017,0,0,1,0,0,0.309017,0,0.951057,0,-0.6000,0.0000,-0.7500,1]},
+    {"index":2,"id":3003,"name":"ShortBox","nodePath":"/ShortBox","file":"short_box.dvox","parent":null,"anchored":true,"structural":false,"generateCollision":true,"worldMatrix":[0.961262,0,0.275637,0,0,1,0,0,-0.275637,0,0.961262,0,0.7500,0.0000,0.1000,1]},
+    {"index":3,"id":3004,"name":"Dome","nodePath":"/Dome","file":"dome.dvox","parent":null,"anchored":true,"structural":false,"generateCollision":true,"worldMatrix":[1.000000,0,-0.000000,0,0,1,0,0,0.000000,0,1.000000,0,-0.6500,0.0000,0.8500,1]}
+  ]
+}

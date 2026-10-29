@@ -268,6 +268,7 @@ bool SdlApplicationHost::create_window(const WindowDesc& desc, std::string* erro
     if (desc.highDpi) flags |= SDL_WINDOW_HIGH_PIXEL_DENSITY;
     if (desc.hidden) flags |= SDL_WINDOW_HIDDEN;
     if (desc.fullscreen) flags |= SDL_WINDOW_FULLSCREEN;
+    if (desc.vulkan) flags |= SDL_WINDOW_VULKAN;
     impl_->window = SDL_CreateWindow(desc.title.c_str(), desc.width, desc.height, flags);
     impl_->appliedTitle = desc.title;
     if (impl_->window == nullptr) {
@@ -545,6 +546,40 @@ WindowMetrics SdlApplicationHost::window_metrics() const noexcept {
 NativeWindowHandle SdlApplicationHost::native_window_handle() const noexcept {
     return {HostBackend::SDL3, impl_ ? impl_->window : nullptr, nullptr,
             impl_ && impl_->window ? static_cast<std::uintptr_t>(SDL_GetWindowID(impl_->window)) : 0U};
+}
+
+NativeSurfaceHandle SdlApplicationHost::native_surface_handle() const noexcept {
+    NativeSurfaceHandle surface;
+    if (!impl_ || !impl_->window) return surface;
+    const SDL_PropertiesID properties = SDL_GetWindowProperties(impl_->window);
+    if (properties == 0) return surface;
+    if (void* hwnd = SDL_GetPointerProperty(properties, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr)) {
+        surface.kind = NativeSurfaceKind::Win32;
+        surface.window = hwnd;
+        surface.instance = SDL_GetPointerProperty(properties, SDL_PROP_WINDOW_WIN32_INSTANCE_POINTER, nullptr);
+        return surface;
+    }
+    if (void* display = SDL_GetPointerProperty(properties, SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER, nullptr)) {
+        void* wlSurface = SDL_GetPointerProperty(properties, SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER, nullptr);
+        if (wlSurface) {
+            surface.kind = NativeSurfaceKind::Wayland;
+            surface.display = display;
+            surface.window = wlSurface;
+            return surface;
+        }
+    }
+    if (void* display = SDL_GetPointerProperty(properties, SDL_PROP_WINDOW_X11_DISPLAY_POINTER, nullptr)) {
+        const Sint64 window = SDL_GetNumberProperty(properties, SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0);
+        if (window != 0) {
+            surface.kind = NativeSurfaceKind::Xlib;
+            surface.display = display;
+            surface.xlibWindow = static_cast<std::uint64_t>(window);
+            return surface;
+        }
+    }
+    if (std::string_view(SDL_GetCurrentVideoDriver() ? SDL_GetCurrentVideoDriver() : "") == "offscreen")
+        surface.kind = NativeSurfaceKind::Headless;
+    return surface;
 }
 
 void SdlApplicationHost::set_window_title(std::string_view title) {

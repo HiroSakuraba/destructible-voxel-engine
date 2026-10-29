@@ -769,7 +769,7 @@ VoxelReferenceRenderStats render_radiance_cascades(
         bool fallback = false;
         VoxelMaterialDefinition material = material_for(instance, texel.material, &fallback);
         if (fallback) ++stats.materialFallbacks;
-        const std::uint32_t seed = static_cast<std::uint32_t>(index) * 747796405U + 2891336453U;
+        const std::uint32_t seed = pcg_hash(static_cast<std::uint32_t>(index));   // a hash, not an affine map: the sampling patterns stay uncorrelated between pixels
         const float visibility = shadow_visibility(tracer, texel.position, texel.normal,
                                                    environment, distances, seed, stats, &extras);
         const Float3 caustic = extras.caustics ? extras.caustics->irradiance(texel.position, texel.normal,
@@ -919,7 +919,7 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
                     VoxelMaterialDefinition material =
                         material_for(instance, hit->objectHit.material, &fallback);
                     if (fallback) ++local.materialFallbacks;
-                    const std::uint32_t seed = static_cast<std::uint32_t>(index) * 747796405U + 2891336453U;
+                    const std::uint32_t seed = pcg_hash(static_cast<std::uint32_t>(index));   // a hash, not an affine map: the sampling patterns stay uncorrelated between pixels
                     const float visibility = shadow_visibility(tracer, hit->worldPosition,
                                                                hit->worldNormal, environment, distances,
                                                                seed, local, &extras);

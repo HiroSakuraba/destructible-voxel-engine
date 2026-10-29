@@ -206,7 +206,7 @@ void test_shader_equations() {
     CHECK(pbr.find("dot(-shadingNormal, lightDirection)") != std::string::npos);
     CHECK(pbr.find("max(foliageColor, 0.0F.xxx) * (1.0F / kPi)") != std::string::npos);
     CHECK(pbr.find("base * baseTransmission * baseTransmission") != std::string::npos);
-    CHECK(ibl.find("diffuse * ao + specularLighting * specularOcclusion") != std::string::npos);
+    CHECK(ibl.find("diffuse * lerp(ao, 1.0F, saturate(indirectDiffuse.a)) + specularLighting * specularOcclusion") != std::string::npos);
     CHECK(ibl.find("exp2(-16.0F * saturate(roughness) - 1.0F)") != std::string::npos);
     CHECK(primary.find("gEnvironmentLightingEnabled == 0u") != std::string::npos);
     CHECK(shadow.find("uint cascadeCount") != std::string::npos);

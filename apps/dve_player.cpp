@@ -32,6 +32,9 @@
 #include "dve/player/frame_image.hpp"
 #include "dve/player/player_app.hpp"
 #include "dve/player/player_renderer.hpp"
+#if defined(DVE_PLAYER_HAVE_VULKAN)
+#include "dve/player/vulkan_player_renderer.hpp"
+#endif
 #include "dve/version.hpp"
 
 namespace {
@@ -195,7 +198,16 @@ window / rendering
   --render-size WxH         CPU render resolution (default 480x270 x settings renderScale)
   --render-scale f          render at window size x f instead of a fixed size
   --threads N               CPU render threads (0 = all cores, default)
-  --renderer cpu            renderer backend (only cpu exists today)
+  --renderer cpu|vulkan     renderer backend (default cpu). vulkan: GPU raster + swapchain;
+                            DVE_VULKAN_VALIDATION=1 enables the Khronos validation layer
+  --ao screen|voxel|off     vulkan: ambient occlusion method (default screen: depth-buffer
+                            marching; voxel: rays through the scene voxel grid; off: none)
+  --gi ambient|bounce|cascades
+                            vulkan: indirect light (default ambient: sky/ground hemisphere;
+                            bounce: rays through the scene voxel grid, one bounce of sun and sky;
+                            cascades: radiance cascades)
+  --no-vsync                vulkan: present without waiting for vertical blank (mailbox
+                            when available, else immediate)
   --quality fast|balanced|reference   CPU lighting cost (default fast: hard shadows,
                             ambient GI; reference = scene environment unchanged)
   --headless                no window at all (render + readback only)
@@ -236,6 +248,10 @@ struct Options {
     std::optional<float> renderScale;
     std::uint32_t threads{0};
     CpuRenderQuality quality{CpuRenderQuality::Fast};
+    bool vulkan{};
+    bool vsync{true};
+    std::string aoMode{"screen"};   // vulkan: screen | voxel | off
+    std::string giMode{"ambient"};  // vulkan: ambient | bounce | cascades
     bool fullscreen{};
     bool headless{};
     bool noAudio{};
@@ -325,7 +341,21 @@ std::optional<Options> parse_arguments(int argc, char** argv, int* exitCode) {
             if (!(v = value()) || !parse_cpu_render_quality(*v, options.quality))
                 return bad("--quality must be fast, balanced or reference");
         } else if (argument == "--renderer") {
-            if (!(v = value()) || *v != "cpu") return bad("--renderer: only 'cpu' is available in this build");
+            if (!(v = value()) || (*v != "cpu" && *v != "vulkan")) return bad("--renderer must be cpu or vulkan");
+#if !defined(DVE_PLAYER_HAVE_VULKAN)
+            if (*v == "vulkan") return bad("--renderer vulkan: this build has no Vulkan backend");
+#endif
+            options.vulkan = *v == "vulkan";
+        } else if (argument == "--ao") {
+            if (!(v = value()) || (*v != "screen" && *v != "voxel" && *v != "off"))
+                return bad("--ao must be screen, voxel or off");
+            options.aoMode = *v;
+        } else if (argument == "--gi") {
+            if (!(v = value()) || (*v != "ambient" && *v != "bounce" && *v != "cascades"))
+                return bad("--gi must be ambient, bounce or cascades");
+            options.giMode = *v;
+        } else if (argument == "--no-vsync") {
+            options.vsync = false;
         } else if (argument == "--fullscreen") {
             options.fullscreen = true;
         } else if (argument == "--headless") {
@@ -619,18 +649,26 @@ int run(int argc, char** argv) {
         window.highDpi = settings.highDpi;
         window.fullscreen = options.fullscreen || settings.displayMode != "windowed";
         window.initializeAudio = !options.noAudio;
+        window.vulkan = options.vulkan;
         if (!host.create_window(window, &error)) {
             std::cerr << "dve_player: cannot create window: " << error << '\n';
             return kExitRuntimeError;
         }
         const char* driver = SDL_GetCurrentVideoDriver();
         videoDriver = driver != nullptr ? driver : "unknown";
-        blitter = std::make_unique<SdlTextureBlitter>(static_cast<SDL_Window*>(host.native_window_handle().window));
-        if (!blitter->valid()) {
-            std::cerr << "dve_player: cannot create SDL renderer: " << SDL_GetError() << '\n';
-            return kExitRuntimeError;
+        if (options.vulkan) {
+            // The Vulkan renderer owns the window's swapchain; an SDL renderer on the same window
+            // would fight it for the surface.
+            presenter = "vulkan-swapchain(" + std::string(platform::native_surface_kind_name(
+                host.native_surface_handle().kind)) + ")";
+        } else {
+            blitter = std::make_unique<SdlTextureBlitter>(static_cast<SDL_Window*>(host.native_window_handle().window));
+            if (!blitter->valid()) {
+                std::cerr << "dve_player: cannot create SDL renderer: " << SDL_GetError() << '\n';
+                return kExitRuntimeError;
+            }
+            presenter = "sdl-texture(" + blitter->renderer_name() + ")";
         }
-        presenter = "sdl-texture(" + blitter->renderer_name() + ")";
         const platform::WindowMetrics metrics = host.window_metrics();
         if (metrics.logicalWidth > 0) {
             windowWidth = metrics.logicalWidth;
@@ -673,10 +711,45 @@ int run(int argc, char** argv) {
 #endif
 
     // --- Renderer ---------------------------------------------------------------------------
-    CpuPlayerRendererOptions rendererOptions;
-    rendererOptions.threadCount = options.threads;
-    rendererOptions.quality = options.quality;
-    std::unique_ptr<IPlayerRenderer> renderer = make_cpu_player_renderer(blitter.get(), rendererOptions);
+    std::unique_ptr<IPlayerRenderer> renderer;
+#if defined(DVE_PLAYER_HAVE_VULKAN)
+    if (options.vulkan) {
+        VulkanPlayerRendererOptions vulkanOptions;
+        vulkanOptions.globalIllumination = options.giMode == "bounce" ? PlayerGlobalIlluminationMode::VoxelOneBounce
+                                         : options.giMode == "cascades" ? PlayerGlobalIlluminationMode::RadianceCascades
+                                                                        : PlayerGlobalIlluminationMode::Ambient;
+        vulkanOptions.ambientOcclusion = options.aoMode != "off";
+        vulkanOptions.ambientOcclusionMode = options.aoMode == "voxel" ? PlayerAmbientOcclusionMode::VoxelTraced
+                                                                          : PlayerAmbientOcclusionMode::ScreenSpace;
+        if (!options.headless) {
+            vulkanOptions.surface = host.native_surface_handle();
+            const platform::WindowMetrics metrics = host.window_metrics();
+            vulkanOptions.drawableWidth = static_cast<std::uint32_t>(std::max(1, metrics.drawableWidth));
+            vulkanOptions.drawableHeight = static_cast<std::uint32_t>(std::max(1, metrics.drawableHeight));
+            if (vulkanOptions.surface.kind == platform::NativeSurfaceKind::Unavailable) {
+                std::cerr << "dve_player: --renderer vulkan: the window has no Vulkan-capable surface ("
+                          << videoDriver << " video driver)\n";
+                return kExitRuntimeError;
+            }
+        }
+        vulkanOptions.presentMode = options.vsync ? rhi::PresentMode::Fifo : rhi::PresentMode::Mailbox;
+        // Frame hashes, reference images and screenshots read the rendered frame back.
+        vulkanOptions.captureFrames = options.hash || !options.expectHashes.empty() || options.referenceImage ||
+                                      options.writeReference || options.screenshot;
+        renderer = make_vulkan_player_renderer(vulkanOptions, &error);
+        if (!renderer) {
+            std::cerr << "dve_player: --renderer vulkan unavailable: " << error
+                      << " (run with --renderer cpu)\n";
+            return kExitRuntimeError;
+        }
+    }
+#endif
+    if (!renderer) {
+        CpuPlayerRendererOptions rendererOptions;
+        rendererOptions.threadCount = options.threads;
+        rendererOptions.quality = options.quality;
+        renderer = make_cpu_player_renderer(blitter.get(), rendererOptions);
+    }
     auto [renderWidth, renderHeight] = internal_size(options, settings, windowWidth, windowHeight);
     if (!renderer->resize(renderWidth, renderHeight, &error)) {
         std::cerr << "dve_player: " << error << '\n';
@@ -716,6 +789,11 @@ int run(int argc, char** argv) {
             if (options.headless) app->handle_event(event);
             else pendingHostEvents.push_back(event);
             if (event.type == platform::EventType::KeyDown && event.key == "escape") app->request_quit();
+            if (event.type == platform::EventType::WindowResized) {
+                const platform::WindowMetrics metrics = host.window_metrics();
+                renderer->window_resized(static_cast<std::uint32_t>(std::max(0, metrics.drawableWidth)),
+                                         static_cast<std::uint32_t>(std::max(0, metrics.drawableHeight)));
+            }
             if (event.type == platform::EventType::WindowResized && options.renderScale) {
                 const auto [w, h] = internal_size(options, settings, event.width, event.height);
                 if (renderer->resize(w, h, &error)) {

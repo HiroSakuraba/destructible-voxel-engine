@@ -168,10 +168,12 @@ inline constexpr StructureType StructureTypeCommandPoolCreateInfo = 39;
 inline constexpr StructureType StructureTypeCommandBufferAllocateInfo = 40;
 inline constexpr StructureType StructureTypeCommandBufferBeginInfo = 42;
 inline constexpr StructureType StructureTypeRenderPassBeginInfo = 43;
+inline constexpr StructureType StructureTypeMemoryBarrier = 46;
 inline constexpr StructureType StructureTypeBufferMemoryBarrier = 44;
 inline constexpr StructureType StructureTypeImageMemoryBarrier = 45;
 
 inline constexpr std::uint32_t ApiVersion10 = 1U << 22U;
+inline constexpr std::uint32_t ApiVersion12 = (1U << 22U) | (2U << 12U);
 inline constexpr QueueFlags QueueGraphicsBit = 0x00000001U;
 inline constexpr QueueFlags QueueComputeBit = 0x00000002U;
 inline constexpr QueueFlags QueueTransferBit = 0x00000004U;
@@ -594,6 +596,7 @@ struct CommandBufferBeginInfo {
     const CommandBufferInheritanceInfo* pInheritanceInfo;
 };
 struct BufferCopy { DeviceSize srcOffset; DeviceSize dstOffset; DeviceSize size; };
+struct GlobalMemoryBarrier { StructureType sType; const void* pNext; AccessFlags srcAccessMask; AccessFlags dstAccessMask; };
 struct BufferMemoryBarrier {
     StructureType sType;
     const void* pNext;
@@ -758,6 +761,171 @@ using PFN_DestroyFence = void (DVE_VKAPI_CALL*)(Device, Fence, const void*);
 using PFN_QueueSubmit = Result (DVE_VKAPI_CALL*)(Queue, std::uint32_t, const SubmitInfo*, Fence);
 using PFN_WaitForFences = Result (DVE_VKAPI_CALL*)(Device, std::uint32_t, const Fence*, Bool32, std::uint64_t);
 using PFN_DeviceWaitIdle = Result (DVE_VKAPI_CALL*)(Device);
+using PFN_ResetFences = Result (DVE_VKAPI_CALL*)(Device, std::uint32_t, const Fence*);
+
+// ---- Presentation (VK_KHR_surface, VK_KHR_swapchain, platform surfaces) ----------------------
+// Every surface extension is optional at instance creation: the device enables whichever the
+// loader advertises, and a swapchain is created only for the window system it was asked for.
+using SurfaceKHR = std::uint64_t;
+using SwapchainKHR = std::uint64_t;
+using Semaphore = std::uint64_t;
+using DebugUtilsMessengerEXT = std::uint64_t;
+using ColorSpaceKHR = std::int32_t;
+using PresentModeKHR = std::int32_t;
+using SurfaceTransformFlagBitsKHR = std::uint32_t;
+using SurfaceTransformFlagsKHR = Flags;
+using CompositeAlphaFlagBitsKHR = std::uint32_t;
+using CompositeAlphaFlagsKHR = Flags;
+using SwapchainCreateFlagsKHR = Flags;
+using ObjectType = std::int32_t;
+
+inline constexpr Result SuboptimalKHR = 1000001003;
+inline constexpr Result ErrorOutOfDateKHR = -1000001004;
+inline constexpr Result ErrorSurfaceLostKHR = -1000000000;
+inline constexpr Result ErrorNativeWindowInUseKHR = -1000000001;
+
+inline constexpr StructureType StructureTypeSemaphoreCreateInfo = 9;
+inline constexpr StructureType StructureTypeSwapchainCreateInfoKHR = 1000001000;
+inline constexpr StructureType StructureTypePresentInfoKHR = 1000001001;
+inline constexpr StructureType StructureTypeXlibSurfaceCreateInfoKHR = 1000004000;
+inline constexpr StructureType StructureTypeWaylandSurfaceCreateInfoKHR = 1000006000;
+inline constexpr StructureType StructureTypeWin32SurfaceCreateInfoKHR = 1000009000;
+inline constexpr StructureType StructureTypeDebugUtilsObjectNameInfoEXT = 1000128000;
+inline constexpr StructureType StructureTypeDebugUtilsMessengerCallbackDataEXT = 1000128003;
+inline constexpr StructureType StructureTypeDebugUtilsMessengerCreateInfoEXT = 1000128004;
+inline constexpr StructureType StructureTypeMetalSurfaceCreateInfoEXT = 1000217000;
+inline constexpr StructureType StructureTypeHeadlessSurfaceCreateInfoEXT = 1000256000;
+
+inline constexpr ColorSpaceKHR ColorSpaceSrgbNonlinearKHR = 0;
+inline constexpr PresentModeKHR PresentModeImmediateKHR = 0;
+inline constexpr PresentModeKHR PresentModeMailboxKHR = 1;
+inline constexpr PresentModeKHR PresentModeFifoKHR = 2;
+inline constexpr PresentModeKHR PresentModeFifoRelaxedKHR = 3;
+inline constexpr SurfaceTransformFlagBitsKHR SurfaceTransformIdentityBitKHR = 0x00000001U;
+inline constexpr CompositeAlphaFlagBitsKHR CompositeAlphaOpaqueBitKHR = 0x00000001U;
+inline constexpr CompositeAlphaFlagBitsKHR CompositeAlphaPreMultipliedBitKHR = 0x00000002U;
+inline constexpr CompositeAlphaFlagBitsKHR CompositeAlphaPostMultipliedBitKHR = 0x00000004U;
+inline constexpr CompositeAlphaFlagBitsKHR CompositeAlphaInheritBitKHR = 0x00000008U;
+inline constexpr Format FormatB8G8R8A8Srgb = 50;
+
+inline constexpr Flags DebugUtilsMessageSeverityVerboseBitEXT = 0x00000001U;
+inline constexpr Flags DebugUtilsMessageSeverityInfoBitEXT = 0x00000010U;
+inline constexpr Flags DebugUtilsMessageSeverityWarningBitEXT = 0x00000100U;
+inline constexpr Flags DebugUtilsMessageSeverityErrorBitEXT = 0x00001000U;
+inline constexpr Flags DebugUtilsMessageTypeGeneralBitEXT = 0x00000001U;
+inline constexpr Flags DebugUtilsMessageTypeValidationBitEXT = 0x00000002U;
+inline constexpr Flags DebugUtilsMessageTypePerformanceBitEXT = 0x00000004U;
+
+inline constexpr ObjectType ObjectTypeBuffer = 9;
+inline constexpr ObjectType ObjectTypeImage = 10;
+inline constexpr ObjectType ObjectTypePipeline = 19;
+
+struct SurfaceCapabilitiesKHR {
+    std::uint32_t minImageCount;
+    std::uint32_t maxImageCount;
+    Extent2D currentExtent;
+    Extent2D minImageExtent;
+    Extent2D maxImageExtent;
+    std::uint32_t maxImageArrayLayers;
+    SurfaceTransformFlagsKHR supportedTransforms;
+    SurfaceTransformFlagBitsKHR currentTransform;
+    CompositeAlphaFlagsKHR supportedCompositeAlpha;
+    ImageUsageFlags supportedUsageFlags;
+};
+struct SurfaceFormatKHR { Format format; ColorSpaceKHR colorSpace; };
+struct SwapchainCreateInfoKHR {
+    StructureType sType;
+    const void* pNext;
+    SwapchainCreateFlagsKHR flags;
+    SurfaceKHR surface;
+    std::uint32_t minImageCount;
+    Format imageFormat;
+    ColorSpaceKHR imageColorSpace;
+    Extent2D imageExtent;
+    std::uint32_t imageArrayLayers;
+    ImageUsageFlags imageUsage;
+    SharingMode imageSharingMode;
+    std::uint32_t queueFamilyIndexCount;
+    const std::uint32_t* pQueueFamilyIndices;
+    SurfaceTransformFlagBitsKHR preTransform;
+    CompositeAlphaFlagBitsKHR compositeAlpha;
+    PresentModeKHR presentMode;
+    Bool32 clipped;
+    SwapchainKHR oldSwapchain;
+};
+struct PresentInfoKHR {
+    StructureType sType;
+    const void* pNext;
+    std::uint32_t waitSemaphoreCount;
+    const Semaphore* pWaitSemaphores;
+    std::uint32_t swapchainCount;
+    const SwapchainKHR* pSwapchains;
+    const std::uint32_t* pImageIndices;
+    Result* pResults;
+};
+struct Win32SurfaceCreateInfoKHR { StructureType sType; const void* pNext; Flags flags; void* hinstance; void* hwnd; };
+struct XlibSurfaceCreateInfoKHR { StructureType sType; const void* pNext; Flags flags; void* dpy; unsigned long window; };
+struct WaylandSurfaceCreateInfoKHR { StructureType sType; const void* pNext; Flags flags; void* display; void* surface; };
+struct MetalSurfaceCreateInfoEXT { StructureType sType; const void* pNext; Flags flags; const void* pLayer; };
+struct HeadlessSurfaceCreateInfoEXT { StructureType sType; const void* pNext; Flags flags; };
+struct SemaphoreCreateInfo { StructureType sType; const void* pNext; Flags flags; };
+struct LayerProperties {
+    char layerName[256];
+    std::uint32_t specVersion;
+    std::uint32_t implementationVersion;
+    char description[256];
+};
+struct DebugUtilsObjectNameInfoEXT {
+    StructureType sType; const void* pNext; ObjectType objectType;
+    std::uint64_t objectHandle; const char* pObjectName;
+};
+struct DebugUtilsMessengerCallbackDataEXT {
+    StructureType sType;
+    const void* pNext;
+    Flags flags;
+    const char* pMessageIdName;
+    std::int32_t messageIdNumber;
+    const char* pMessage;
+    std::uint32_t queueLabelCount;
+    const DebugUtilsLabelEXT* pQueueLabels;
+    std::uint32_t cmdBufLabelCount;
+    const DebugUtilsLabelEXT* pCmdBufLabels;
+    std::uint32_t objectCount;
+    const DebugUtilsObjectNameInfoEXT* pObjects;
+};
+using PFN_DebugUtilsMessengerCallbackEXT = Bool32 (DVE_VKAPI_CALL*)(
+    Flags, Flags, const DebugUtilsMessengerCallbackDataEXT*, void*);
+struct DebugUtilsMessengerCreateInfoEXT {
+    StructureType sType;
+    const void* pNext;
+    Flags flags;
+    Flags messageSeverity;
+    Flags messageType;
+    PFN_DebugUtilsMessengerCallbackEXT pfnUserCallback;
+    void* pUserData;
+};
+
+using PFN_EnumerateInstanceVersion = Result (DVE_VKAPI_CALL*)(std::uint32_t*);
+using PFN_EnumerateInstanceLayerProperties = Result (DVE_VKAPI_CALL*)(std::uint32_t*, LayerProperties*);
+using PFN_EnumerateDeviceExtensionProperties = Result (DVE_VKAPI_CALL*)(PhysicalDevice, const char*, std::uint32_t*, ExtensionProperties*);
+using PFN_DestroySurfaceKHR = void (DVE_VKAPI_CALL*)(Instance, SurfaceKHR, const void*);
+using PFN_GetPhysicalDeviceSurfaceSupportKHR = Result (DVE_VKAPI_CALL*)(PhysicalDevice, std::uint32_t, SurfaceKHR, Bool32*);
+using PFN_GetPhysicalDeviceSurfaceCapabilitiesKHR = Result (DVE_VKAPI_CALL*)(PhysicalDevice, SurfaceKHR, SurfaceCapabilitiesKHR*);
+using PFN_GetPhysicalDeviceSurfaceFormatsKHR = Result (DVE_VKAPI_CALL*)(PhysicalDevice, SurfaceKHR, std::uint32_t*, SurfaceFormatKHR*);
+using PFN_GetPhysicalDeviceSurfacePresentModesKHR = Result (DVE_VKAPI_CALL*)(PhysicalDevice, SurfaceKHR, std::uint32_t*, PresentModeKHR*);
+using PFN_CreateWin32SurfaceKHR = Result (DVE_VKAPI_CALL*)(Instance, const Win32SurfaceCreateInfoKHR*, const void*, SurfaceKHR*);
+using PFN_CreateXlibSurfaceKHR = Result (DVE_VKAPI_CALL*)(Instance, const XlibSurfaceCreateInfoKHR*, const void*, SurfaceKHR*);
+using PFN_CreateWaylandSurfaceKHR = Result (DVE_VKAPI_CALL*)(Instance, const WaylandSurfaceCreateInfoKHR*, const void*, SurfaceKHR*);
+using PFN_CreateMetalSurfaceEXT = Result (DVE_VKAPI_CALL*)(Instance, const MetalSurfaceCreateInfoEXT*, const void*, SurfaceKHR*);
+using PFN_CreateHeadlessSurfaceEXT = Result (DVE_VKAPI_CALL*)(Instance, const HeadlessSurfaceCreateInfoEXT*, const void*, SurfaceKHR*);
+using PFN_CreateSwapchainKHR = Result (DVE_VKAPI_CALL*)(Device, const SwapchainCreateInfoKHR*, const void*, SwapchainKHR*);
+using PFN_DestroySwapchainKHR = void (DVE_VKAPI_CALL*)(Device, SwapchainKHR, const void*);
+using PFN_GetSwapchainImagesKHR = Result (DVE_VKAPI_CALL*)(Device, SwapchainKHR, std::uint32_t*, Image*);
+using PFN_AcquireNextImageKHR = Result (DVE_VKAPI_CALL*)(Device, SwapchainKHR, std::uint64_t, Semaphore, Fence, std::uint32_t*);
+using PFN_QueuePresentKHR = Result (DVE_VKAPI_CALL*)(Queue, const PresentInfoKHR*);
+using PFN_CreateDebugUtilsMessengerEXT = Result (DVE_VKAPI_CALL*)(Instance, const DebugUtilsMessengerCreateInfoEXT*, const void*, DebugUtilsMessengerEXT*);
+using PFN_DestroyDebugUtilsMessengerEXT = void (DVE_VKAPI_CALL*)(Instance, DebugUtilsMessengerEXT, const void*);
+using PFN_SetDebugUtilsObjectNameEXT = Result (DVE_VKAPI_CALL*)(Device, const DebugUtilsObjectNameInfoEXT*);
 
 } // namespace dve::rhi::vk
 

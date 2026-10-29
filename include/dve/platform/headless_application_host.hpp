@@ -21,6 +21,10 @@ public:
     [[nodiscard]] bool poll_event(PlatformEvent& event) override;
     [[nodiscard]] WindowMetrics window_metrics() const noexcept override { return metrics_; }
     [[nodiscard]] NativeWindowHandle native_window_handle() const noexcept override;
+    // Headless while a window exists: GPU backends may present to an offscreen surface.
+    [[nodiscard]] NativeSurfaceHandle native_surface_handle() const noexcept override {
+        return hasWindow_ ? NativeSurfaceHandle{NativeSurfaceKind::Headless} : NativeSurfaceHandle{};
+    }
     void set_window_title(std::string_view title) override;
 
     void set_clipboard_text(std::string_view text) override;

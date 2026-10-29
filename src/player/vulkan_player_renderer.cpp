@@ -231,6 +231,8 @@ public:
         if (presentSampler_) (void)device_->destroy_sampler(presentSampler_, &ignored);
         if (depthSampler_) (void)device_->destroy_sampler(depthSampler_, &ignored);
         if (giPipeline_) (void)device_->destroy_graphics_pipeline(giPipeline_, &ignored);
+        if (giTemporalPipeline_) (void)device_->destroy_graphics_pipeline(giTemporalPipeline_, &ignored);
+        if (giUpsamplePipeline_) (void)device_->destroy_graphics_pipeline(giUpsamplePipeline_, &ignored);
         if (rcCascadePipeline_) (void)device_->destroy_graphics_pipeline(rcCascadePipeline_, &ignored);
         if (rcGatherPipeline_) (void)device_->destroy_graphics_pipeline(rcGatherPipeline_, &ignored);
         for (rhi::BufferHandle& buffer : rcConstants_)
@@ -368,7 +370,9 @@ public:
                              {3U, rhi::BindingType::StorageBufferReadOnly, rhi::ShaderStage::Fragment},
                              {4U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment},
                              {5U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment},
-                             {6U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment}};
+                             {6U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment},
+                             {7U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment},
+                             {8U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment}};
         aoLayout_ = device_->create_bind_group_layout(aoLayout, error);
         if (!aoLayout_) return false;
         {
@@ -393,6 +397,16 @@ public:
             desc.colorFormat = rhi::TextureFormat::RGBA16Float;
             giPipeline_ = device_->create_graphics_pipeline(desc, error);
             if (!giPipeline_) return false;
+            if (shader_blobs::player_gi_temporal_ps().size() > 0U && shader_blobs::player_gi_upsample_ps().size() > 0U) {
+                desc.debugName = "player GI temporal";
+                desc.fragmentBytecode = copy_bytes(shader_blobs::player_gi_temporal_ps());
+                giTemporalPipeline_ = device_->create_graphics_pipeline(desc, error);
+                if (!giTemporalPipeline_) return false;
+                desc.debugName = "player GI upsample";
+                desc.fragmentBytecode = copy_bytes(shader_blobs::player_gi_upsample_ps());
+                giUpsamplePipeline_ = device_->create_graphics_pipeline(desc, error);
+                if (!giUpsamplePipeline_) return false;
+            }
             if (shader_blobs::player_rc_cascade_ps().size() > 0U && shader_blobs::player_rc_gather_ps().size() > 0U) {
                 desc.debugName = "player radiance cascade";
                 desc.fragmentBytecode = copy_bytes(shader_blobs::player_rc_cascade_ps());
@@ -490,6 +504,24 @@ public:
         if (!giTexture_) return false;
         giView_ = device_->create_texture_view({giTexture_, 0U, 1U, 0U, 1U, "player indirect light view"}, error);
         if (!giView_) return false;
+        {
+            rhi::TextureDesc half = ao;
+            half.format = rhi::TextureFormat::RGBA16Float;
+            half.width = halfWidth(); half.height = halfHeight();
+            half.debugName = "player GI raw";
+            giRaw_ = device_->create_texture(half, error);
+            if (!giRaw_) return false;
+            giRawView_ = device_->create_texture_view({giRaw_, 0U, 1U, 0U, 1U, "player GI raw view"}, error);
+            if (!giRawView_) return false;
+            for (std::size_t i = 0; i < 2U; ++i) {
+                half.debugName = "player GI history";
+                giHistory_[i] = device_->create_texture(half, error);
+                if (!giHistory_[i]) return false;
+                giHistoryViews_[i] = device_->create_texture_view({giHistory_[i], 0U, 1U, 0U, 1U, "player GI history view"}, error);
+                if (!giHistoryViews_[i]) return false;
+            }
+            historyValid_ = false;
+        }
         for (std::size_t level = 0; level < kRcLevels; ++level) {
             const std::uint32_t spacing = kRcBaseSpacing << level;
             const std::uint32_t dirRes = kRcBaseDirections << level;
@@ -697,9 +729,28 @@ public:
                          {3U, gridPalette_, {}, 0U, 256U * sizeof(render::SceneGridMaterial), {}},
                          {4U, {}, rcDummyView_, 0U, 0U, depthSampler_},
                          {5U, {}, skyRadianceView_, 0U, 0U, skySampler_},
-                         {6U, {}, skyIrradianceView_, 0U, 0U, skySampler_}};
+                         {6U, {}, skyIrradianceView_, 0U, 0U, skySampler_},
+                         {7U, {}, rcDummyView_, 0U, 0U, depthSampler_},
+                         {8U, {}, rcDummyView_, 0U, 0U, depthSampler_}};
         aoGroup_ = device_->create_bind_group(group, error);
         if (!aoGroup_) return false;
+        // One-bounce GI denoise groups.
+        for (std::size_t i = 0; i < 2U; ++i) {
+            if (giTemporalGroups_[i]) { (void)device_->destroy_bind_group(giTemporalGroups_[i], &ignored); giTemporalGroups_[i] = {}; }
+            if (giUpsampleGroups_[i]) { (void)device_->destroy_bind_group(giUpsampleGroups_[i], &ignored); giUpsampleGroups_[i] = {}; }
+            if (!giRawView_ || !giHistoryViews_[i]) continue;
+            rhi::BindGroupDesc temporal = group;
+            temporal.debugName = "player GI temporal group";
+            temporal.entries[7] = {7U, {}, giRawView_, 0U, 0U, depthSampler_};
+            temporal.entries[8] = {8U, {}, giHistoryViews_[i], 0U, 0U, depthSampler_};
+            giTemporalGroups_[i] = device_->create_bind_group(temporal, error);
+            if (!giTemporalGroups_[i]) return false;
+            rhi::BindGroupDesc upsample = group;
+            upsample.debugName = "player GI upsample group";
+            upsample.entries[8] = {8U, {}, giHistoryViews_[i], 0U, 0U, depthSampler_};
+            giUpsampleGroups_[i] = device_->create_bind_group(upsample, error);
+            if (!giUpsampleGroups_[i]) return false;
+        }
         // Radiance cascade groups: one per level (reads the level above) and one for the gather.
         for (std::size_t i = 0; i < kRcLevels + 1U; ++i) {
             if (rcGroups_[i]) { (void)device_->destroy_bind_group(rcGroups_[i], &ignored); rcGroups_[i] = {}; }
@@ -785,6 +836,9 @@ public:
             std::array<float, 4> rcProbes;     // x, y probes of this level; z, w of the level above
             std::array<float, 4> rcInterval;   // x start m, y end m, z direction map size above, w top level
             std::array<float, 4> skyMode;      // x 0 colours, 1 physical (sky tables)
+            Matrix previousViewProjection;
+            std::array<float, 4> previousCamera;   // xyz position, w frame counter (uint bits)
+            std::array<float, 4> giTemporal;       // x history blend, y 1: no history, zw half-resolution size
         } constants{};
         constants.viewProjection = camera.viewProjection;
         constants.inverseViewProjection = invert(camera.viewProjection);
@@ -795,6 +849,30 @@ public:
         constants.params = {static_cast<float>(std::min(environment.ambientOcclusionSamples, 64U)),
                             environment.ambientOcclusionMaxDistanceMeters, std::max(environment.shadowBiasMeters, 1.0e-3F),
                             seedBits};
+        // History is only good while the lighting is: colour/intensity changes restart it, a moving
+        // sun just weights new rays more.
+        float historyBlend = 0.12F;
+        {
+            const std::vector<float> lightKey{environment.sunIntensity, environment.sunColor.x, environment.sunColor.y,
+                                              environment.sunColor.z, environment.skyColor.x, environment.skyColor.y,
+                                              environment.skyColor.z, environment.groundColor.x, environment.groundColor.y,
+                                              environment.groundColor.z, environment.globalIlluminationIntensity,
+                                              environment.skyMode == SkyMode::Physical ? 1.0F : 0.0F};
+            if (lightKey != giLightKey_) { historyValid_ = false; giLightKey_ = lightKey; }
+            const Float3 sun = unit(environment.sunDirection, {0.0F, 1.0F, 0.0F});
+            const float moved = sun.x * giSunDirection_.x + sun.y * giSunDirection_.y + sun.z * giSunDirection_.z;
+            if (moved < 0.9999F) historyBlend = 0.35F;
+            giSunDirection_ = sun;
+        }
+        constants.previousViewProjection = historyValid_ ? previousViewProjection_ : camera.viewProjection;
+        {
+            const auto frameBits = static_cast<std::uint32_t>(frameIndex_);
+            float frameFloat{};
+            std::memcpy(&frameFloat, &frameBits, sizeof(frameFloat));
+            constants.previousCamera = {previousCamera_.x, previousCamera_.y, previousCamera_.z, frameFloat};
+            constants.giTemporal = {historyBlend, historyValid_ ? 0.0F : 1.0F, static_cast<float>(halfWidth()),
+                                    static_cast<float>(halfHeight())};
+        }
         constants.target = {static_cast<float>(width_), static_cast<float>(height_), 1.0F / static_cast<float>(width_),
                             1.0F / static_cast<float>(height_)};
         {
@@ -879,9 +957,23 @@ public:
             if (!device_->write_buffer(rcConstants_[kRcLevels], 0U, std::as_bytes(std::span(&gather, 1U)), error)) return false;
             if (!fullscreen_pass(giTexture_, rcGatherPipeline_, "player radiance cascade gather", 0.0F,
                                  rcGroups_[kRcLevels], width_, height_)) return false;
-        } else if (giTraced &&
-                   !fullscreen_pass(giTexture_, giPipeline_, "player traced indirect light", 0.0F, aoGroup_, width_, height_))
-            return false;
+        } else if (giTraced) {
+            const std::size_t current = 1U - giHistoryIndex_;
+            const std::size_t previous = giHistoryIndex_;
+            if (giTemporalPipeline_ && giUpsamplePipeline_ && giRaw_) {
+                if (!fullscreen_pass(giRaw_, giPipeline_, "player GI rays", 0.0F, aoGroup_, halfWidth(), halfHeight()) ||
+                    !fullscreen_pass(giHistory_[current], giTemporalPipeline_, "player GI temporal", 0.0F,
+                                     giTemporalGroups_[previous], halfWidth(), halfHeight()) ||
+                    !fullscreen_pass(giTexture_, giUpsamplePipeline_, "player GI upsample", 0.0F,
+                                     giUpsampleGroups_[current], width_, height_))
+                    return false;
+                giHistoryIndex_ = current;
+                historyValid_ = true;
+                previousViewProjection_ = camera.viewProjection;
+                previousCamera_ = camera.position;
+            }
+        }
+        if (!giTraced || giCascades) historyValid_ = false;
         if (!device_->transition_texture(commands, depth_, ResourceState::ShaderRead, ResourceState::DepthWrite, error))
             return false;
         return static_cast<bool>(device_->submit(commands, error));
@@ -1197,6 +1289,17 @@ private:
         if (giView_) (void)device_->destroy_texture_view(giView_, &ignored);
         if (giTexture_) (void)device_->destroy_texture(giTexture_, &ignored);
         giView_ = {}; giTexture_ = {};
+        for (rhi::BindGroupHandle& g : giTemporalGroups_) if (g) { (void)device_->destroy_bind_group(g, &ignored); g = {}; }
+        for (rhi::BindGroupHandle& g : giUpsampleGroups_) if (g) { (void)device_->destroy_bind_group(g, &ignored); g = {}; }
+        for (std::size_t i = 0; i < 2U; ++i) {
+            if (giHistoryViews_[i]) (void)device_->destroy_texture_view(giHistoryViews_[i], &ignored);
+            if (giHistory_[i]) (void)device_->destroy_texture(giHistory_[i], &ignored);
+            giHistoryViews_[i] = {}; giHistory_[i] = {};
+        }
+        if (giRawView_) (void)device_->destroy_texture_view(giRawView_, &ignored);
+        if (giRaw_) (void)device_->destroy_texture(giRaw_, &ignored);
+        giRawView_ = {}; giRaw_ = {};
+        historyValid_ = false;
         for (rhi::BindGroupHandle& g : rcGroups_) if (g) { (void)device_->destroy_bind_group(g, &ignored); g = {}; }
         for (std::size_t i = 0; i < kRcLevels; ++i) {
             if (rcViews_[i]) (void)device_->destroy_texture_view(rcViews_[i], &ignored);
@@ -1235,6 +1338,23 @@ private:
     rhi::GraphicsPipelineHandle aoPipeline_{};
     rhi::GraphicsPipelineHandle tracedAoPipeline_{};
     rhi::GraphicsPipelineHandle giPipeline_{};
+    rhi::GraphicsPipelineHandle giTemporalPipeline_{};
+    rhi::GraphicsPipelineHandle giUpsamplePipeline_{};
+    // One-bounce GI at half resolution: raw rays, then an accumulated history (two, alternating).
+    rhi::TextureHandle giRaw_{};
+    rhi::TextureViewHandle giRawView_{};
+    std::array<rhi::TextureHandle, 2> giHistory_{};
+    std::array<rhi::TextureViewHandle, 2> giHistoryViews_{};
+    std::array<rhi::BindGroupHandle, 2> giTemporalGroups_{};   // reads giRaw_ + history[i]
+    std::array<rhi::BindGroupHandle, 2> giUpsampleGroups_{};   // reads history[i]
+    std::size_t giHistoryIndex_{};   // history written last frame
+    bool historyValid_{};
+    std::vector<float> giLightKey_;
+    Float3 giSunDirection_{0.0F, 1.0F, 0.0F};
+    Matrix previousViewProjection_{};
+    Float3 previousCamera_{};
+    [[nodiscard]] std::uint32_t halfWidth() const noexcept { return std::max(1U, (width_ + 1U) / 2U); }
+    [[nodiscard]] std::uint32_t halfHeight() const noexcept { return std::max(1U, (height_ + 1U) / 2U); }
     static constexpr std::size_t kRcLevels = 4U;
     static constexpr std::uint32_t kRcBaseSpacing = 8U;      // pixels between level-0 probes
     static constexpr std::uint32_t kRcBaseDirections = 4U;   // level-0 direction map is 4 x 4

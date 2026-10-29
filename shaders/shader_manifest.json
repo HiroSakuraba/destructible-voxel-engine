@@ -3671,10 +3671,34 @@
           "register": "s0"
         },
         {
+          "name": "gGiRawSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s7"
+        },
+        {
+          "name": "gGiHistorySampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s8"
+        },
+        {
           "name": "gDepth",
           "kind": "sampled_texture",
           "access": "read",
           "register": "t0"
+        },
+        {
+          "name": "gGiRaw",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t7"
+        },
+        {
+          "name": "gGiHistory",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t8"
         }
       ]
     },
@@ -3698,6 +3722,18 @@
           "register": "s0"
         },
         {
+          "name": "gGiRawSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s7"
+        },
+        {
+          "name": "gGiHistorySampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s8"
+        },
+        {
           "name": "gDepth",
           "kind": "sampled_texture",
           "access": "read",
@@ -3714,6 +3750,18 @@
           "kind": "storage_buffer",
           "access": "read",
           "register": "t3"
+        },
+        {
+          "name": "gGiRaw",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t7"
+        },
+        {
+          "name": "gGiHistory",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t8"
         }
       ]
     },
@@ -3749,6 +3797,18 @@
           "register": "s6"
         },
         {
+          "name": "gGiRawSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s7"
+        },
+        {
+          "name": "gGiHistorySampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s8"
+        },
+        {
           "name": "gDepth",
           "kind": "sampled_texture",
           "access": "read",
@@ -3777,6 +3837,18 @@
           "kind": "sampled_texture",
           "access": "read",
           "register": "t6"
+        },
+        {
+          "name": "gGiRaw",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t7"
+        },
+        {
+          "name": "gGiHistory",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t8"
         }
       ]
     },
@@ -3818,6 +3890,18 @@
           "register": "s6"
         },
         {
+          "name": "gGiRawSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s7"
+        },
+        {
+          "name": "gGiHistorySampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s8"
+        },
+        {
           "name": "gDepth",
           "kind": "sampled_texture",
           "access": "read",
@@ -3852,6 +3936,18 @@
           "kind": "sampled_texture",
           "access": "read",
           "register": "t6"
+        },
+        {
+          "name": "gGiRaw",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t7"
+        },
+        {
+          "name": "gGiHistory",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t8"
         }
       ]
     },
@@ -3893,6 +3989,18 @@
           "register": "s6"
         },
         {
+          "name": "gGiRawSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s7"
+        },
+        {
+          "name": "gGiHistorySampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s8"
+        },
+        {
           "name": "gDepth",
           "kind": "sampled_texture",
           "access": "read",
@@ -3927,6 +4035,192 @@
           "kind": "sampled_texture",
           "access": "read",
           "register": "t6"
+        },
+        {
+          "name": "gGiRaw",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t7"
+        },
+        {
+          "name": "gGiHistory",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t8"
+        }
+      ]
+    },
+    {
+      "name": "player_gi_temporal_ps",
+      "source": "player_gi_temporal_ps.hlsl",
+      "stage": "pixel",
+      "entry": "main",
+      "profile": "ps_6_0",
+      "bindings": [
+        {
+          "name": "PlayerSsaoConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b0"
+        },
+        {
+          "name": "gDepthSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s0"
+        },
+        {
+          "name": "gSkyRadianceSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s5"
+        },
+        {
+          "name": "gSkyIrradianceSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s6"
+        },
+        {
+          "name": "gGiRawSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s7"
+        },
+        {
+          "name": "gGiHistorySampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s8"
+        },
+        {
+          "name": "gDepth",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "gGridCells",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t2"
+        },
+        {
+          "name": "gGridPalette",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t3"
+        },
+        {
+          "name": "gSkyRadiance",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t5"
+        },
+        {
+          "name": "gSkyIrradiance",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t6"
+        },
+        {
+          "name": "gGiRaw",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t7"
+        },
+        {
+          "name": "gGiHistory",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t8"
+        }
+      ]
+    },
+    {
+      "name": "player_gi_upsample_ps",
+      "source": "player_gi_upsample_ps.hlsl",
+      "stage": "pixel",
+      "entry": "main",
+      "profile": "ps_6_0",
+      "bindings": [
+        {
+          "name": "PlayerSsaoConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b0"
+        },
+        {
+          "name": "gDepthSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s0"
+        },
+        {
+          "name": "gSkyRadianceSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s5"
+        },
+        {
+          "name": "gSkyIrradianceSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s6"
+        },
+        {
+          "name": "gGiRawSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s7"
+        },
+        {
+          "name": "gGiHistorySampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s8"
+        },
+        {
+          "name": "gDepth",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "gGridCells",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t2"
+        },
+        {
+          "name": "gGridPalette",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t3"
+        },
+        {
+          "name": "gSkyRadiance",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t5"
+        },
+        {
+          "name": "gSkyIrradiance",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t6"
+        },
+        {
+          "name": "gGiRaw",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t7"
+        },
+        {
+          "name": "gGiHistory",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t8"
         }
       ]
     }

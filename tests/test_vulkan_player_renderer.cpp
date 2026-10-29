@@ -287,7 +287,10 @@ int run() {
             const bool refOk = cpuRef->render(giView, &error) && cpuRef->present(&error);
             require(refOk, "CPU one-bounce reference failed: " + error);
             const Rgba8Image reference = *cpuRef->readback();
-            const bool bounceOk = giGpu->render(giView, &error) && giGpu->present(&error);
+            // The GPU one-bounce GI accumulates over frames (half-resolution rays + history).
+            bool bounceOk = true;
+            for (int frame = 0; frame < 12 && bounceOk; ++frame)
+                bounceOk = giGpu->render(giView, &error) && giGpu->present(&error);
             require(bounceOk, "GPU one-bounce frame failed: " + error);
             const Rgba8Image bounce = *giGpu->readback();
             const bool ambientOk = gpu->render(giView, &error) && gpu->present(&error);

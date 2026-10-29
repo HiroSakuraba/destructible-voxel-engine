@@ -2274,6 +2274,11 @@ void NativeEditorController::refresh_menu_state() noexcept {
     checked("select.mask_locked", selectionMask_.locked);
     checked("select.mask_helpers", selectionMask_.helpers);
     checked("select.mask_prefabs", selectionMask_.prefabs);
+    checked("select.operation_replace", selectionOperation_ == SelectionOperation::Replace);
+    checked("select.operation_add", selectionOperation_ == SelectionOperation::Add);
+    checked("select.operation_subtract", selectionOperation_ == SelectionOperation::Subtract);
+    checked("select.operation_toggle", selectionOperation_ == SelectionOperation::Toggle);
+    checked("select.operation_intersect", selectionOperation_ == SelectionOperation::Intersect);
     checked("select.shape_box", selectionShape_ == SelectionShape::Box);
     checked("select.shape_lasso", selectionShape_ == SelectionShape::Lasso);
     checked("select.shape_paint", selectionShape_ == SelectionShape::Paint);
@@ -5031,7 +5036,7 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
                 }
                 // Use the same precedence as viewport, voxel and component selection:
                 // Ctrl+Shift intersects, Ctrl subtracts, Shift toggles a clicked row.
-                SelectionOperation operation = selection_operation_for_modifiers(modifiers);
+                SelectionOperation operation = selection_operation_for_input(modifiers);
                 if (operation == SelectionOperation::Add && workspace_.is_selected(order[index]))
                     operation = SelectionOperation::Subtract;
                 workspace_.apply_selection({order[index]}, operation);
@@ -5304,7 +5309,7 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
                 begin_gizmo_drag(x,y,modifiers); return;
             }
             marquee_.active = true;
-            marquee_.operation = selection_operation_for_modifiers(modifiers);
+            marquee_.operation = selection_operation_for_input(modifiers);
             marquee_.startX = marquee_.currentX = x; marquee_.startY = marquee_.currentY = y;
             return;
         }
@@ -5328,7 +5333,7 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
                 voxel_brush_select_at(x, y);
                 return;
             }
-            const SelectionOperation operation = selection_operation_for_modifiers(modifiers);
+            const SelectionOperation operation = selection_operation_for_input(modifiers);
             marquee_.active = true;
             marquee_.clickObject.reset();
             marquee_.clickVoxel = hoverPick_;
@@ -5347,7 +5352,7 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
             // Ctrl removes, Shift+Ctrl intersects the current set (selection_operation_for_modifiers).
             marquee_.active = true;
             marquee_.clickObject = hoverPick_ ? std::optional<EditorObjectId>(hoverPick_->objectId) : std::nullopt;
-            marquee_.operation = selection_operation_for_modifiers(modifiers);
+            marquee_.operation = selection_operation_for_input(modifiers);
             marquee_.startX = marquee_.currentX = x;
             marquee_.startY = marquee_.currentY = y;
         } else if (activeTool_ == EditorToolId::ScatterBrush) {
@@ -7303,7 +7308,7 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
     }
     if (actionId.starts_with("select.shape_") || actionId.starts_with("select.paint_radius"))
         return dispatch_selection_shape_action(actionId);
-    if (actionId.starts_with("select.mask_") || actionId == "edit.select_invert" || actionId == "edit.select_grow" ||
+    if (actionId.starts_with("select.mask_") || actionId.starts_with("select.operation_") || actionId == "edit.select_invert" || actionId == "edit.select_grow" ||
         actionId == "edit.select_shrink" || actionId == "edit.select_connected")
         return dispatch_selection_filter_action(actionId);
     if (actionId == "voxel.fill") return arm_flood_fill();

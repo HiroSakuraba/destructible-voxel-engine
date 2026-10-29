@@ -421,7 +421,8 @@ bool object_matches_screen_rect(const EditorObject& object, const EditorCamera& 
     const EditorObjectBounds world = object_world_bounds(object);
     if (!world.valid) return false;
     const Projected broad = project_box(world.minimum, world.maximum, true);
-    if (!overlaps(broad) && !object.polygon) return false;
+    // Reject a fully projectable polygon AABB early; clipped bounds defer to face tests.
+    if (!overlaps(broad) && (!object.polygon || broad.fullyVisible)) return false;
     if (contain && contained(broad)) return true;
     if (object.polygon) {
         // The projected AABB of a triangle is NOT the triangle: a diagonal face's empty
@@ -487,7 +488,8 @@ bool object_matches_screen_rect(const EditorObject& object, const EditorCamera& 
                 vertices = output;
                 count = next;
             };
-            clip(std::nextafter(camera.nearPlane, std::numeric_limits<float>::infinity()), true);
+            // Margin keeps interpolated vertices strictly in front of the clip plane.
+            clip(camera.nearPlane + std::max(1.0e-4F, std::abs(camera.nearPlane) * 1.0e-4F), true);
             if (count < 3U) continue;
             clip(camera.farPlane, false);
             if (count < 3U) continue;

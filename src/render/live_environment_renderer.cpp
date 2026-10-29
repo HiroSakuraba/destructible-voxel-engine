@@ -237,6 +237,7 @@ bool destroy_live_environment_renderer(rhi::IDevice& device,
         for (auto group : batch.groups)
             if (group) destroy(device.destroy_bind_group(group, &local));
     r.retiredGroups.clear();
+    if (r.depthPrepassPipeline) destroy(device.destroy_graphics_pipeline(r.depthPrepassPipeline, &local));
     if (r.skyboxPipeline) destroy(device.destroy_graphics_pipeline(r.skyboxPipeline, &local));
     if (r.materialPipeline) destroy(device.destroy_graphics_pipeline(r.materialPipeline, &local));
     if (r.clearGlassPipeline) destroy(device.destroy_graphics_pipeline(r.clearGlassPipeline, &local));
@@ -247,6 +248,9 @@ bool destroy_live_environment_renderer(rhi::IDevice& device,
     r.mainMaterials.reset();
     r.materialResidency.reset();
     if (r.frameGroup) destroy(device.destroy_bind_group(r.frameGroup, &local));
+    if (r.aoFallbackView) destroy(device.destroy_texture_view(r.aoFallbackView, &local));
+    if (r.aoFallback) destroy(device.destroy_texture(r.aoFallback, &local));
+    if (r.aoSampler) destroy(device.destroy_sampler(r.aoSampler, &local));
     if (r.frameLayout) destroy(device.destroy_bind_group_layout(r.frameLayout, &local));
     if (r.objectLayout) destroy(device.destroy_bind_group_layout(r.objectLayout, &local));
     if (r.cascadeLayout) destroy(device.destroy_bind_group_layout(r.cascadeLayout, &local));
@@ -323,7 +327,8 @@ bool create_live_environment_renderer(rhi::IDevice& device,
     rhi::BindGroupLayoutDesc frameLayout;
     frameLayout.debugName = "Live environment frame layout";
     frameLayout.bindings = {{0U, rhi::BindingType::UniformBuffer,
-                             rhi::ShaderStage::Vertex | rhi::ShaderStage::Fragment}};
+                             rhi::ShaderStage::Vertex | rhi::ShaderStage::Fragment},
+                            {1U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment}};
     r.frameLayout = device.create_bind_group_layout(frameLayout, &local);
     if (!r.frameLayout) return fail(local);
     rhi::BindGroupLayoutDesc objectLayout;
@@ -338,10 +343,33 @@ bool create_live_environment_renderer(rhi::IDevice& device,
     r.cascadeLayout = device.create_bind_group_layout(cascadeLayout, &local);
     if (!r.cascadeLayout) return fail(local);
 
+    {
+        rhi::SamplerDesc aoSampler;
+        aoSampler.minFilter = aoSampler.magFilter = rhi::FilterMode::Linear;
+        aoSampler.mipmapFilter = rhi::MipmapFilterMode::Nearest;
+        aoSampler.addressU = aoSampler.addressV = aoSampler.addressW = rhi::AddressMode::ClampToEdge;
+        aoSampler.debugName = "Live ambient occlusion sampler";
+        r.aoSampler = device.create_sampler(aoSampler, &local);
+        if (!r.aoSampler) return fail(local);
+        rhi::TextureDesc white;
+        white.format = rhi::TextureFormat::RGBA8Unorm;
+        white.usage = rhi::TextureUsage::Sampled | rhi::TextureUsage::CopyDestination;
+        white.initialState = rhi::ResourceState::ShaderRead;
+        white.debugName = "Live ambient occlusion fallback (white)";
+        r.aoFallback = device.create_texture(white, &local);
+        if (!r.aoFallback) return fail(local);
+        const std::array<std::uint8_t, 4> pixel{255U, 255U, 255U, 255U};
+        if (!device.write_texture(r.aoFallback, 0U, 0U, std::as_bytes(std::span(pixel)), 4U, &local))
+            return fail(local);
+        r.aoFallbackView = device.create_texture_view({r.aoFallback, 0U, 1U, 0U, 1U,
+                                                       "Live ambient occlusion fallback view"}, &local);
+        if (!r.aoFallbackView) return fail(local);
+    }
     rhi::BindGroupDesc frameGroup;
     frameGroup.layout = r.frameLayout;
     frameGroup.debugName = "Live environment frame group";
-    frameGroup.entries = {{0U, r.frameConstants, {}, 0U, maximumFrameConstantBytes, {}}};
+    frameGroup.entries = {{0U, r.frameConstants, {}, 0U, maximumFrameConstantBytes, {}},
+                          {1U, {}, r.aoFallbackView, 0U, 0U, r.aoSampler}};
     r.frameGroup = device.create_bind_group(frameGroup, &local);
     if (!r.frameGroup) return fail(local);
 
@@ -395,6 +423,9 @@ bool create_live_environment_renderer(rhi::IDevice& device,
     if (!make_pipeline("Live environment skybox", bytecode.skyboxVertex,
         bytecode.skyboxFragment, {r.frameLayout, lighting.bindGroupLayout}, colorFormat,
         false, false, rhi::CullMode::Disabled)) return fail(local);
+    if (!make_pipeline("Live depth prepass", bytecode.materialVertex, {},
+        {r.frameLayout, r.objectLayout}, std::nullopt, true, true,
+        rhi::CullMode::Disabled)) return fail(local);
     if (!make_pipeline("Live IBL material", bytecode.materialVertex,
         bytecode.materialFragment,
         {r.frameLayout, r.objectLayout, lighting.bindGroupLayout, r.mainMaterials->layout()},
@@ -421,7 +452,7 @@ bool create_live_environment_renderer(rhi::IDevice& device,
     // occurs on the loading/owner thread, never during frame recording.
     const auto prepared=prewarm.pump(8U,std::chrono::hours{1});
     if(prepared.failed || !prewarm.ready_to_publish(epoch)) {
-        for(const auto* name : {"Live environment skybox","Live IBL material",
+        for(const auto* name : {"Live environment skybox","Live depth prepass","Live IBL material",
             "Live clear glass transport","Live opaque depth-only shadow caster",
             "Live alpha-masked depth-only shadow caster"}) {
             if(prewarm.state(epoch,name)==rhi::PipelinePreparationState::Failed)
@@ -431,6 +462,7 @@ bool create_live_environment_renderer(rhi::IDevice& device,
         return fail("live environment pipeline preparation incomplete");
     }
     r.skyboxPipeline=prewarm.take_graphics(epoch,"Live environment skybox");
+    r.depthPrepassPipeline=prewarm.take_graphics(epoch,"Live depth prepass");
     r.materialPipeline=prewarm.take_graphics(epoch,"Live IBL material");
     if(!bytecode.clearGlassFragment.empty())
         r.clearGlassPipeline=prewarm.take_graphics(epoch,"Live clear glass transport");
@@ -439,7 +471,7 @@ bool create_live_environment_renderer(rhi::IDevice& device,
     if(!bytecode.shadowFragment.empty())
         r.shadowMaskedPipeline=prewarm.take_graphics(epoch,
             "Live alpha-masked depth-only shadow caster");
-    if(!r.skyboxPipeline || !r.materialPipeline || !r.shadowOpaquePipeline ||
+    if(!r.skyboxPipeline || !r.depthPrepassPipeline || !r.materialPipeline || !r.shadowOpaquePipeline ||
        (!bytecode.clearGlassFragment.empty() && !r.clearGlassPipeline) ||
        (!bytecode.shadowFragment.empty() && !r.shadowMaskedPipeline))
         return fail("live environment failed to adopt precompiled pipeline");
@@ -465,7 +497,7 @@ bool record_live_environment_frame(rhi::IDevice& device,
                                    std::string* error) {
     stats = {};
     if (!lighting.valid() || !shadowPlan.validate(error) || !shadowAtlas.valid() ||
-        !renderer.valid() || !frame.colorTarget || !frame.depthTarget ||
+        !renderer.valid() || (!frame.colorTarget && !frame.depthPrepassOnly) || !frame.depthTarget ||
         frame.width == 0U || frame.height == 0U || frame.frameConstants.empty() ||
         frame.frameConstants.size() > renderer.frameConstantCapacity) {
         set_error(error, "live environment frame description is invalid");
@@ -692,6 +724,36 @@ bool record_live_environment_frame(rhi::IDevice& device,
         return true;
     };
 
+    if (frame.depthPrepassOnly) {
+        if (!begin_label("Live depth prepass")) return fail();
+        rhi::RenderPassDesc prepass;
+        prepass.debugName = "Live depth prepass";
+        prepass.depth = rhi::RenderPassDepthAttachment{frame.depthTarget, true, 1.0F};
+        if (!device.begin_render_pass(commands, prepass, error) ||
+            !device.set_viewport(commands, {0.0F, 0.0F, static_cast<float>(frame.width),
+                                            static_cast<float>(frame.height), 0.0F, 1.0F}, error) ||
+            !device.set_scissor(commands, {0, 0, frame.width, frame.height}, error) ||
+            !device.bind_graphics_pipeline(commands, renderer.depthPrepassPipeline, error) ||
+            !device.bind_graphics_bind_group(commands, 0U, renderer.frameGroup, error)) return fail();
+        for (const auto& item : prepared) {
+            if (item.dashr || item.draw->asset->materials[item.submesh->materialIndex].transmission > 0) continue;
+            if (!device.bind_graphics_bind_group(commands, 1U, item.objectGroup, error) ||
+                !bind_mesh(device, commands, *item.draw, error) ||
+                !device.draw_indexed(commands, item.submesh->indexCount, item.draw->instanceCount,
+                                     item.submesh->firstIndex, 0, 0U, error)) return fail();
+            stats.materialTriangles += static_cast<std::uint64_t>(item.submesh->indexCount / 3U) *
+                                       item.draw->instanceCount;
+        }
+        if (!device.end_render_pass(commands, error) || !end_label()) return fail();
+        const auto prepassSubmitted = device.submit(commands, error);
+        if (!prepassSubmitted) return fail();
+        renderer.retiredGroups.push_back({prepassSubmitted, std::move(transientGroups)});
+        if (!dashrShadowGroups.empty())
+            frame.dashrRenderer->retiredBindGroups.push_back({prepassSubmitted, std::move(dashrShadowGroups)});
+        if (fence) *fence = prepassSubmitted;
+        return true;
+    }
+
     if (frame.drawShadowCasters) {
         if (!begin_label("Live shadow cascades")) return fail();
         const auto& staticDirty = frame.staticDirtyCascades.empty()
@@ -803,6 +865,17 @@ bool record_live_environment_frame(rhi::IDevice& device,
         return true;
     };
     if (!atlas_state(rhi::ResourceState::DepthWrite, rhi::ResourceState::ShaderRead)) return fail();
+    rhi::BindGroupHandle mainFrameGroup = renderer.frameGroup;
+    if (frame.ambientOcclusion) {
+        rhi::BindGroupDesc aoGroup;
+        aoGroup.layout = renderer.frameLayout;
+        aoGroup.debugName = "Live environment frame group (ambient occlusion)";
+        aoGroup.entries = {{0U, renderer.frameConstants, {}, 0U, renderer.frameConstantCapacity, {}},
+                           {1U, {}, frame.ambientOcclusion, 0U, 0U, renderer.aoSampler}};
+        mainFrameGroup = device.create_bind_group(aoGroup, error);
+        if (!mainFrameGroup) return fail();
+        transientGroups.push_back(mainFrameGroup);
+    }
     rhi::RenderPassDesc pass;
     pass.debugName = "Live environment main pass";
     pass.colors.push_back({frame.colorTarget, true, 0.0F, 0.0F, 0.0F, 1.0F});
@@ -813,7 +886,7 @@ bool record_live_environment_frame(rhi::IDevice& device,
         !device.set_scissor(commands, {0, 0, frame.width, frame.height}, error)) return fail();
     if (frame.drawSkybox) {
         if (!device.bind_graphics_pipeline(commands, renderer.skyboxPipeline, error) ||
-            !device.bind_graphics_bind_group(commands, 0U, renderer.frameGroup, error) ||
+            !device.bind_graphics_bind_group(commands, 0U, mainFrameGroup, error) ||
             !device.bind_graphics_bind_group(commands, 1U, lighting.bindGroup, error) ||
             !device.bind_vertex_buffer(commands, 0U, renderer.skyboxVertices, 0U, 4U, error) ||
             !device.bind_index_buffer(commands, renderer.skyboxIndices, 0U,
@@ -823,7 +896,7 @@ bool record_live_environment_frame(rhi::IDevice& device,
     }
     if (frame.drawMaterials && !prepared.empty()) {
         if (!device.bind_graphics_pipeline(commands, renderer.materialPipeline, error) ||
-            !device.bind_graphics_bind_group(commands, 0U, renderer.frameGroup, error) ||
+            !device.bind_graphics_bind_group(commands, 0U, mainFrameGroup, error) ||
             !device.bind_graphics_bind_group(commands, 2U, lighting.bindGroup, error)) return fail();
         auto activePipeline=renderer.materialPipeline;
         const bool cameraInMedium=hasGlass&&renderer.opticalScene&&renderer.opticalScene->data().settings.mediumCount>0;
@@ -835,7 +908,7 @@ bool record_live_environment_frame(rhi::IDevice& device,
             const auto pipeline=glass?renderer.clearGlassPipeline:renderer.materialPipeline;
             if(pipeline!=activePipeline){
                 if(!device.bind_graphics_pipeline(commands,pipeline,error)||
-                   !device.bind_graphics_bind_group(commands,0U,renderer.frameGroup,error)||
+                   !device.bind_graphics_bind_group(commands,0U,mainFrameGroup,error)||
                    !device.bind_graphics_bind_group(commands,2U,lighting.bindGroup,error))return fail();
                 activePipeline=pipeline;
             }

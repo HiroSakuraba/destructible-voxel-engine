@@ -10,6 +10,9 @@
 // VoxelObject::revision() (destruction, edits) or cell size changes. The sky light is baked from
 // RenderEnvironment::skyColor/groundColor and rebaked when they change.
 //
+// Ambient occlusion is screen-space (shaders/player_ssao_ps.hlsl): the CPU renderer's ray
+// definition marched through the depth buffer, so it only sees what is on screen.
+//
 // What the CPU renderer does that this one does not yet: traced GI/AO, caustics, fog volumes,
 // water, surface marks/decals, prototype HUD overlays. Those objects/passes are skipped, not
 // approximated; PlayerRenderStats::skippedObjects counts objects this backend cannot draw.
@@ -40,6 +43,10 @@ struct VulkanPlayerRendererOptions {
     std::uint32_t shadowCascades{3};
     std::uint32_t shadowCascadeResolution{1024};
     float shadowDistanceMeters{80.0F};
+    // Screen-space ambient occlusion, driven by the environment (ambientOcclusionSamples,
+    // ambientOcclusionMaxDistanceMeters; off when the samples are 0 or global illumination is
+    // Off). Costs a depth pre-pass and one full-screen pass. false disables it regardless.
+    bool ambientOcclusion{true};
 };
 
 // True when this build has the Vulkan backend and its compiled shaders (DXC at build time).

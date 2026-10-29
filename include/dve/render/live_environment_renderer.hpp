@@ -108,6 +108,12 @@ struct LiveEnvironmentRendererResources {
     rhi::BindGroupLayoutHandle objectLayout;
     rhi::BindGroupLayoutHandle cascadeLayout;
     rhi::BindGroupHandle frameGroup;
+    // Frame-set binding 1: screen-space ambient occlusion (RGBA8, .r). Until a frame supplies
+    // one, this 1x1 white texture makes the shader's AO factor exactly 1.
+    rhi::TextureHandle aoFallback;
+    rhi::TextureViewHandle aoFallbackView;
+    rhi::SamplerHandle aoSampler;
+    rhi::GraphicsPipelineHandle depthPrepassPipeline;
     rhi::GraphicsPipelineHandle skyboxPipeline;
     rhi::GraphicsPipelineHandle materialPipeline;
     rhi::GraphicsPipelineHandle clearGlassPipeline;
@@ -174,6 +180,11 @@ struct LiveEnvironmentFrameDesc {
     bool drawSkybox{true};
     bool drawMaterials{true};
     bool drawShadowCasters{true};
+    // Opaque geometry only, depth attachment only (colorTarget may be empty): the depth that
+    // screen-space passes (AO) read before the real frame. No skybox, shadows or lighting.
+    bool depthPrepassOnly{false};
+    // Screen-sized RGBA8 view whose .r scales the image-based ambient light; empty = no AO.
+    rhi::TextureViewHandle ambientOcclusion{};
 };
 
 struct LiveEnvironmentFrameStats {

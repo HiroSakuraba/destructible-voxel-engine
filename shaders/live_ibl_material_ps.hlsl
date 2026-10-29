@@ -31,6 +31,10 @@ DVE_LIVE_IMAGE(3,3) SamplerState gMetallicRoughnessSampler : register(s9);
 DVE_LIVE_IMAGE(4,3) SamplerState gNormalSampler : register(s10);
 DVE_LIVE_IMAGE(5,3) SamplerState gEmissiveSampler : register(s11);
 DVE_LIVE_IMAGE(6,3) SamplerState gOpacitySampler : register(s12);
+// Screen-space ambient occlusion (.r, 1 = open). Frame set binding 1; the live renderer binds a
+// 1x1 white fallback when the frame has none, so the factor is then exactly 1.
+DVE_LIVE_IMAGE(1,0) Texture2D<float4> gAmbientOcclusion : register(t41);
+DVE_LIVE_IMAGE(1,0) SamplerState gAmbientOcclusionSampler : register(s13);
 DVE_LIVE_BIND(0,0) cbuffer LiveEnvironmentFrameConstants : register(b8) {
     float4x4 gViewProjection;float4 gEnvironmentParameters;float4 gCameraWorldPosition;
     // Direct sunlight and cascaded shadows (GpuLiveSunConstants). All zero = IBL only, the
@@ -149,10 +153,17 @@ float4 main(float4 position : SV_Position, float3 worldPosition : TEXCOORD0,
     return float4(shadingNormal*.5F+.5F,roughness);
 #endif
     const float3 V = normalize(gCameraWorldPosition.xyz-worldPosition);
+    // Ambient occlusion scales the image-based diffuse light and, through the BRDF's specular
+    // occlusion term, the reflections; never the direct sun. The AO image has the size of the
+    // render target, so SV_Position pixels map straight to its texels.
+    uint aoWidth, aoHeight;
+    gAmbientOcclusion.GetDimensions(aoWidth, aoHeight);
+    const float ambientOcclusion = saturate(gAmbientOcclusion.SampleLevel(
+        gAmbientOcclusionSampler, position.xy / float2(max(aoWidth, 1u), max(aoHeight, 1u)), 0.0F).r);
     float3 ibl = EvaluateImageBasedLightingSeparateSamplers(
         gDiffuseIrradiance, gSpecularPrefilter, gEnvironmentBrdfLut, gEnvironmentSampler,gSpecularSampler,gBrdfSampler,
         shadingNormal, V, baseColor, metallic, roughness, material.specular,
-        1.0F, gEnvironmentParameters.w, gEnvironmentParameters.x);
+        ambientOcclusion, gEnvironmentParameters.w, gEnvironmentParameters.x);
     if(material.clearCoat>0){
         float fresnel=.04F+.96F*pow(1-saturate(dot(shadingNormal,V)),5);
         float3 coat=EvaluateImageBasedLightingSeparateSamplers(gDiffuseIrradiance,gSpecularPrefilter,

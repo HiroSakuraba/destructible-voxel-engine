@@ -66,6 +66,34 @@ Matrix multiply(const Matrix& a, const Matrix& b) noexcept {
     return result;
 }
 
+// General 4x4 inverse (column-major). A singular matrix returns identity; callers only invert
+// view-projection matrices built from a valid camera.
+Matrix invert(const Matrix& m) noexcept {
+    Matrix inv{};
+    inv[0] = m[5]*m[10]*m[15] - m[5]*m[11]*m[14] - m[9]*m[6]*m[15] + m[9]*m[7]*m[14] + m[13]*m[6]*m[11] - m[13]*m[7]*m[10];
+    inv[4] = -m[4]*m[10]*m[15] + m[4]*m[11]*m[14] + m[8]*m[6]*m[15] - m[8]*m[7]*m[14] - m[12]*m[6]*m[11] + m[12]*m[7]*m[10];
+    inv[8] = m[4]*m[9]*m[15] - m[4]*m[11]*m[13] - m[8]*m[5]*m[15] + m[8]*m[7]*m[13] + m[12]*m[5]*m[11] - m[12]*m[7]*m[9];
+    inv[12] = -m[4]*m[9]*m[14] + m[4]*m[10]*m[13] + m[8]*m[5]*m[14] - m[8]*m[6]*m[13] - m[12]*m[5]*m[10] + m[12]*m[6]*m[9];
+    inv[1] = -m[1]*m[10]*m[15] + m[1]*m[11]*m[14] + m[9]*m[2]*m[15] - m[9]*m[3]*m[14] - m[13]*m[2]*m[11] + m[13]*m[3]*m[10];
+    inv[5] = m[0]*m[10]*m[15] - m[0]*m[11]*m[14] - m[8]*m[2]*m[15] + m[8]*m[3]*m[14] + m[12]*m[2]*m[11] - m[12]*m[3]*m[10];
+    inv[9] = -m[0]*m[9]*m[15] + m[0]*m[11]*m[13] + m[8]*m[1]*m[15] - m[8]*m[3]*m[13] - m[12]*m[1]*m[11] + m[12]*m[3]*m[9];
+    inv[13] = m[0]*m[9]*m[14] - m[0]*m[10]*m[13] - m[8]*m[1]*m[14] + m[8]*m[2]*m[13] + m[12]*m[1]*m[10] - m[12]*m[2]*m[9];
+    inv[2] = m[1]*m[6]*m[15] - m[1]*m[7]*m[14] - m[5]*m[2]*m[15] + m[5]*m[3]*m[14] + m[13]*m[2]*m[7] - m[13]*m[3]*m[6];
+    inv[6] = -m[0]*m[6]*m[15] + m[0]*m[7]*m[14] + m[4]*m[2]*m[15] - m[4]*m[3]*m[14] - m[12]*m[2]*m[7] + m[12]*m[3]*m[6];
+    inv[10] = m[0]*m[5]*m[15] - m[0]*m[7]*m[13] - m[4]*m[1]*m[15] + m[4]*m[3]*m[13] + m[12]*m[1]*m[7] - m[12]*m[3]*m[5];
+    inv[14] = -m[0]*m[5]*m[14] + m[0]*m[6]*m[13] + m[4]*m[1]*m[14] - m[4]*m[2]*m[13] - m[12]*m[1]*m[6] + m[12]*m[2]*m[5];
+    inv[3] = -m[1]*m[6]*m[11] + m[1]*m[7]*m[10] + m[5]*m[2]*m[11] - m[5]*m[3]*m[10] - m[9]*m[2]*m[7] + m[9]*m[3]*m[6];
+    inv[7] = m[0]*m[6]*m[11] - m[0]*m[7]*m[10] - m[4]*m[2]*m[11] + m[4]*m[3]*m[10] + m[8]*m[2]*m[7] - m[8]*m[3]*m[6];
+    inv[11] = -m[0]*m[5]*m[11] + m[0]*m[7]*m[9] + m[4]*m[1]*m[11] - m[4]*m[3]*m[9] - m[8]*m[1]*m[7] + m[8]*m[3]*m[5];
+    inv[15] = m[0]*m[5]*m[10] - m[0]*m[6]*m[9] - m[4]*m[1]*m[10] + m[4]*m[2]*m[9] + m[8]*m[1]*m[6] - m[8]*m[2]*m[5];
+    const float determinant = m[0]*inv[0] + m[1]*inv[4] + m[2]*inv[8] + m[3]*inv[12];
+    if (std::abs(determinant) < 1.0e-20F)
+        return {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    const float scale = 1.0F / determinant;
+    for (float& value : inv) value *= scale;
+    return inv;
+}
+
 struct CameraFrame {
     Matrix viewProjection{};
     Float3 position{};
@@ -219,6 +247,29 @@ public:
                            {2U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment}};
         presentLayout_ = device_->create_bind_group_layout(layout, error);
         if (!presentLayout_) return false;
+        aoConstants_ = device_->create_buffer({256U, rhi::BufferUsage::Constant, rhi::MemoryDomain::Upload,
+                                               "player SSAO constants", ResourceState::ShaderRead}, error);
+        if (!aoConstants_) return false;
+        rhi::BindGroupLayoutDesc aoLayout;
+        aoLayout.debugName = "player SSAO layout";
+        aoLayout.bindings = {{0U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment},
+                             {1U, rhi::BindingType::UniformBuffer, rhi::ShaderStage::Fragment}};
+        aoLayout_ = device_->create_bind_group_layout(aoLayout, error);
+        if (!aoLayout_) return false;
+        {
+            rhi::GraphicsPipelineDesc desc;
+            desc.debugName = "player SSAO";
+            desc.vertexBytecode = copy_bytes(shader_blobs::player_present_vs());
+            desc.fragmentBytecode = copy_bytes(shader_blobs::player_ssao_ps());
+            desc.bindGroupLayouts = {aoLayout_};
+            desc.colorFormat = rhi::TextureFormat::RGBA8Unorm;
+            desc.depthFormat = std::nullopt;
+            desc.cullMode = rhi::CullMode::Disabled;
+            desc.depthTest = false;
+            desc.depthWrite = false;
+            aoPipeline_ = device_->create_graphics_pipeline(desc, error);
+            if (!aoPipeline_) return false;
+        }
         const auto present_pipeline = [&](rhi::TextureFormat format, const char* name) {
             rhi::GraphicsPipelineDesc desc;
             desc.debugName = name;
@@ -288,6 +339,22 @@ public:
                          {2U, {}, depthView_, 0U, 0U, depthSampler_}};
         presentGroup_ = device_->create_bind_group(group, error);
         if (!presentGroup_) return false;
+        rhi::TextureDesc ao;
+        ao.format = rhi::TextureFormat::RGBA8Unorm;
+        ao.width = width; ao.height = height;
+        ao.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::Sampled;
+        ao.initialState = ResourceState::ShaderRead;   // resting state: sampled by the main pass
+        ao.debugName = "player ambient occlusion";
+        aoTexture_ = device_->create_texture(ao, error);
+        if (!aoTexture_) return false;
+        aoView_ = device_->create_texture_view({aoTexture_, 0U, 1U, 0U, 1U, "player AO view"}, error);
+        if (!aoView_) return false;
+        rhi::BindGroupDesc aoGroup;
+        aoGroup.layout = aoLayout_;
+        aoGroup.debugName = "player SSAO group";
+        aoGroup.entries = {{0U, {}, depthView_, 0U, 0U, depthSampler_}, {1U, aoConstants_, {}, 0U, 256U, {}}};
+        aoGroup_ = device_->create_bind_group(aoGroup, error);
+        if (!aoGroup_) return false;
         frame_.width = width; frame_.height = height;
         frame_.pixels.assign(static_cast<std::size_t>(width) * height * 4U, 0U);
         rendered_ = false;
@@ -372,7 +439,10 @@ public:
         std::array<float, 24> head{};
         std::copy(camera.viewProjection.begin(), camera.viewProjection.end(), head.begin());
         head[16] = 0.0F;                                         // environment rotation
-        head[17] = 1.0F;                                         // environment intensity
+        // Ambient (image-based) light strength: the CPU scales its sky/ground ambient by
+        // globalIlluminationIntensity, and has none with global illumination off.
+        head[17] = environment.globalIlluminationMode == GlobalIlluminationMode::Off
+                       ? 0.0F : environment.globalIlluminationIntensity;
         head[18] = 0.0F;                                         // exposure EV (applied at present)
         head[19] = static_cast<float>(std::max(lighting_.specularMipLevels, 1U) - 1U);
         head[20] = camera.position.x; head[21] = camera.position.y; head[22] = camera.position.z; head[23] = 1.0F;
@@ -383,7 +453,15 @@ public:
             environment.shadowStrength, camera.forward);
         std::memcpy(constants.data() + render::kLiveSunConstantsOffset, &sun, sizeof(sun));
 
+        // Screen-space ambient occlusion: depth pre-pass -> AO image the main pass samples.
+        const bool aoOn = options_.ambientOcclusion && environment.ambientOcclusionSamples > 0U &&
+                          environment.ambientOcclusionMaxDistanceMeters > 0.0F &&
+                          environment.globalIlluminationMode != GlobalIlluminationMode::Off && !draws_.empty();
+        if (aoOn && !record_ambient_occlusion(environment, camera, constants, plan, error))
+            return stage_failed("ambient occlusion", error);
+
         render::LiveEnvironmentFrameDesc frame;
+        frame.ambientOcclusion = aoOn ? aoView_ : rhi::TextureViewHandle{};
         frame.colorTarget = hdr_;
         frame.depthTarget = depth_;
         frame.width = width_;
@@ -405,6 +483,64 @@ public:
         stats_.renderMilliseconds = milliseconds_since(start);
         rendered_ = true;
         return true;
+    }
+
+    bool record_ambient_occlusion(const RenderEnvironment& environment, const CameraFrame& camera,
+                                  std::span<const std::byte> frameConstants,
+                                  const render::CascadedShadowPlan& plan, std::string* error) {
+        render::LiveEnvironmentFrameDesc prepass;
+        prepass.depthTarget = depth_;
+        prepass.width = width_;
+        prepass.height = height_;
+        prepass.frameConstants = frameConstants;
+        prepass.polygonDraws = draws_;
+        prepass.cameraWorldPosition = camera.position;
+        prepass.drawSkybox = false;
+        prepass.drawMaterials = false;
+        prepass.drawShadowCasters = false;
+        prepass.depthPrepassOnly = true;
+        render::LiveEnvironmentFrameStats prepassStats;
+        if (!render::record_live_environment_frame(*device_, lighting_, plan, atlas_, live_, prepass, prepassStats,
+                                                   nullptr, error)) return false;
+        struct alignas(16) SsaoConstants {
+            Matrix viewProjection;
+            Matrix inverseViewProjection;
+            std::array<float, 4> cameraPosition;
+            std::array<float, 4> params;
+            std::array<float, 4> target;
+        } constants{};
+        constants.viewProjection = camera.viewProjection;
+        constants.inverseViewProjection = invert(camera.viewProjection);
+        constants.cameraPosition = {camera.position.x, camera.position.y, camera.position.z, 1.0F};
+        const std::uint32_t seed = 1U;
+        float seedBits{};
+        std::memcpy(&seedBits, &seed, sizeof(seedBits));
+        constants.params = {static_cast<float>(std::min(environment.ambientOcclusionSamples, 64U)),
+                            environment.ambientOcclusionMaxDistanceMeters, std::max(environment.shadowBiasMeters, 1.0e-3F),
+                            seedBits};
+        constants.target = {static_cast<float>(width_), static_cast<float>(height_), 1.0F / static_cast<float>(width_),
+                            1.0F / static_cast<float>(height_)};
+        if (!device_->write_buffer(aoConstants_, 0U, std::as_bytes(std::span(&constants, 1U)), error)) return false;
+        const rhi::CommandListHandle commands = device_->begin_commands(rhi::QueueKind::Graphics, "player ambient occlusion", error);
+        if (!commands) return false;
+        if (!device_->transition_texture(commands, depth_, ResourceState::DepthWrite, ResourceState::ShaderRead, error) ||
+            !device_->transition_texture(commands, aoTexture_, ResourceState::ShaderRead, ResourceState::RenderTarget, error))
+            return false;
+        rhi::RenderPassDesc pass;
+        pass.debugName = "player SSAO";
+        pass.colors.push_back({aoTexture_, true, 1.0F, 1.0F, 1.0F, 1.0F});
+        if (!device_->begin_render_pass(commands, pass, error) ||
+            !device_->bind_graphics_pipeline(commands, aoPipeline_, error) ||
+            !device_->bind_graphics_bind_group(commands, 0U, aoGroup_, error) ||
+            !device_->set_viewport(commands, {0.0F, 0.0F, static_cast<float>(width_), static_cast<float>(height_), 0.0F, 1.0F}, error) ||
+            !device_->set_scissor(commands, {0, 0, width_, height_}, error) ||
+            !device_->bind_index_buffer(commands, triangleIndices_, 0U, rhi::IndexFormat::Uint32, error) ||
+            !device_->draw_indexed(commands, 3U, 1U, 0U, 0, 0U, error) ||
+            !device_->end_render_pass(commands, error)) return false;
+        if (!device_->transition_texture(commands, depth_, ResourceState::ShaderRead, ResourceState::DepthWrite, error) ||
+            !device_->transition_texture(commands, aoTexture_, ResourceState::RenderTarget, ResourceState::ShaderRead, error))
+            return false;
+        return static_cast<bool>(device_->submit(commands, error));
     }
 
     bool present(std::string* error) override {
@@ -636,6 +772,10 @@ private:
     void destroy_targets() {
         if (!device_) return;
         std::string ignored;
+        if (aoGroup_) (void)device_->destroy_bind_group(aoGroup_, &ignored);
+        if (aoView_) (void)device_->destroy_texture_view(aoView_, &ignored);
+        if (aoTexture_) (void)device_->destroy_texture(aoTexture_, &ignored);
+        aoGroup_ = {}; aoView_ = {}; aoTexture_ = {};
         if (presentGroup_) (void)device_->destroy_bind_group(presentGroup_, &ignored);
         if (hdrView_) (void)device_->destroy_texture_view(hdrView_, &ignored);
         if (hdr_) (void)device_->destroy_texture(hdr_, &ignored);
@@ -663,6 +803,12 @@ private:
     rhi::SamplerHandle presentSampler_{};
     rhi::BindGroupLayoutHandle presentLayout_{};
     rhi::BindGroupHandle presentGroup_{};
+    rhi::BufferHandle aoConstants_{};
+    rhi::BindGroupLayoutHandle aoLayout_{};
+    rhi::GraphicsPipelineHandle aoPipeline_{};
+    rhi::TextureHandle aoTexture_{};
+    rhi::TextureViewHandle aoView_{};
+    rhi::BindGroupHandle aoGroup_{};
     rhi::GraphicsPipelineHandle presentPipelineOffscreen_{};
     rhi::GraphicsPipelineHandle presentPipelineSwapchain_{};
     rhi::FenceHandle lastFence_{};

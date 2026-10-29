@@ -183,8 +183,58 @@ int run() {
     require(diff.geometryPixels > kWidth * kHeight / 8U, "too little geometry on screen to compare");
     require(diff.silhouetteIoU > 0.97, "GPU and CPU geometry coverage disagree (IoU " +
                                            std::to_string(diff.silhouetteIoU) + ")");
-    require(diff.meanAbsoluteError < 6.0, "GPU shading differs too much from the CPU reference (mean " +
+    require(diff.meanAbsoluteError < 2.0, "GPU shading differs too much from the CPU reference (mean " +
                                                std::to_string(diff.meanAbsoluteError) + ")");
+
+    // Ambient occlusion on: crevices (tower base, under the crate) darken on both renderers.
+    // The sun is off so the image is ambient light only, which is what AO scales.
+    PlayerRenderView flatView = view;
+    flatView.environment.sunIntensity = 0.0F;
+    PlayerRenderView aoView = flatView;
+    aoView.environment.ambientOcclusionSamples = 16U;
+    aoView.environment.ambientOcclusionMaxDistanceMeters = 0.6F;
+    {
+        const bool gpuFlatOk = gpu->render(flatView, &error) && gpu->present(&error);
+        require(gpuFlatOk, "GPU ambient-only frame failed: " + error);
+        const Rgba8Image gpuFlat = *gpu->readback();
+        const bool cpuFlatOk = cpu->render(flatView, &error) && cpu->present(&error);
+        require(cpuFlatOk, "CPU ambient-only frame failed: " + error);
+        const Rgba8Image cpuFlat = *cpu->readback();
+        const bool gpuAo = gpu->render(aoView, &error) && gpu->present(&error);
+        require(gpuAo, "GPU AO frame failed: " + error);
+        const Rgba8Image aoFrame = *gpu->readback();
+        const bool cpuAo = cpu->render(aoView, &error) && cpu->present(&error);
+        require(cpuAo, "CPU AO frame failed: " + error);
+        const Rgba8Image cpuAoFrame = *cpu->readback();
+        Rgba8Image aoDiffImage;
+        const Diff aoDiff = compare(cpuAoFrame, aoFrame, aoDiffImage);
+        // How much darker AO made each renderer's geometry, averaged over shared geometry.
+        const auto darkening = [&](const Rgba8Image& with, const Rgba8Image& without) {
+            double sum = 0.0; std::uint64_t n = 0;
+            for (std::size_t i = 0; i < with.pixels.size(); i += 4U) {
+                const int a = with.pixels[i] + with.pixels[i + 1U] + with.pixels[i + 2U];
+                const int b = without.pixels[i] + without.pixels[i + 1U] + without.pixels[i + 2U];
+                if (b > 60) { sum += double(b - a) / 3.0; ++n; }
+            }
+            return n ? sum / double(n) : 0.0;
+        };
+        const double gpuDark = darkening(aoFrame, gpuFlat), cpuDark = darkening(cpuAoFrame, cpuFlat);
+        std::cout << "AO: silhouette IoU " << aoDiff.silhouetteIoU << ", mean |error| " << aoDiff.meanAbsoluteError
+                  << "; mean darkening GPU " << gpuDark << " CPU " << cpuDark << "\n";
+        if (const char* dir = std::getenv("DVE_PLAYER_GPU_DIFF_DIR")) {
+            save_ppm(std::filesystem::path(dir) / "cpu_flat.ppm", cpuFlat);
+            save_ppm(std::filesystem::path(dir) / "gpu_flat.ppm", gpuFlat);
+            save_ppm(std::filesystem::path(dir) / "cpu_ao.ppm", cpuAoFrame);
+            save_ppm(std::filesystem::path(dir) / "gpu_ao.ppm", aoFrame);
+            save_ppm(std::filesystem::path(dir) / "diff_ao.ppm", aoDiffImage);
+        }
+        require(cpuDark > 0.02, "CPU reference shows no ambient occlusion in the test scene");
+        require(gpuDark > 0.6 * cpuDark && gpuDark < 1.5 * cpuDark,
+                "GPU ambient occlusion strength differs from the CPU reference (GPU " + std::to_string(gpuDark) +
+                    ", CPU " + std::to_string(cpuDark) + ")");
+        require(aoDiff.meanAbsoluteError < 3.0, "GPU ambient-only image differs too much from the CPU reference (mean " +
+                                                    std::to_string(aoDiff.meanAbsoluteError) + ")");
+    }
 
     // Same view again: cached meshes, identical frame.
     const bool again = gpu->render(view, &error) && gpu->present(&error);

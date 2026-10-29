@@ -15,4 +15,5 @@ namespace dve::player::shader_blobs {
 [[nodiscard]] std::span<const std::byte> live_csm_caster_ps() noexcept;
 [[nodiscard]] std::span<const std::byte> player_present_vs() noexcept;
 [[nodiscard]] std::span<const std::byte> player_present_ps() noexcept;
+[[nodiscard]] std::span<const std::byte> player_ssao_ps() noexcept;
 } // namespace dve::player::shader_blobs

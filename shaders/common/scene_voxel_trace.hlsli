@@ -13,6 +13,18 @@ uint GridCell(int3 c) {
     return (gGridCells[index >> 2u] >> ((index & 3u) * 8u)) & 0xFFu;
 }
 
+// Occupancy of 8x8x8-cell blocks, one byte per block, stored after the fine cells in the same
+// buffer (word offset gGridSize.w): lets a ray cross empty space a block at a time.
+static const int kCoarseBlock = 8;
+
+bool CoarseBlockEmpty(int3 c) {
+    const uint3 size = (uint3)gGridSize.xyz;
+    const uint3 coarseSize = (size + (uint)(kCoarseBlock - 1)) / (uint)kCoarseBlock;
+    const uint3 b = (uint3)(c / kCoarseBlock);
+    const uint index = (b.z * coarseSize.y + b.y) * coarseSize.x + b.x;
+    return ((gGridCells[(uint)gGridSize.w + (index >> 2u)] >> ((index & 3u) * 8u)) & 0xFFu) == 0u;
+}
+
 struct GridHit {
     float t;        // distance to the cell entered
     uint cell;      // palette slot + 1
@@ -50,6 +62,26 @@ bool TraceSceneGrid(float3 origin, float3 dir, float maxDistance, out GridHit hi
     float tEntry = tEnter;
     int axisCrossed = entryAxis;
     [loop] for (int i = 0; i < 384; ++i) {
+        if (gGridSize.w > 0.0F && CoarseBlockEmpty(c)) {
+            // Empty block: jump to where the ray leaves it, then continue stepping from there.
+            const int3 blockLow = (c / kCoarseBlock) * kCoarseBlock;
+            const float3 edge = gmin + (float3(blockLow) + float3(stepDir.x > 0 ? kCoarseBlock : 0, stepDir.y > 0 ? kCoarseBlock : 0,
+                                                                  stepDir.z > 0 ? kCoarseBlock : 0)) * cell;
+            const float3 tBlock = (edge - origin) * inv;
+            float tOut = tBlock.x;
+            int axis = 0;
+            if (tBlock.y < tOut) { tOut = tBlock.y; axis = 1; }
+            if (tBlock.z < tOut) { tOut = tBlock.z; axis = 2; }
+            if (tOut >= tExit) break;
+            tEntry = tOut;
+            axisCrossed = axis;
+            const float3 skipPoint = origin + dir * (tOut + 1.0e-4F * cell);
+            c = clamp((int3)floor((skipPoint - gmin) / cell), int3(0, 0, 0), (int3)gGridSize.xyz - 1);
+            const float3 nextBoundary = gmin + (float3(c) + float3(stepDir.x > 0 ? 1.0F : 0.0F, stepDir.y > 0 ? 1.0F : 0.0F,
+                                                                  stepDir.z > 0 ? 1.0F : 0.0F)) * cell;
+            tMax = (nextBoundary - origin) * inv;
+            continue;
+        }
         const uint value = GridCell(c);
         if (value != 0u) {
             hit.t = tEntry;

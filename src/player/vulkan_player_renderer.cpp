@@ -788,9 +788,24 @@ public:
         if (grid_.empty()) return true;
         if (!changed && gridUploaded_) return true;
         const auto cells = grid_.cells();
-        if (!ensure_grid_buffer(cells.size(), error)) return false;
+        // Fine cells, padded to whole words, then one occupancy byte per 8x8x8 block (see
+        // scene_voxel_trace.hlsli).
+        const auto dims = grid_.dimensions();
+        const std::array<std::uint32_t, 3> coarseDims{(dims[0] + 7U) / 8U, (dims[1] + 7U) / 8U, (dims[2] + 7U) / 8U};
         std::vector<std::uint8_t> padded(cells.begin(), cells.end());
         padded.resize((padded.size() + 3U) & ~std::size_t{3U});
+        coarseOffsetWords_ = static_cast<std::uint32_t>(padded.size() / 4U);
+        std::vector<std::uint8_t> coarse(static_cast<std::size_t>(coarseDims[0]) * coarseDims[1] * coarseDims[2], 0U);
+        for (std::uint32_t z = 0; z < dims[2]; ++z)
+            for (std::uint32_t y = 0; y < dims[1]; ++y) {
+                const std::size_t row = (static_cast<std::size_t>(z) * dims[1] + y) * dims[0];
+                const std::size_t coarseRow = (static_cast<std::size_t>(z / 8U) * coarseDims[1] + y / 8U) * coarseDims[0];
+                for (std::uint32_t x = 0; x < dims[0]; ++x)
+                    if (cells[row + x] != 0U) coarse[coarseRow + x / 8U] = 1U;
+            }
+        padded.insert(padded.end(), coarse.begin(), coarse.end());
+        padded.resize((padded.size() + 3U) & ~std::size_t{3U});
+        if (!ensure_grid_buffer(padded.size(), error)) return false;
         if (!device_->write_buffer(gridBuffer_, 0U, std::as_bytes(std::span(padded)), error)) return false;
         const auto palette = grid_.palette();
         if (!palette.empty() &&
@@ -896,7 +911,8 @@ public:
             const Float3 origin = grid_.origin();
             const auto dims = grid_.dimensions();
             constants.gridOrigin = {origin.x, origin.y, origin.z, grid_.cell_meters()};
-            constants.gridSize = {static_cast<float>(dims[0]), static_cast<float>(dims[1]), static_cast<float>(dims[2]), 0.0F};
+            constants.gridSize = {static_cast<float>(dims[0]), static_cast<float>(dims[1]), static_cast<float>(dims[2]),
+                                  static_cast<float>(coarseOffsetWords_)};
         }
         if (!device_->write_buffer(aoConstants_, 0U, std::as_bytes(std::span(&constants, 1U)), error)) return false;
         const rhi::CommandListHandle commands = device_->begin_commands(rhi::QueueKind::Graphics, "player ambient occlusion", error);
@@ -1348,6 +1364,7 @@ private:
     std::array<rhi::BindGroupHandle, 2> giTemporalGroups_{};   // reads giRaw_ + history[i]
     std::array<rhi::BindGroupHandle, 2> giUpsampleGroups_{};   // reads history[i]
     std::size_t giHistoryIndex_{};   // history written last frame
+    std::uint32_t coarseOffsetWords_{};   // where the block occupancy bytes start in the grid buffer
     bool historyValid_{};
     std::vector<float> giLightKey_;
     Float3 giSunDirection_{0.0F, 1.0F, 0.0F};

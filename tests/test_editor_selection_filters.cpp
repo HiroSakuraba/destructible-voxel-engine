@@ -236,6 +236,10 @@ void test_selection_operation_modes() {
     check(c.dispatch_action("select.operation_intersect"), "enable intersection mode");
     box(c, {11.0F, 2.0F, 2.0F}, {8.0F, -1.0F, 2.0F});
     check(selected_exactly(c, {}), "intersect with disjoint box clears prior selection");
+    check(c.dispatch_action("select.operation_add"), "enable explicit add");
+    c.workspace().select_object(1);
+    click(c, {2.0F, 1.5F, 2.0F});
+    check(selected_exactly(c, {1}), "explicit Add must not turn into Shift-click removal");
     check(c.dispatch_action("select.operation_replace"), "restore replace mode");
 
     // Hierarchy Ctrl+Shift must intersect, not subtract. This was different from

@@ -168,6 +168,7 @@ inline constexpr StructureType StructureTypeCommandPoolCreateInfo = 39;
 inline constexpr StructureType StructureTypeCommandBufferAllocateInfo = 40;
 inline constexpr StructureType StructureTypeCommandBufferBeginInfo = 42;
 inline constexpr StructureType StructureTypeRenderPassBeginInfo = 43;
+inline constexpr StructureType StructureTypeMemoryBarrier = 46;
 inline constexpr StructureType StructureTypeBufferMemoryBarrier = 44;
 inline constexpr StructureType StructureTypeImageMemoryBarrier = 45;
 
@@ -595,6 +596,7 @@ struct CommandBufferBeginInfo {
     const CommandBufferInheritanceInfo* pInheritanceInfo;
 };
 struct BufferCopy { DeviceSize srcOffset; DeviceSize dstOffset; DeviceSize size; };
+struct MemoryBarrier { StructureType sType; const void* pNext; AccessFlags srcAccessMask; AccessFlags dstAccessMask; };
 struct BufferMemoryBarrier {
     StructureType sType;
     const void* pNext;

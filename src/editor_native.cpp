@@ -2274,6 +2274,11 @@ void NativeEditorController::refresh_menu_state() noexcept {
     checked("select.mask_locked", selectionMask_.locked);
     checked("select.mask_helpers", selectionMask_.helpers);
     checked("select.mask_prefabs", selectionMask_.prefabs);
+    checked("select.operation_replace", selectionOperation_ == SelectionOperation::Replace);
+    checked("select.operation_add", selectionOperation_ == SelectionOperation::Add);
+    checked("select.operation_subtract", selectionOperation_ == SelectionOperation::Subtract);
+    checked("select.operation_toggle", selectionOperation_ == SelectionOperation::Toggle);
+    checked("select.operation_intersect", selectionOperation_ == SelectionOperation::Intersect);
     checked("select.shape_box", selectionShape_ == SelectionShape::Box);
     checked("select.shape_lasso", selectionShape_ == SelectionShape::Lasso);
     checked("select.shape_paint", selectionShape_ == SelectionShape::Paint);
@@ -5029,10 +5034,15 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
                     (void)set_hierarchy_expanded(order[index], hierarchy_collapsed(order[index]));
                     return;
                 }
-                // Same rule as the viewport: Shift adds (or takes out a selected row), Ctrl removes.
-                if ((modifiers & 2U) != 0U) workspace_.apply_selection({order[index]}, SelectionOperation::Subtract);
-                else if ((modifiers & 1U) != 0U) workspace_.toggle_selection(order[index]);
-                else workspace_.select_object(order[index]);
+                // Use the same precedence as viewport, voxel and component selection:
+                // Ctrl+Shift intersects, Ctrl subtracts, Shift toggles a clicked row.
+                SelectionOperation operation = selection_operation_for_input(modifiers);
+                // Only Shift-click toggles a selected row off; persistent Add mode keeps it.
+                if ((modifiers & 1U) != 0U && operation == SelectionOperation::Add &&
+                    workspace_.is_selected(order[index]))
+                    operation = SelectionOperation::Subtract;
+                workspace_.apply_selection({order[index]}, operation);
+                refresh_menu_state();
                 focusRegion_ = EditorFocusRegion::SceneHierarchy;
                 // Armed as a pending drag source; pointer_move promotes it to an active drag
                 // only once the pointer has actually moved, so a plain click never reparents.
@@ -5301,7 +5311,8 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
                 begin_gizmo_drag(x,y,modifiers); return;
             }
             marquee_.active = true;
-            marquee_.operation = selection_operation_for_modifiers(modifiers);
+            marquee_.operation = selection_operation_for_input(modifiers);
+            marquee_.shiftHeldOnPress = (modifiers & 1U) != 0U;
             marquee_.startX = marquee_.currentX = x; marquee_.startY = marquee_.currentY = y;
             return;
         }
@@ -5325,11 +5336,12 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
                 voxel_brush_select_at(x, y);
                 return;
             }
-            const SelectionOperation operation = selection_operation_for_modifiers(modifiers);
+            const SelectionOperation operation = selection_operation_for_input(modifiers);
             marquee_.active = true;
             marquee_.clickObject.reset();
             marquee_.clickVoxel = hoverPick_;
             marquee_.operation = operation;
+            marquee_.shiftHeldOnPress = (modifiers & 1U) != 0U;
             marquee_.startX = marquee_.currentX = x;
             marquee_.startY = marquee_.currentY = y;
             return;
@@ -5344,7 +5356,8 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
             // Ctrl removes, Shift+Ctrl intersects the current set (selection_operation_for_modifiers).
             marquee_.active = true;
             marquee_.clickObject = hoverPick_ ? std::optional<EditorObjectId>(hoverPick_->objectId) : std::nullopt;
-            marquee_.operation = selection_operation_for_modifiers(modifiers);
+            marquee_.operation = selection_operation_for_input(modifiers);
+            marquee_.shiftHeldOnPress = (modifiers & 1U) != 0U;
             marquee_.startX = marquee_.currentX = x;
             marquee_.startY = marquee_.currentY = y;
         } else if (activeTool_ == EditorToolId::ScatterBrush) {
@@ -5575,23 +5588,35 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
                 const int bottom = std::max(marquee_.startY, y);
                 const bool contain = x >= marquee_.startX;
                 const UiRect rectangle{left, top, right - left + 1, bottom - top + 1};
-                // Pieces inside a closed group count for the group: a crossing box takes the group if
-                // any piece is touched, a window box only if every piece with geometry is inside.
-                std::map<EditorObjectId, std::pair<std::size_t, std::size_t>> groupPieces;  // matched, total
+                // Closed groups select as one object. For containment, *every* visible
+                // geometric piece—including the parent if it has its own geometry—must be
+                // inside. An earlier implementation inserted the parent before checking
+                // its children, so a partially enclosed closed group was selected anyway.
+                std::map<EditorObjectId, std::pair<std::size_t, std::size_t>> groupPieces; // matched, total
+                std::map<EditorObjectId, bool> rootGeometry;
                 for (const auto& [id, object] : workspace_.document().objects()) {
-                    // Box selection only takes what is on screen: isolated-out objects are skipped
-                    // (object_matches_screen_rect already skips hidden ones).
-                    if (is_isolated_out(id)) continue;
+                    if (is_isolated_out(id) || !object.flags.visible || !has_own_geometry(object)) continue;
                     const EditorObjectId target = viewport_selection_target(id);
                     const bool matched = object_matches_screen_rect(object, camera_, layout_.viewport, rectangle, contain);
-                    if (target == id) { if (matched) hits.insert(id); continue; }
-                    if (!has_own_geometry(object) || !object.flags.visible) continue;
-                    auto& [matchedCount, total] = groupPieces[target];
-                    ++total;
-                    if (matched) ++matchedCount;
+                    if (target == id) {
+                        rootGeometry[id] = matched;
+                        if (matched) hits.insert(id);
+                    } else {
+                        auto& [matchedCount, total] = groupPieces[target];
+                        ++total;
+                        if (matched) ++matchedCount;
+                    }
                 }
-                for (const auto& [group, counts] : groupPieces)
-                    if (contain ? counts.first == counts.second && counts.second > 0 : counts.first > 0) hits.insert(group);
+                for (const auto& [group, counts] : groupPieces) {
+                    const auto root = rootGeometry.find(group);
+                    const bool rootOk = root == rootGeometry.end() || root->second;
+                    if (contain) {
+                        // Remove a parent previously added on the strength of its own body.
+                        hits.erase(group);
+                        if (rootOk && counts.second > 0U && counts.first == counts.second)
+                            hits.insert(group);
+                    } else if (counts.first > 0U) hits.insert(group);
+                }
                 std::erase_if(hits, [&](EditorObjectId id) { return !object_selectable(id); });
                 // Front-only unless X-Ray Selection: keep what actually shows inside the box.
                 if (!viewportSettings_.xraySelection && !hits.empty()) hits = targets_seen_in_rect(rectangle, hits);
@@ -5603,7 +5628,7 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
             }
             SelectionOperation operation = marquee_.operation;
             // Shift+click on something already selected takes it out again.
-            if (distanceSquared <= 25 && operation == SelectionOperation::Add && !hits.empty() &&
+            if (distanceSquared <= 25 && marquee_.shiftHeldOnPress && operation == SelectionOperation::Add && !hits.empty() &&
                 std::all_of(hits.begin(), hits.end(), [&](EditorObjectId id) { return workspace_.is_selected(id); }))
                 operation = SelectionOperation::Subtract;
             workspace_.apply_selection(hits, operation);
@@ -7047,7 +7072,8 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
         const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), id);
         if (error != std::errc{} || end != value.data() + value.size() ||
             !workspace_.document().find_object(id)) return false;
-        workspace_.select_object(id);
+        workspace_.apply_selection({id}, selectionOperation_);
+        refresh_menu_state();
         return true;
     }
     // Selection, clipboard, play-session, and authoring-panel state can change outside menu
@@ -7288,7 +7314,7 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
     }
     if (actionId.starts_with("select.shape_") || actionId.starts_with("select.paint_radius"))
         return dispatch_selection_shape_action(actionId);
-    if (actionId.starts_with("select.mask_") || actionId == "edit.select_invert" || actionId == "edit.select_grow" ||
+    if (actionId.starts_with("select.mask_") || actionId.starts_with("select.operation_") || actionId == "edit.select_invert" || actionId == "edit.select_grow" ||
         actionId == "edit.select_shrink" || actionId == "edit.select_connected")
         return dispatch_selection_filter_action(actionId);
     if (actionId == "voxel.fill") return arm_flood_fill();
@@ -14388,7 +14414,7 @@ void NativeEditorController::finish_voxel_marquee(int x, int y) {
                     voxel_connected_piece(*object->voxels,marquee.clickVoxel->voxel,kMaxVoxelSelection);
                 SelectionOperation operation = marquee.operation;
                 // Shift+click on a selected piece takes it out again.
-                if (operation == SelectionOperation::Add && object->id == voxelSelectionObject_ && !cells.empty() &&
+                if (marquee.shiftHeldOnPress && operation == SelectionOperation::Add && object->id == voxelSelectionObject_ && !cells.empty() &&
                     std::all_of(cells.begin(), cells.end(), [&](const Int3& cell) { return voxelSelection_.contains(cell); }))
                     operation = SelectionOperation::Subtract;
                 select_voxels(object->id,cells,operation);

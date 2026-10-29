@@ -107,6 +107,12 @@ std::string NativeEditorController::marquee_label() const {
     if (!marquee_.active) return {};
     std::string label = !lassoPath_.empty() ? "Lasso" : marquee_.currentX >= marquee_.startX ? "Window" : "Crossing";
     label += viewportSettings_.xraySelection ? " \xC2\xB7 X-Ray (through)" : " \xC2\xB7 visible only";
+    if (marquee_.operation != SelectionOperation::Replace) {
+        const char* mode = marquee_.operation == SelectionOperation::Add ? "Add"
+                           : marquee_.operation == SelectionOperation::Subtract ? "Subtract"
+                           : marquee_.operation == SelectionOperation::Toggle ? "Toggle" : "Intersect";
+        label += " \xC2\xB7 " + std::string(mode);
+    }
     if (selectionDomain_ == SelectionDomain::Objects && !selectionMask_.everything()) {
         std::string off;
         const auto note = [&](bool on, const char* name) { if (!on) off += (off.empty() ? "" : ", ") + std::string(name); };
@@ -119,6 +125,20 @@ std::string NativeEditorController::marquee_label() const {
 }
 
 bool NativeEditorController::dispatch_selection_filter_action(std::string_view action) {
+    if (action.starts_with("select.operation_")) {
+        const std::string_view kind = action.substr(std::string_view("select.operation_").size());
+        const char* label = nullptr;
+        if (kind == "replace") { selectionOperation_ = SelectionOperation::Replace; label = "Replace"; }
+        else if (kind == "add") { selectionOperation_ = SelectionOperation::Add; label = "Add"; }
+        else if (kind == "subtract") { selectionOperation_ = SelectionOperation::Subtract; label = "Subtract"; }
+        else if (kind == "toggle") { selectionOperation_ = SelectionOperation::Toggle; label = "Toggle"; }
+        else if (kind == "intersect") { selectionOperation_ = SelectionOperation::Intersect; label = "Intersect"; }
+        else return false;
+        refresh_menu_state();
+        set_status(std::string("Selection operation: ") + label +
+                   " (click, box, lasso, hierarchy; Shift/Ctrl override; paint uses brush rules)");
+        return true;
+    }
     if (action.starts_with("select.mask_")) {
         if (action == "select.mask_locked") selectionMask_.locked = !selectionMask_.locked;
         else if (action == "select.mask_helpers") selectionMask_.helpers = !selectionMask_.helpers;

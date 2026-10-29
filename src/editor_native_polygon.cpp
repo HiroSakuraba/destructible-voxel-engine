@@ -140,7 +140,7 @@ void NativeEditorController::finish_polygon_marquee(int x, int y) {
                 for (auto id : face) hits.erase(id);
     SelectionOperation operation = marquee.operation;
     // Shift+click on a selected component takes it out again.
-    if (click && operation==SelectionOperation::Add && !hits.empty() &&
+    if (click && marquee.shiftHeldOnPress && operation==SelectionOperation::Add && !hits.empty() &&
         std::all_of(hits.begin(),hits.end(),[&](auto id){return polygonSelection_.components.contains(id);}))
         operation=SelectionOperation::Subtract;
     select_polygon_components(hits,operation);

@@ -303,6 +303,7 @@ struct MarqueeState {
     std::optional<EditorObjectId> clickObject;
     std::optional<EditorPickResult> clickVoxel;  // Voxel domain: the voxel under the press
     SelectionOperation operation{SelectionOperation::Replace};
+    bool shiftHeldOnPress{};  // distinguish Shift-click toggle from explicit Add operation
     int startX{};
     int startY{};
     int currentX{};
@@ -798,6 +799,7 @@ public:
 
     [[nodiscard]] const TextEditState& text_edit() const noexcept { return textEdit_; }
     [[nodiscard]] SelectionShape selection_shape() const noexcept { return selectionShape_; }
+    [[nodiscard]] SelectionOperation selection_operation() const noexcept { return selectionOperation_; }
     // The lasso being drawn (screen points), empty when none.
     [[nodiscard]] const std::vector<std::pair<int, int>>& lasso_path() const noexcept { return lassoPath_; }
     // Screen radius of the paint-selection brush in pixels (Ctrl+[ / Ctrl+] change it).
@@ -1938,6 +1940,12 @@ private:
     // Of `candidates`, the selection targets with a visible (unoccluded) part inside `rect`.
     [[nodiscard]] std::set<EditorObjectId> targets_seen_in_rect(UiRect rect, const std::set<EditorObjectId>& candidates) const;
     bool dispatch_selection_filter_action(std::string_view action);
+    // Session-local default for click/box/lasso/hierarchy selection. Held modifiers override it;
+    // Paint remains a deliberately additive/subtractive brush.
+    SelectionOperation selectionOperation_{SelectionOperation::Replace};
+    [[nodiscard]] SelectionOperation selection_operation_for_input(std::uint32_t modifiers) const noexcept {
+        return modifiers == 0U ? selectionOperation_ : selection_operation_for_modifiers(modifiers);
+    }
     SelectionShape selectionShape_{SelectionShape::Box};
     std::vector<std::pair<int, int>> lassoPath_;
     int selectionPaintRadius_{30};

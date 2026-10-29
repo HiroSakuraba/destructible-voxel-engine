@@ -646,6 +646,11 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"select.mask_helpers","Edit","Selectable: Helpers (cameras, lights, emitters)",""},
         {"select.mask_prefabs","Edit","Selectable: Prefab Instances",""},
         {"select.mask_all","Edit","Make Everything Selectable",""},
+        {"select.operation_replace","Edit","Selection Operation: Replace",""},
+        {"select.operation_add","Edit","Selection Operation: Add",""},
+        {"select.operation_subtract","Edit","Selection Operation: Subtract",""},
+        {"select.operation_toggle","Edit","Selection Operation: Toggle",""},
+        {"select.operation_intersect","Edit","Selection Operation: Intersect",""},
         {"select.shape_box","Edit","Selection Shape: Box",""},
         {"select.shape_lasso","Edit","Selection Shape: Lasso",""},
         {"select.shape_paint","Edit","Selection Shape: Paint",""},
@@ -1089,6 +1094,11 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         configure(id, "Symmetry", 79);
     for (std::string_view id : {"edit.mirror_copy_x", "edit.mirror_copy_y", "edit.mirror_copy_z", "edit.mirror_x", "edit.mirror_y", "edit.mirror_z"})
         configure(id, "Mirror", 24);
+    configure("select.operation_replace", "Selection Operation", 24, true, "select.operation");
+    configure("select.operation_add", "Selection Operation", 25, true, "select.operation");
+    configure("select.operation_subtract", "Selection Operation", 26, true, "select.operation");
+    configure("select.operation_toggle", "Selection Operation", 27, true, "select.operation");
+    configure("select.operation_intersect", "Selection Operation", 28, true, "select.operation");
     configure("select.domain_objects", "Selection Domain", 30, true, "select.domain");
     configure("select.domain_voxels", "Selection Domain", 31, true, "select.domain");
     configure("select.domain_toggle", "Selection Domain", 32);

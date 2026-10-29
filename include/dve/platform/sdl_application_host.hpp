@@ -42,6 +42,9 @@ public:
                                      std::chrono::milliseconds minimumInterval);
     [[nodiscard]] WindowMetrics window_metrics() const noexcept override;
     [[nodiscard]] NativeWindowHandle native_window_handle() const noexcept override;
+    // Win32 / X11 / Wayland handles read from the SDL window properties. None when there is no
+    // window or the video driver has no supported surface (Cocoa/Metal is not wired yet).
+    [[nodiscard]] NativeSurfaceHandle native_surface_handle() const noexcept override;
     void set_window_title(std::string_view title) override;
     bool set_relative_mouse_mode(bool enabled, std::string* error = nullptr) override;
     [[nodiscard]] bool relative_mouse_mode() const noexcept override;

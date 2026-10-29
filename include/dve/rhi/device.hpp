@@ -358,6 +358,8 @@ struct RenderPassDesc {
 
 struct SwapchainDesc {
     platform::NativeWindowHandle window;
+    // Window-system handles for GPU backends (VkSurfaceKHR creation). The Null device ignores it.
+    platform::NativeSurfaceHandle surface;
     TextureFormat format{TextureFormat::BGRA8Unorm};
     std::uint32_t width{1280};
     std::uint32_t height{800};
@@ -370,6 +372,9 @@ struct AcquiredSwapchainImage {
     TextureHandle texture;
     std::uint32_t imageIndex{};
     bool suboptimal{};
+    // No image was acquired because the surface changed size or format: resize_swapchain()
+    // (or recreate) before the next acquire. The texture handle is empty.
+    bool outOfDate{};
 };
 
 struct BindGroupLayoutBinding {
@@ -517,6 +522,22 @@ public:
     [[nodiscard]] virtual SwapchainHandle create_swapchain(const SwapchainDesc& desc,
                                                            std::string* error = nullptr) = 0;
     virtual bool destroy_swapchain(SwapchainHandle handle, std::string* error = nullptr) = 0;
+    // Rebuild the swapchain's images at a new size (window resize, out-of-date surface). The
+    // handle stays valid; previously returned image textures are invalidated. No image may be
+    // acquired. Backends without presentation report failure.
+    virtual bool resize_swapchain(SwapchainHandle handle, std::uint32_t width, std::uint32_t height,
+                                  std::string* error = nullptr) {
+        (void)handle; (void)width; (void)height;
+        if (error) *error = "swapchain resize is not supported by this device";
+        return false;
+    }
+    // Images the backend actually created (the driver may pick more than requested) and their
+    // format/size. Zero/false when the handle is unknown.
+    [[nodiscard]] virtual std::uint32_t swapchain_image_count(SwapchainHandle) const noexcept { return 0U; }
+    [[nodiscard]] virtual TextureFormat swapchain_format(SwapchainHandle) const noexcept { return TextureFormat::BGRA8Unorm; }
+    [[nodiscard]] virtual bool swapchain_size(SwapchainHandle, std::uint32_t& width, std::uint32_t& height) const noexcept {
+        width = height = 0U; return false;
+    }
     [[nodiscard]] virtual AcquiredSwapchainImage acquire_next_image(
         SwapchainHandle handle, std::string* error = nullptr) = 0;
     [[nodiscard]] virtual PresentResult present(SwapchainHandle handle, FenceHandle waitFence,

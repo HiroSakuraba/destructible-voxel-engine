@@ -33,7 +33,57 @@ DVE_LIVE_IMAGE(5,3) SamplerState gEmissiveSampler : register(s11);
 DVE_LIVE_IMAGE(6,3) SamplerState gOpacitySampler : register(s12);
 DVE_LIVE_BIND(0,0) cbuffer LiveEnvironmentFrameConstants : register(b8) {
     float4x4 gViewProjection;float4 gEnvironmentParameters;float4 gCameraWorldPosition;
+    // Direct sunlight and cascaded shadows (GpuLiveSunConstants). All zero = IBL only, the
+    // behaviour before v2.36: renderers that never write these bytes get zeros.
+    float4 gSunDirectionIntensity;      // xyz unit vector towards the sun; w radiance scale
+    float4 gSunColorShadowStrength;     // rgb sun colour; w shadow strength 0..1
+    float4 gCameraForwardCascadeCount;  // xyz camera forward; w cascade count (0 = unshadowed)
+    float4 gCascadeSplitFar;            // view-depth far bound of each cascade, metres
+    float4 gShadowAtlasTexelBias;       // xy atlas texel size; z receiver bias m; w normal bias m
+    float4 gCascadeCenterRadius[4];
+    float4 gCascadeRight[4];
+    float4 gCascadeUp[4];
+    float4 gCascadeForward[4];
+    float4 gCascadeDepth[4];            // x minimum, y maximum absolute light depth
+    float4 gCascadeAtlasScaleOffset[4]; // xy tile scale, zw tile offset in atlas UV
 };
+
+// Percentage-closer sample of one cascade tile, clamped to the tile interior (the atlas has no
+// gutters). 1 = lit. Static and dynamic layers are both depth atlases of the same layout.
+float LiveShadowTile(Texture2D<float> atlas, SamplerComparisonState comparison, float2 uv,
+                     float depth, float4 scaleOffset, float2 texel) {
+    const float2 tileMinimum = scaleOffset.zw + 0.5F * texel;
+    const float2 tileMaximum = scaleOffset.zw + scaleOffset.xy - 0.5F * texel;
+    float sum = 0.0F;
+    [unroll] for (int y = -1; y <= 1; ++y)
+        [unroll] for (int x = -1; x <= 1; ++x)
+            sum += atlas.SampleCmpLevelZero(comparison, clamp(uv + float2(x, y) * texel, tileMinimum, tileMaximum), depth);
+    return sum / 9.0F;
+}
+
+float LiveSunVisibility(float3 worldPosition, float3 geometricNormal) {
+    const uint cascadeCount = min((uint)gCameraForwardCascadeCount.w, 4u);
+    if (cascadeCount == 0u) return 1.0F;
+    const float viewDepth = dot(worldPosition - gCameraWorldPosition.xyz, gCameraForwardCascadeCount.xyz);
+    if (viewDepth < 0.0F || viewDepth > gCascadeSplitFar[cascadeCount - 1u]) return 1.0F;
+    const uint c = min(SelectShadowCascade(viewDepth, gCascadeSplitFar), cascadeCount - 1u);
+    const float radius = max(gCascadeCenterRadius[c].w, 1.0e-5F);
+    // Normal offset scales with the cascade's texel footprint so distant cascades do not acne.
+    const float texelMeters = 2.0F * radius * gShadowAtlasTexelBias.x / max(gCascadeAtlasScaleOffset[c].x, 1.0e-6F);
+    const float3 p = worldPosition + geometricNormal * (gShadowAtlasTexelBias.w + texelMeters);
+    const float3 relative = p - gCascadeCenterRadius[c].xyz;
+    const float2 tileUv = float2(dot(relative, gCascadeRight[c].xyz), -dot(relative, gCascadeUp[c].xyz)) / radius * 0.5F + 0.5F;
+    if (any(tileUv < 0.0F) || any(tileUv > 1.0F)) return 1.0F;
+    const float range = max(gCascadeDepth[c].y - gCascadeDepth[c].x, 1.0e-5F);
+    const float depth = (dot(p, gCascadeForward[c].xyz) - gCascadeDepth[c].x - gShadowAtlasTexelBias.z) / range;
+    if (depth > 1.0F) return 1.0F;
+    const float2 atlasUv = tileUv * gCascadeAtlasScaleOffset[c].xy + gCascadeAtlasScaleOffset[c].zw;
+    const float2 texel = gShadowAtlasTexelBias.xy;
+    const float lit = min(
+        LiveShadowTile(gCascadedStaticShadowDepth, gCascadedShadowSampler, atlasUv, depth, gCascadeAtlasScaleOffset[c], texel),
+        LiveShadowTile(gCascadedDynamicShadowDepth, gDynamicShadowSampler, atlasUv, depth, gCascadeAtlasScaleOffset[c], texel));
+    return lerp(1.0F, lit, saturate(gSunColorShadowStrength.w));
+}
 DVE_LIVE_BIND(0,1) cbuffer LiveObjectConstants : register(b9) {
     float4x4 gObjectToWorld;uint4 gObjectIdentityAndFlags;float4 gObjectMaterialParameters;
 };
@@ -111,9 +161,20 @@ float4 main(float4 position : SV_Position, float3 worldPosition : TEXCOORD0,
         ibl=ibl*(1-saturate(material.clearCoat)*fresnel)+coat*saturate(material.clearCoat);
     }
     ibl*=max(0,gEnvironmentParameters.y);
-    // Directional shadow maps attenuate direct sunlight, not the environment integral.
-    // This pass currently evaluates IBL; applying one fixed CSM texel blackened the
-    // material whenever the atlas was uninitialized or that unrelated texel was shaded.
+    // Directional shadow maps attenuate direct sunlight only, never the environment integral.
+    float3 sun = 0.0F.xxx;
+    if (gSunDirectionIntensity.w > 0.0F) {
+        const float3 L = normalize(gSunDirectionIntensity.xyz);
+        const float3 geometricNormal = normalize(normal);
+        // Back-facing geometry (culling is off) shades with the side facing the camera.
+        const float3 facing = dot(geometricNormal, V) < 0.0F ? -geometricNormal : geometricNormal;
+        const float3 N = dot(shadingNormal, facing) < 0.0F ? -shadingNormal : shadingNormal;
+        if (dot(facing, L) > 0.0F) {
+            const float visibility = LiveSunVisibility(worldPosition, facing);
+            sun = ShadeDirectLight(N, V, L, gSunColorShadowStrength.rgb * gSunDirectionIntensity.w * visibility,
+                                   baseColor, metallic, roughness, material.specular);
+        }
+    }
 
-    return float4((ibl + emissive) * exp2(clamp(gEnvironmentParameters.z,-32.0F,32.0F)) * finiteMappingUse, alpha);
+    return float4((ibl + sun + emissive) * exp2(clamp(gEnvironmentParameters.z,-32.0F,32.0F)) * finiteMappingUse, alpha);
 }

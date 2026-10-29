@@ -133,6 +133,10 @@ bool SDL_GetWindowSizeInPixels(SDL_Window* window, int* w, int* h) {
 float SDL_GetWindowDisplayScale(SDL_Window* window) { return window ? window->scale : 0.0F; }
 SDL_WindowFlags SDL_GetWindowFlags(SDL_Window* window) { return window ? window->flags : 0; }
 SDL_WindowID SDL_GetWindowID(SDL_Window* window) { return window ? window->id : 0; }
+SDL_PropertiesID SDL_GetWindowProperties(SDL_Window*) { return 0; }
+void* SDL_GetPointerProperty(SDL_PropertiesID, const char*, void* defaultValue) { return defaultValue; }
+std::int64_t SDL_GetNumberProperty(SDL_PropertiesID, const char*, std::int64_t defaultValue) { return defaultValue; }
+const char* SDL_GetCurrentVideoDriver() { return "fake"; }
 namespace { int gSetWindowTitleCalls = 0; }
 bool SDL_SetWindowTitle(SDL_Window* window, const char* title) { if (!window) return false; ++gSetWindowTitleCalls; window->title = title ? title : ""; return true; }
 const char* SDL_GetWindowTitle(SDL_Window* window) { return window ? window->title.c_str() : ""; }

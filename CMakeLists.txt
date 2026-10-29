@@ -745,6 +745,7 @@ if(DVE_BUILD_RHI)
         src/render/rdv_bbv.cpp
         src/render/rdv_viewport.cpp
         src/render/mesh_rhi_mirror.cpp
+        src/render/voxel_surface_mesher.cpp
         src/render/dashr_atlas.cpp
         src/render/dashr_shell.cpp
         src/render/dashr_live_surface.cpp
@@ -1960,6 +1961,69 @@ if(DVE_BUILD_PLAYER AND DVE_BUILD_RHI AND DVE_BUILD_PLATFORM)
         target_compile_options(dve_player_runtime PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
     endif()
 
+    # GPU backend (dve_player --renderer vulkan). Its shaders are compiled by DXC (SPIR-V) at
+    # build time and embedded in the library, so the player ships no loose .spv files. Without
+    # a SPIR-V-capable DXC the backend still links but reports itself unavailable.
+    if(TARGET dve_rhi_vulkan)
+        target_sources(dve_player_runtime PRIVATE src/player/vulkan_player_renderer.cpp)
+        target_link_libraries(dve_player_runtime PUBLIC dve::rhi_vulkan)
+        target_compile_definitions(dve_player_runtime PUBLIC DVE_PLAYER_HAVE_VULKAN=1)
+        find_program(DVE_DXC_EXECUTABLE NAMES dxc HINTS "$ENV{VULKAN_SDK}/Bin" "$ENV{VULKAN_SDK}/bin")
+        set(_dve_player_dxc OFF)
+        if(DVE_DXC_EXECUTABLE)
+            set(_dve_player_probe "${CMAKE_CURRENT_BINARY_DIR}/player-dxc-probe")
+            file(MAKE_DIRECTORY "${_dve_player_probe}")
+            file(WRITE "${_dve_player_probe}/probe.hlsl" "float4 main() : SV_Target { return 0; }\n")
+            execute_process(COMMAND "${DVE_DXC_EXECUTABLE}" -spirv -T ps_6_0 -E main
+                    -Fo "${_dve_player_probe}/probe.spv" "${_dve_player_probe}/probe.hlsl"
+                RESULT_VARIABLE _dve_player_probe_result OUTPUT_QUIET ERROR_QUIET)
+            if(_dve_player_probe_result EQUAL 0 AND EXISTS "${_dve_player_probe}/probe.spv")
+                set(_dve_player_dxc ON)
+            endif()
+        endif()
+        if(_dve_player_dxc)
+            set(_dve_player_shader_dir "${CMAKE_CURRENT_BINARY_DIR}/player-shaders")
+            file(GLOB _dve_player_shader_headers CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/common/*.hlsli")
+            set(_dve_player_spv)
+            foreach(_shader IN ITEMS live_ibl_material_vs live_ibl_material_ps live_environment_skybox_vs
+                                     live_environment_skybox_ps live_csm_caster_vs live_csm_caster_ps
+                                     player_present_vs player_present_ps)
+                if(_shader MATCHES "_vs$")
+                    set(_profile vs_6_0)
+                else()
+                    set(_profile ps_6_0)
+                endif()
+                set(_spv "${_dve_player_shader_dir}/${_shader}.spv")
+                add_custom_command(OUTPUT "${_spv}"
+                    COMMAND "${CMAKE_COMMAND}" -E make_directory "${_dve_player_shader_dir}"
+                    COMMAND "${DVE_DXC_EXECUTABLE}" -spirv -fspv-target-env=vulkan1.2 -fvk-use-dx-layout
+                        -T ${_profile} -E main -I "${CMAKE_CURRENT_SOURCE_DIR}/shaders"
+                        -Fo "${_spv}" "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${_shader}.hlsl"
+                    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${_shader}.hlsl" ${_dve_player_shader_headers}
+                    COMMENT "DXC (SPIR-V) ${_shader}.hlsl for dve_player"
+                    VERBATIM)
+                list(APPEND _dve_player_spv "${_spv}")
+            endforeach()
+            set(_dve_player_blobs "${CMAKE_CURRENT_BINARY_DIR}/generated/dve_player_shader_blobs.cpp")
+            string(REPLACE ";" "|" _dve_player_spv_arg "${_dve_player_spv}")
+            add_custom_command(OUTPUT "${_dve_player_blobs}"
+                COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/generated"
+                COMMAND "${CMAKE_COMMAND}" "-DDVE_EMBED_OUTPUT=${_dve_player_blobs}"
+                    "-DDVE_EMBED_NAMESPACE=dve::player::shader_blobs"
+                    "-DDVE_EMBED_INPUTS=${_dve_player_spv_arg}"
+                    -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/DveEmbedSpirv.cmake"
+                DEPENDS ${_dve_player_spv} "${CMAKE_CURRENT_SOURCE_DIR}/cmake/DveEmbedSpirv.cmake"
+                COMMENT "Embedding dve_player SPIR-V"
+                VERBATIM)
+            target_sources(dve_player_runtime PRIVATE "${_dve_player_blobs}")
+            target_include_directories(dve_player_runtime PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/player")
+            message(STATUS "dve_player: Vulkan renderer enabled (shaders: ${DVE_DXC_EXECUTABLE})")
+        else()
+            target_sources(dve_player_runtime PRIVATE src/player/player_shader_blobs_missing.cpp)
+            message(STATUS "dve_player: Vulkan renderer built without shaders (no DXC with SPIR-V output); --renderer vulkan is unavailable")
+        endif()
+    endif()
+
     if(TARGET dve_platform_sdl3)
         add_executable(dve_player apps/dve_player.cpp)
         target_link_libraries(dve_player PRIVATE dve::player_runtime dve::platform_sdl3)
@@ -2117,6 +2181,9 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_vulkan_graphics_tests tests/test_vulkan_graphics_device.cpp)
         target_link_libraries(dve_vulkan_graphics_tests PRIVATE dve::rhi_vulkan)
         add_test(NAME dve_vulkan_graphics_tests COMMAND dve_vulkan_graphics_tests)
+        add_executable(dve_vulkan_presentation_tests tests/test_vulkan_presentation.cpp)
+        target_link_libraries(dve_vulkan_presentation_tests PRIVATE dve::rhi_vulkan)
+        add_test(NAME dve_vulkan_presentation_tests COMMAND dve_vulkan_presentation_tests)
         add_executable(dve_v193_vulkan_sprite_tests tests/test_vulkan_sprite_rhi_v193.cpp)
         target_link_libraries(dve_v193_vulkan_sprite_tests PRIVATE
             dve::rhi_vulkan dve::render_bridge)
@@ -2242,7 +2309,7 @@ if(DVE_BUILD_TESTS)
             endif()
         endif()
         if(EXISTS "/usr/lib/chromium/vk_swiftshader_icd.json")
-            set_tests_properties(dve_vulkan_buffer_tests dve_vulkan_graphics_tests dve_v193_vulkan_sprite_tests dve_depth_only_rhi_tests dve_vulkan_compute_tests dve_vulkan_camera_outputs_tests dve_vulkan_environment_lighting_tests dve_vulkan_live_environment_renderer_tests dve_vulkan_dashr_tests dve_vulkan_shadow_material_table_tests dve_vulkan_main_material_table_tests dve_vulkan_texture_t1_format_tests dve_vulkan_bc5_normal_decode_tests PROPERTIES
+            set_tests_properties(dve_vulkan_buffer_tests dve_vulkan_graphics_tests dve_vulkan_presentation_tests dve_v193_vulkan_sprite_tests dve_depth_only_rhi_tests dve_vulkan_compute_tests dve_vulkan_camera_outputs_tests dve_vulkan_environment_lighting_tests dve_vulkan_live_environment_renderer_tests dve_vulkan_dashr_tests dve_vulkan_shadow_material_table_tests dve_vulkan_main_material_table_tests dve_vulkan_texture_t1_format_tests dve_vulkan_bc5_normal_decode_tests PROPERTIES
                 ENVIRONMENT "VK_ICD_FILENAMES=/usr/lib/chromium/vk_swiftshader_icd.json;DVE_REQUIRE_VULKAN=1")
         endif()
     endif()
@@ -2822,6 +2889,14 @@ if(DVE_BUILD_TESTS)
         target_link_libraries(dve_player_runtime_tests PRIVATE dve::player_runtime)
         target_compile_definitions(dve_player_runtime_tests PRIVATE DVE_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
         add_test(NAME dve_player_runtime_tests COMMAND dve_player_runtime_tests)
+        if(TARGET dve_rhi_vulkan)
+            add_executable(dve_vulkan_player_renderer_tests tests/test_vulkan_player_renderer.cpp)
+            target_link_libraries(dve_vulkan_player_renderer_tests PRIVATE dve::player_runtime)
+            add_test(NAME dve_vulkan_player_renderer_tests COMMAND dve_vulkan_player_renderer_tests)
+            # Validation-layer errors (when DVE_VULKAN_VALIDATION=1) fail the test.
+            set_tests_properties(dve_vulkan_player_renderer_tests PROPERTIES
+                FAIL_REGULAR_EXPRESSION "\\[dve vulkan error\\]")
+        endif()
 
         set(DVE_PLAYER_SAMPLE_PAK ${CMAKE_CURRENT_BINARY_DIR}/player_tests/player_sample.dvepak)
         add_test(NAME dve_player_sample_pack

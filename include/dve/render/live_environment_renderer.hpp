@@ -59,6 +59,35 @@ struct alignas(16) GpuLiveCascadeConstants {
 };
 static_assert(sizeof(GpuLiveCascadeConstants) == 96U);
 
+// Frame-constant layout of live_ibl_material_ps.hlsl, cbuffer LiveEnvironmentFrameConstants.
+// Bytes [0,96) are the original view-projection / environment / camera block; the sun and
+// cascade block follows. Renderers that only write the first 96 bytes get IBL-only shading:
+// record_live_environment_frame zero-fills every byte the caller does not supply.
+struct alignas(16) GpuLiveSunConstants {
+    std::array<float, 4> sunDirectionIntensity{};     // xyz towards the sun, w radiance scale
+    std::array<float, 4> sunColorShadowStrength{};    // rgb colour, w shadow strength 0..1
+    std::array<float, 4> cameraForwardCascadeCount{}; // xyz camera forward, w cascade count
+    std::array<float, 4> cascadeSplitFar{};           // metres of view depth
+    std::array<float, 4> shadowAtlasTexelBias{};      // xy texel size, z receiver bias, w normal bias
+    std::array<std::array<float, 4>, 4> cascadeCenterRadius{};
+    std::array<std::array<float, 4>, 4> cascadeRight{};
+    std::array<std::array<float, 4>, 4> cascadeUp{};
+    std::array<std::array<float, 4>, 4> cascadeForward{};
+    std::array<std::array<float, 4>, 4> cascadeDepth{};
+    std::array<std::array<float, 4>, 4> cascadeAtlasScaleOffset{};
+};
+static_assert(sizeof(GpuLiveSunConstants) == 464U);
+inline constexpr std::size_t kLiveSunConstantsOffset = 96U;
+inline constexpr std::size_t kLiveFrameConstantBytes = kLiveSunConstantsOffset + sizeof(GpuLiveSunConstants);
+
+struct CascadedShadowPlan;
+// Fills the sun block from a shadow plan (cascade geometry, splits, atlas tiles). `radianceScale`
+// is what multiplies sunColor in the BRDF (the CPU reference uses sunIntensity * pi);
+// `cameraForward` must be the unit view direction used to build the plan's splits.
+[[nodiscard]] GpuLiveSunConstants make_live_sun_constants(
+    const CascadedShadowPlan* plan, Float3 sunDirection, Float3 sunColor, float radianceScale,
+    float shadowStrength, Float3 cameraForward) noexcept;
+
 inline constexpr std::uint32_t kLiveObjectFlagAlphaMasked = 1U << 0U;
 inline constexpr std::uint32_t kLiveObjectFlagAlphaTexturePresent = 1U << 1U;
 inline constexpr std::uint32_t kLiveObjectFlagDoubleSided = 1U << 2U;

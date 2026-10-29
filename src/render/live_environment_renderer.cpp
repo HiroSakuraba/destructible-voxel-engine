@@ -88,6 +88,43 @@ GpuLiveCascadeConstants make_cascade_constants(const CascadedShadowPlan& plan,
     return result;
 }
 
+} // namespace
+
+GpuLiveSunConstants make_live_sun_constants(
+    const CascadedShadowPlan* plan, Float3 sunDirection, Float3 sunColor, float radianceScale,
+    float shadowStrength, Float3 cameraForward) noexcept {
+    GpuLiveSunConstants result;
+    const float length = std::sqrt(sunDirection.x * sunDirection.x + sunDirection.y * sunDirection.y +
+                                   sunDirection.z * sunDirection.z);
+    if (!(length > 0.0F) || !(radianceScale > 0.0F)) return result;
+    result.sunDirectionIntensity = {sunDirection.x / length, sunDirection.y / length,
+                                    sunDirection.z / length, radianceScale};
+    result.sunColorShadowStrength = {sunColor.x, sunColor.y, sunColor.z, std::clamp(shadowStrength, 0.0F, 1.0F)};
+    if (plan == nullptr || plan->cascades.empty() || plan->atlasWidth == 0U || plan->atlasHeight == 0U)
+        return result;
+    const std::size_t count = std::min<std::size_t>(plan->cascades.size(), 4U);
+    result.cameraForwardCascadeCount = {cameraForward.x, cameraForward.y, cameraForward.z,
+                                        static_cast<float>(count)};
+    result.shadowAtlasTexelBias = {1.0F / static_cast<float>(plan->atlasWidth),
+                                   1.0F / static_cast<float>(plan->atlasHeight),
+                                   plan->settings.receiverBiasMeters, plan->settings.normalBiasMeters};
+    for (std::size_t index = 0U; index < 4U; ++index) {
+        const auto& cascade = plan->cascades[std::min(index, count - 1U)];
+        result.cascadeSplitFar[index] = cascade.splitFarMeters;
+        if (index >= count) continue;
+        const GpuLiveCascadeConstants packed = make_cascade_constants(*plan, cascade);
+        result.cascadeCenterRadius[index] = packed.centerRadius;
+        result.cascadeRight[index] = packed.lightRight;
+        result.cascadeUp[index] = packed.lightUp;
+        result.cascadeForward[index] = packed.lightForward;
+        result.cascadeDepth[index] = {cascade.minimumLightDepth, cascade.maximumLightDepth, 0.0F, 0.0F};
+        result.cascadeAtlasScaleOffset[index] = packed.atlasScaleOffset;
+    }
+    return result;
+}
+
+namespace {
+
 bool create_range_group(rhi::IDevice& device, rhi::BindGroupLayoutHandle layout,
                         rhi::BufferHandle buffer, std::size_t offset, std::size_t bytes,
                         std::string debugName, rhi::BindGroupHandle& output,
@@ -466,6 +503,14 @@ bool record_live_environment_frame(rhi::IDevice& device,
     }
 
     if (!device.write_buffer(renderer.frameConstants, 0U, frame.frameConstants, error)) return false;
+    // Bytes the caller did not supply (sun/cascade block) must read as zero, not stale memory.
+    if (frame.frameConstants.size() < renderer.frameConstantCapacity) {
+        const std::size_t tail = std::min(renderer.frameConstantCapacity, kLiveFrameConstantBytes);
+        if (frame.frameConstants.size() < tail) {
+            const std::vector<std::byte> zeros(tail - frame.frameConstants.size(), std::byte{0});
+            if (!device.write_buffer(renderer.frameConstants, frame.frameConstants.size(), zeros, error)) return false;
+        }
+    }
     const std::array<float,4> cameraPosition{frame.cameraWorldPosition.x,frame.cameraWorldPosition.y,frame.cameraWorldPosition.z,1};
     if(!device.write_buffer(renderer.frameConstants,80U,std::as_bytes(std::span(cameraPosition)),error))return false;
 
@@ -749,6 +794,15 @@ bool record_live_environment_frame(rhi::IDevice& device,
     if (frame.drawShadowCasters && !end_label()) return fail();
     if (!begin_label("Live environment main pass")) return fail();
 
+    // The material pass samples both depth atlases (sun visibility). Their resting state is
+    // DepthWrite (caster passes); sampling needs ShaderRead (SHADER_READ_ONLY_OPTIMAL), which is
+    // the layout the bind group's descriptors declare.
+    const auto atlas_state = [&](rhi::ResourceState from, rhi::ResourceState to) {
+        for (const rhi::TextureHandle atlas : {shadowAtlas.depthAtlas, shadowAtlas.dynamicDepthAtlas})
+            if (atlas && !device.transition_texture(commands, atlas, from, to, error)) return false;
+        return true;
+    };
+    if (!atlas_state(rhi::ResourceState::DepthWrite, rhi::ResourceState::ShaderRead)) return fail();
     rhi::RenderPassDesc pass;
     pass.debugName = "Live environment main pass";
     pass.colors.push_back({frame.colorTarget, true, 0.0F, 0.0F, 0.0F, 1.0F});
@@ -801,6 +855,7 @@ bool record_live_environment_frame(rhi::IDevice& device,
         }
     }
     if (!device.end_render_pass(commands, error)) return fail();
+    if (!atlas_state(rhi::ResourceState::ShaderRead, rhi::ResourceState::DepthWrite)) return fail();
     if (!end_label()) return fail();
     const auto submitted = device.submit(commands, error);
     if (!submitted) return fail();

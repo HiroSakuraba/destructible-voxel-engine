@@ -8,10 +8,11 @@
 //                  ReferenceVoxelRenderer + ReferencePolygonRenderer (multithreaded) into a
 //                  PolygonRenderTarget, tonemaps it to RGBA8 and hands it to an IFrameBlitter
 //                  (SDL streaming texture in dve_player, memory in tests).
-//   GPU (future):  a VulkanPlayerRenderer / D3D12PlayerRenderer implements IPlayerRenderer
-//                  directly, creates its swapchain from platform::NativeWindowHandle and
-//                  ignores the blitter. Selection is `dve_player --renderer`; only `cpu`
-//                  exists now.
+//   GPU:           make_vulkan_player_renderer() (vulkan_player_renderer.hpp) rasterizes the
+//                  same view (voxels meshed per brick, polygons, sky, cascaded sun shadows,
+//                  tonemap) and presents through a swapchain created from
+//                  platform::NativeSurfaceHandle; it ignores the blitter. Selection is
+//                  `dve_player --renderer cpu|vulkan`.
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -86,6 +87,11 @@ public:
     // Last rendered frame (tests, --hash, screenshots). May be null before the first render.
     [[nodiscard]] virtual const Rgba8Image* readback() const noexcept = 0;
     [[nodiscard]] virtual PlayerRenderStats last_stats() const noexcept = 0;
+    // The window's drawable size changed. Backends that own a swapchain rebuild it; CPU
+    // backends (the presenter scales the frame) ignore it.
+    virtual void window_resized(std::uint32_t drawableWidth, std::uint32_t drawableHeight) {
+        (void)drawableWidth; (void)drawableHeight;
+    }
 };
 
 // Lighting cost of the CPU renderer. The reference tracer is a validation path (one DDA per

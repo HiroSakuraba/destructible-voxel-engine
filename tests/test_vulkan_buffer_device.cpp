@@ -29,8 +29,9 @@ int main() {
             return dve::testing::skip(std::string("Vulkan buffer test: ") + std::string(device.device_loss_reason()));
         }
         require(device.capabilities().backend == Backend::Vulkan, "wrong backend identity");
-        require(!device.capabilities().presentation,
-                "v1.34 offscreen Vulkan backend incorrectly claims presentation support");
+        // Presentation is a real capability since the swapchain work; the surface-less device
+        // created here must still not own any swapchain.
+        require(device.swapchain_image_count(SwapchainHandle{}) == 0U, "offscreen Vulkan device reports a swapchain");
 
         std::string error;
         const BufferHandle upload = device.create_buffer({

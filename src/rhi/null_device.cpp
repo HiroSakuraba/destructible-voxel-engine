@@ -456,6 +456,47 @@ bool NullDevice::destroy_swapchain(SwapchainHandle handle, std::string* error) {
     slot->images.clear(); slot->desc = {}; slot->acquired = false; retire_slot(*slot);
     ++statistics_.swapchainsDestroyed; return true;
 }
+bool NullDevice::resize_swapchain(SwapchainHandle handle, std::uint32_t width, std::uint32_t height,
+                                  std::string* error) {
+    if (!ready(error)) return false;
+    auto* slot = swapchain(handle, error); if (!slot) return false;
+    if (slot->acquired) { set_error(error, "cannot resize a swapchain while an image is acquired"); return false; }
+    if (width == 0U || height == 0U) { set_error(error, "swapchain resize needs a nonzero size"); return false; }
+    for (TextureHandle image : slot->images)
+        if (!destroy_texture_internal(image, true, error)) return false;
+    slot->images.clear();
+    slot->desc.width = width; slot->desc.height = height; slot->nextImage = 0U;
+    for (std::uint32_t image = 0; image < slot->desc.imageCount; ++image) {
+        TextureDesc textureDesc;
+        textureDesc.format = slot->desc.format; textureDesc.width = width; textureDesc.height = height;
+        textureDesc.usage = TextureUsage::RenderTarget | TextureUsage::Present;
+        textureDesc.initialState = ResourceState::Present;
+        textureDesc.debugName = slot->desc.debugName + " image " + std::to_string(image);
+        TextureHandle textureHandle = create_texture(textureDesc, error);
+        if (!textureHandle) return false;
+        textures_[textureHandle.index].swapchainOwned = true;
+        slot->images.push_back(textureHandle);
+    }
+    return true;
+}
+std::uint32_t NullDevice::swapchain_image_count(SwapchainHandle handle) const noexcept {
+    if (!handle || handle.index >= swapchains_.size()) return 0U;
+    const auto& slot = swapchains_[handle.index];
+    return slot.alive && slot.generation == handle.generation ? static_cast<std::uint32_t>(slot.images.size()) : 0U;
+}
+TextureFormat NullDevice::swapchain_format(SwapchainHandle handle) const noexcept {
+    if (!handle || handle.index >= swapchains_.size()) return TextureFormat::BGRA8Unorm;
+    const auto& slot = swapchains_[handle.index];
+    return slot.alive && slot.generation == handle.generation ? slot.desc.format : TextureFormat::BGRA8Unorm;
+}
+bool NullDevice::swapchain_size(SwapchainHandle handle, std::uint32_t& width, std::uint32_t& height) const noexcept {
+    width = height = 0U;
+    if (!handle || handle.index >= swapchains_.size()) return false;
+    const auto& slot = swapchains_[handle.index];
+    if (!slot.alive || slot.generation != handle.generation) return false;
+    width = slot.desc.width; height = slot.desc.height;
+    return true;
+}
 AcquiredSwapchainImage NullDevice::acquire_next_image(SwapchainHandle handle, std::string* error) {
     if (!ready(error)) return {};
     auto* slot = swapchain(handle, error); if (!slot) return {};
@@ -864,7 +905,8 @@ bool NullDevice::draw_indexed(CommandListHandle commands, std::uint32_t indexCou
     auto* list = command_list(commands, error); if (!list) return false;
     const auto* indices = buffer(list->indexBuffer, error);
     const auto* boundPipeline = graphics_pipeline(list->graphicsPipeline, nullptr);
-    if (!list->renderPassOpen || !list->graphicsPipeline || !list->vertexBuffer ||
+    if (!list->renderPassOpen || !list->graphicsPipeline ||
+        (boundPipeline && boundPipeline->desc.vertexBuffer && !list->vertexBuffer) ||
         !list->indexBuffer || !list->viewportSet || !list->scissorSet || !indices ||
         !boundPipeline ||
         (boundPipeline->desc.vertexBuffer &&

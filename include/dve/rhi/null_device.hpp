@@ -46,6 +46,11 @@ public:
     [[nodiscard]] SwapchainHandle create_swapchain(const SwapchainDesc& desc,
                                                    std::string* error = nullptr) override;
     bool destroy_swapchain(SwapchainHandle handle, std::string* error = nullptr) override;
+    bool resize_swapchain(SwapchainHandle handle, std::uint32_t width, std::uint32_t height,
+                          std::string* error = nullptr) override;
+    [[nodiscard]] std::uint32_t swapchain_image_count(SwapchainHandle handle) const noexcept override;
+    [[nodiscard]] TextureFormat swapchain_format(SwapchainHandle handle) const noexcept override;
+    [[nodiscard]] bool swapchain_size(SwapchainHandle handle, std::uint32_t& width, std::uint32_t& height) const noexcept override;
     [[nodiscard]] AcquiredSwapchainImage acquire_next_image(
         SwapchainHandle handle, std::string* error = nullptr) override;
     [[nodiscard]] PresentResult present(SwapchainHandle handle, FenceHandle waitFence,

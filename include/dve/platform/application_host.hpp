@@ -92,6 +92,8 @@ struct WindowDesc {
     // Hosts with an audio subsystem (SDL) try to start it alongside the window. Audio is
     // optional: failure is reported by the host but never fails create_window.
     bool initializeAudio{true};
+    // Create the window for a Vulkan swapchain (SDL_WINDOW_VULKAN). CPU presenters leave it off.
+    bool vulkan{};
 };
 
 struct WindowMetrics {
@@ -113,6 +115,36 @@ struct NativeWindowHandle {
     void* display{};
     std::uintptr_t auxiliary{};
 };
+
+// Window-system handles a GPU backend needs to create a presentation surface (for example
+// a Vulkan VkSurfaceKHR) without linking the windowing library. Kind selects which fields
+// are meaningful; the platform owns every pointed-to object for the window's lifetime.
+//   Win32:    instance = HINSTANCE, window = HWND
+//   Xlib:     display = Display*, xlibWindow = X11 Window id
+//   Wayland:  display = wl_display*, window = wl_surface*
+//   Metal:    window = CAMetalLayer*
+//   Headless: no window; backends may present to an offscreen surface (tests, CI)
+enum class NativeSurfaceKind : std::uint8_t { Unavailable, Win32, Xlib, Wayland, Metal, Headless };
+
+struct NativeSurfaceHandle {
+    NativeSurfaceKind kind{NativeSurfaceKind::Unavailable};
+    void* instance{};
+    void* display{};
+    void* window{};
+    std::uint64_t xlibWindow{};
+};
+
+[[nodiscard]] constexpr std::string_view native_surface_kind_name(NativeSurfaceKind kind) noexcept {
+    switch (kind) {
+    case NativeSurfaceKind::Unavailable: return "none";
+    case NativeSurfaceKind::Win32: return "win32";
+    case NativeSurfaceKind::Xlib: return "xlib";
+    case NativeSurfaceKind::Wayland: return "wayland";
+    case NativeSurfaceKind::Metal: return "metal";
+    case NativeSurfaceKind::Headless: return "headless";
+    }
+    return "unknown";
+}
 
 struct PlatformEvent {
     EventType type{EventType::NoEvent};
@@ -177,6 +209,8 @@ public:
     [[nodiscard]] virtual bool poll_event(PlatformEvent& event) = 0;
     [[nodiscard]] virtual WindowMetrics window_metrics() const noexcept = 0;
     [[nodiscard]] virtual NativeWindowHandle native_window_handle() const noexcept = 0;
+    // Presentation surface for GPU renderers. Hosts without one report NativeSurfaceKind::Unavailable.
+    [[nodiscard]] virtual NativeSurfaceHandle native_surface_handle() const noexcept { return {}; }
     virtual void set_window_title(std::string_view title) = 0;
     // Unsupported hosts retain ordinary absolute pointing and report failure.
     virtual bool set_relative_mouse_mode(bool enabled, std::string* error = nullptr) {

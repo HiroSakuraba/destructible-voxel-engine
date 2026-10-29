@@ -58,7 +58,7 @@ void uv_completion_density_and_alignment() {
     check(!measure_polygon_uv_density(m,{0,1,2},settings),"partial island density is rejected");
     settings.targetTexelsPerMeter=float(original.texelsPerMeter*2);
     const auto matched=edit_polygon_uv(m,all,UvEdit::MatchDensity,settings);
-    check(bool(matched),"density match succeeds: "+matched.error);
+    check(bool(matched),matched.error.empty()?"density match succeeds":matched.error.c_str());
     if(matched){
         const auto changed=measure_polygon_uv_density(matched.mesh,all,settings);
         check(bool(changed),"matched island can be measured");
@@ -86,7 +86,14 @@ void uv_completion_density_and_alignment() {
         near(a.vertices[a.indices[3]].texcoord.y,m.vertices[m.indices[3]].texcoord.y,"unselected UV stays unchanged");
     }
     settings.channel=1;
-    check(bool(measure_polygon_uv_density(m,all,settings)),"UV1 measured independently");
+    // Generated primitives leave UV1 all-zero (a collapsed chart), which must be refused.
+    check(!measure_polygon_uv_density(m,all,settings),"collapsed UV1 refused");
+    auto halfUv1=m;
+    for(auto& vertex:halfUv1.vertices)vertex.texcoord1={vertex.texcoord.x*.5F,vertex.texcoord.y*.5F};
+    refresh_editor_polygon(halfUv1,false);
+    const auto uv1=measure_polygon_uv_density(halfUv1,all,settings);
+    check(bool(uv1),"UV1 measured independently");
+    if(uv1)near(uv1.texelsPerMeter,original.texelsPerMeter*.5,"UV1 density is independent of UV0");
     settings.textureWidth=0;
     check(!measure_polygon_uv_density(m,all,settings),"invalid texture size rejected");
 }

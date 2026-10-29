@@ -291,8 +291,18 @@ bool unwrap_chart(CookedPolygonAsset& mesh,const std::set<std::uint32_t>& faces,
     return true;
 }
 }
+namespace {
+// Working meshes inside edit_polygon_uv are detached/rescaled in place and carry a
+// stale contentHash until the final refresh, so island/density analysis must not
+// use the hash-checking validate_polygon_asset().
+bool uv_mesh_structurally_sound(const CookedPolygonAsset& mesh) {
+    return mesh.indices.size()%3==0 &&
+        std::all_of(mesh.indices.begin(),mesh.indices.end(),
+            [&](std::uint32_t index){return index<mesh.vertices.size();});
+}
+}
 std::vector<std::set<std::uint32_t>> polygon_uv_islands(const CookedPolygonAsset& mesh,std::uint32_t channel,const std::set<std::uint64_t>& seams){
-    if(channel>1||!validate_polygon_asset(mesh))return {};
+    if(channel>1||!uv_mesh_structurally_sound(mesh))return {};
     const auto geometric=polygon_geometric_vertices(mesh);
     std::map<Point,std::uint32_t> points;std::vector<std::uint32_t> identityIds;for(const auto& v:mesh.vertices){auto [it,added]=points.emplace(identity(v,channel),std::uint32_t(points.size()));(void)added;identityIds.push_back(it->second);}
     std::map<std::pair<std::uint32_t,std::uint32_t>,std::vector<std::uint32_t>> edges;
@@ -339,7 +349,8 @@ UvDensityReport measure_polygon_uv_density(const CookedPolygonAsset& mesh,
     const auto fail=[&](std::string message) {
         result.charts.clear();result.error=std::move(message);return result;
     };
-    if(!validate_polygon_asset(mesh) || corners.empty() || !valid_density_settings(settings))
+    const bool structurallySound=uv_mesh_structurally_sound(mesh);
+    if(!structurallySound || corners.empty() || !valid_density_settings(settings))
         return fail("Select UV faces with a valid channel, object metric and texture size");
     std::set<std::uint32_t> selectedFaces;
     for(auto corner:corners) {

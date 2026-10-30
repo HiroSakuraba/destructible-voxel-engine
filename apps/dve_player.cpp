@@ -208,6 +208,8 @@ window / rendering
                             cascades: radiance cascades)
   --gi-rays N               vulkan: rays per texel for bounce GI (default 32; half-resolution texels,
                             accumulated over frames; more = smoother, slower)
+  --ibl split-sum|she       vulkan: glossy reflection model (default split-sum;
+                             SHE fits asynchronously, fallback for sharp surfaces)
   --sky colors|physical     override the scene's sky model (physical: atmosphere sky, sun colour and
                             sky light from the engine's atmosphere model)
   --free-camera             mouse look; WASD move; Space up; C down; Esc quits
@@ -259,6 +261,7 @@ struct Options {
     std::string giMode{"ambient"};  // vulkan: ambient | bounce | cascades
     std::uint32_t giRays{32};       // vulkan: rays per traced-GI texel
     std::string skyOverride;        // "" (scene), colors | physical
+    bool sheGlossyReflections{};
     bool fullscreen{};
     bool freeCamera{};
     bool headless{};
@@ -364,6 +367,10 @@ std::optional<Options> parse_arguments(int argc, char** argv, int* exitCode) {
             const unsigned long rays = std::strtoul(v->c_str(), &end, 10);
             if (end == v->c_str() || *end != '\0' || rays < 1UL || rays > 128UL) return bad("--gi-rays must be 1..128");
             options.giRays = static_cast<std::uint32_t>(rays);
+        } else if (argument == "--ibl") {
+            if (!(v = value()) || (*v != "split-sum" && *v != "she"))
+                return bad("--ibl must be split-sum or she");
+            options.sheGlossyReflections = *v == "she";
         } else if (argument == "--sky") {
             if (!(v = value()) || (*v != "colors" && *v != "physical")) return bad("--sky must be colors or physical");
             options.skyOverride = *v;
@@ -735,6 +742,7 @@ int run(int argc, char** argv) {
     if (options.vulkan) {
         VulkanPlayerRendererOptions vulkanOptions;
         vulkanOptions.globalIlluminationRays = options.giRays;
+        vulkanOptions.sheGlossyReflections = options.sheGlossyReflections;
         vulkanOptions.globalIllumination = options.giMode == "bounce" ? PlayerGlobalIlluminationMode::VoxelOneBounce
                                          : options.giMode == "cascades" ? PlayerGlobalIlluminationMode::RadianceCascades
                                                                         : PlayerGlobalIlluminationMode::Ambient;

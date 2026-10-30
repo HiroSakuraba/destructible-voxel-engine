@@ -98,18 +98,25 @@ void test_constant_environment_bake() {
     material.normal={0,1,0};
     material.viewDirection={0,1,0};
     material.roughness=0.8F;
-    auto baseline=dve::evaluate_image_based_lighting(ibl,material);
+    material.metallic=1.0F;
+    const auto baseline=dve::evaluate_image_based_lighting(ibl,material);
     material.sheProbe=&fitted->coefficients;
-    auto withShe=dve::evaluate_image_based_lighting(ibl,material);
+    const auto withShe=dve::evaluate_image_based_lighting(ibl,material);
     CHECK(std::isfinite(withShe.x)&&std::isfinite(withShe.y)&&std::isfinite(withShe.z));
     CHECK(withShe.x>0.0F);
+    // Prove that the CPU evaluator actually selects SHE, rather than silently
+    // always returning the split-sum result. DC Y00 ~= 0.282.
+    dve::SheProbeCoefficients strong{};
+    strong.rgb[0][0]=20.0F;
+    material.sheProbe=&strong;
+    const auto forced=dve::evaluate_image_based_lighting(ibl,material);
+    CHECK(forced.x>baseline.x+10.0F);
     // Sharp surfaces are guaranteed to keep their previous split-sum values.
     material.roughness=0.2F;
     const auto fallback=dve::evaluate_image_based_lighting(ibl,material);
     material.sheProbe=nullptr;
     const auto split=dve::evaluate_image_based_lighting(ibl,material);
     CHECK(fallback.x==split.x&&fallback.y==split.y&&fallback.z==split.z);
-    (void)baseline;
 }
 }
 int main(){

@@ -1,104 +1,137 @@
-# SHE-1: Spherical Harmonic Exponential (SHE) glossy reflections
+# Spherical Harmonic Exponential (SHE) glossy reflections for DVE
 
-## State: CPU reference implementation and shader decoder, not yet live GPU integration
+## Integration status — PR #269
 
-Paper: A. Silvennoinen, P.-P. Sloan, M. Iwanicki, D. Nowrouzezahrai,
-*Spherical Harmonic Exponentials for Efficient Glossy Reflections*,
-Computer Graphics Forum 44(8), HPG 2025, [DOI:10.1111/cgf.70219](https://doi.org/10.1111/cgf.70219).
-Slides: https://highperformancegraphics.org/untracked/2025/presentations/Pa5_1_hpg_2025_slides.pdf
+This PR adds a working, optional source-level path for fitting, storing, uploading and
+evaluating Spherical Harmonic Exponential environment reflections. The default remains
+the legacy split-sum IBL renderer, and **actual frame time, visual parity and VRAM
+savings have not yet been demonstrated on hardware**.
 
-DVE currently renders environment specular via a prefiltered cubemap plus a BRDF LUT
-(`shaders/common/environment_ibl.hlsli`). SHE-1 **does not change the Vulkan/Live
-Environment GPU render path**. It supplies the groundwork to implement a runtime
-choice, and a CPU opt-in to compare the two.
+Enable it in the Vulkan player:
 
-### Implemented
-
-- Factorization in reflection direction `r=reflect(-v,n)` and half-reflection
-  `h_r=normalize(n+r)`: `E0 = exp(P(r,alpha)+Q(h_r,alpha))`.
-- Orthonormal real spherical harmonics through degree 4 for P (25 terms)
-  and degree 2 without redundant DC for Q (8 terms), 33 coefficients **per channel**.
-- Directional roughness encoding `vMF_l(1/alpha)=exp(-l(l+1)*alpha/2)`
-  where `alpha=material.roughness^2` is the GGX distribution width.
-- Offline CPU GGX reference sampling and regularized log-linear least-squares
-  fitting of E0. Targets use height-correlated Smith masking-shadowing.
-- Nonnegative reconstruction via the exponential, with bounded log output and
-  input validation; explicit fallback for alpha below 0.25.
-- Packed FP16 format: RGB interleaved 99 half coefficients plus five padding
-  halfs = **208 bytes per probe**. The HLSL helper uses the same basis, order,
-  and packed layout; not yet bound to the live GPU pipeline.
-- `IblMaterialInput::sheProbe`: optional CPU/reference opt-in; existing
-  diffuse, AO, and split-sum behavior remain unchanged when null. With a fitted
-  probe and supported alpha, specular uses SHE E0 weighted by the approximate
-  BRDF LUT Fresnel ratio `(F0*A + B)/(A+B)`.
-- Dedicated correctness tests: synthetic fitting, packing, unsupported-alpha
-  fallback, and constant-color cubemap baking.
-
-### Why not always SHE?
-
-The paper's 33-coefficient variant was demonstrated principally for
-GGX alpha in **[0.25, 1.0]**. That corresponds to perceptual roughness
-approximately **[0.5, 1.0]** for DVE's roughness-squared convention.
-Mirrors, glass with sharp reflections, and very glossy clear coat need
-another path. SHE is an approximation to reflected *environment light*;
-it is not ray-traced reflection, refraction, SSR, or a replacement for GI.
-
-The paper reports around 200x less memory in a particular production
-comparison (around 8,000 probes), not a general DVE speedup.
-A 208-byte probe costs 1.59 MiB for 8,000 probes before any buffers,
-diffuse resources or alignment overhead. The current prototype retains all
-traditional IBL GPU textures, so **it saves no GPU memory yet**.
-
-### Next: SHE-2 (make the Live Environment renderer use it)
-
-1. Introduce a versioned optional SHE payload in `.dveibl` with an identity
-   keyed to the source environment's content hash, plus cooker flags and cache.
-   Retain legacy assets and split-sum fallback; never silently reinterpret bytes.
-2. Add RHI storage-buffer upload for 208-byte probes and a new, optional
-   shader binding; avoid colliding with existing frame/environment/material
-   bind group slots. Update `live_environment_renderer.cpp` and the material
-   pipeline inventory/PSO warmup accordingly.
-3. Change `live_ibl_material_ps.hlsl` to select SHE for supported alpha and
-   available probes. Sample diffuse irradiance as before, compute environment
-   rotation once, and use the Fresnel factor and specular AO consistently.
-   Coat and ordinary lobes choose their fallback **independently**.
-4. Add hard fallback for no fitted probe, invalid or stale coefficients,
-   alpha below 0.25, unsupported shader/buffer capability, and budget/quality
-   limits. Do not allocate the split-sum specular cube for SHE-only probes
-   until a complete safe fallback policy exists.
-5. On dynamic sky/sun HDR change, fit off-thread / asynchronously or use
-   a bounded GPU reduction; **never** execute the CPU fitting loop every frame.
-   Double-buffer coefficients and synchronize uploads with in-flight frames.
-6. Extend tests through NullDevice and Vulkan, including storage buffer barriers,
-   binding reflection, descriptor retirement and refresh, plus coefficient parity
-   between CPU and HLSL. Test (i) camera-angle dependence, (ii) alpha sweep,
-   (iii) high-frequency HDR maps, (iv) roughness fallback, (v) sky rotations.
-7. Benchmark GTX 1080 separately. Report 1080p median/p95/p99 GPU time,
-   shader registers/instructions, occupancy, upload costs, CPU fitting time,
-   measured VRAM, and MSE/SSIM or HDR relative errors vs path-traced
-   or high-sample Monte Carlo reference. Do not assume GPU FP16 arithmetic:
-   Pascal supports FP16 storage but fast native FP16 operations are not
-   guaranteed. Decode into FP32 in the shader initially.
-
-### Developer usage
-
-```cpp
-const auto fit = dve::bake_she_probe(environmentCube);
-if (fit) {
-    dve::IblMaterialInput m = /* ... */;
-    m.sheProbe = &fit->coefficients;
-    auto lit = dve::evaluate_image_based_lighting(legacyIblBake, m);
-}
+```text
+dve_player --renderer vulkan --ibl she --sky colors
+dve_player --renderer vulkan --ibl she --sky physical
+dve_player --renderer vulkan --ibl split-sum
 ```
 
-Shader-only reference decoder: `shaders/common/spherical_harmonic_exponentials.hlsli`.
+The live Vulkan material shader uses SHE *only* for supported glossy roughness
+when the fit has been published. While a fit is pending, or if the fit fails or the
+sky changes, the shader uses the existing split-sum cubemap and BRDF LUT. The
+material's clear-coat lobe is selected independently.
 
-### References / external ports
+## Source and reference implementation
 
-- Original HPG slides and paper (links above).
-- MIT D3D12 reference port: https://github.com/Avelina9X/SphericalHarmonicExponentials
-- MIT experimental port: https://github.com/breeze028/Spherical-Harmonic-Exponentials-for-Efficient-Glossy-Reflections
+Silvennoinen, Sloan, Iwanicki and Nowrouzezahrai, *Spherical Harmonic
+Exponentials for Efficient Glossy Reflections*, Computer Graphics Forum
+44(8), HPG 2025. DOI https://doi.org/10.1111/cgf.70219
 
-The code here is an independent implementation of the published math, not
-copied from external ports. No claim is made that the shader has been compiled
-or that production-quality parity with the paper has yet been demonstrated.
+MIT-licensed external D3D12 reference:
+https://github.com/Avelina9X/SphericalHarmonicExponentials
+
+DVE's code is an independent implementation. The external reference uses the
+same exp(-l(l+1)alpha/2) roughness factors, and confirms the 24 P non-DC,
+8 Q non-DC + 1 DC factorization (33 total). We store the equivalent 25 P
+including DC plus 8 Q without DC.
+
+## Architecture
+
+1. `src/spherical_harmonic_exponentials.cpp` samples the source
+   EnvironmentCube, constructs GGX base (Fresnel=1) reference values, and
+   solves the 33-column log-linear least-squares problem per RGB channel.
+   Uses height-correlated Smith masking and a small regularization term.
+2. `include/dve/spherical_harmonic_exponentials.hpp` provides the CPU
+   reference API and a 208-byte RGB FP16 coefficient format (99 half
+   coefficients plus five padding halfs).
+3. `shaders/common/spherical_harmonic_exponentials.hlsli` reconstructs
+   from 52 uint32 coefficient words using ordinary FP32 operations. The
+   Vulkan resource carries an additional marker word and padding, so the
+   current **GPU allocation is 224 bytes**, not 208 bytes.
+4. `EnvironmentLightingAsset` contains an optional `sheProbe` plus a
+   content hash of its *source radiance*. `.dveibl` v1.1 saves the source
+   hash and 208 packed coefficient bytes following the existing resources.
+   Legacy v1.0 assets remain readable and writer output remains v1.0
+   when no SHE payload is present. A changed source invalidates its fit.
+5. `src/render/environment_lighting_gpu.cpp` binds an always-valid,
+   read-only storage buffer at environment set 2, binding 3. Coefficient
+   updates write to the same buffer and preserve descriptor/PSO handles.
+   A zero validity marker selects split-sum unconditionally. Resource
+   publication must be synchronized with in-flight GPU reads.
+6. `shaders/live_ibl_material_ps.hlsl` evaluates SHE's directional base
+   integral and replaces the specular half of the existing IBL result,
+   leaving diffuse irradiance, indirect diffuse GI, AO, sun, shadows,
+   and environmental scaling unchanged. Fresnel remains the existing
+   LUT ratio (F0*A+B)/(A+B). Material normal and view directions are
+   rotated together into sky space before SH evaluation.
+7. `src/player/vulkan_player_renderer.cpp` makes the player opt-in
+   asynchronous: scene sky changes invalidate the old GPU marker; a
+   background CPU fit on a *copied source cube* is published only after
+   its source hash matches the current sky and the renderer has waited
+   for outstanding GPU work. Failed fits leave split-sum active and
+   do not immediately restart.
+
+## Quality and scope limitations
+
+- Uses GGX microfacet `alpha = perceptualRoughness^2`.
+  SHE is enabled only when `alpha >= 0.25`, corresponding to perceptual
+  roughness `>= 0.5`. Sharper reflections and clear coat use split-sum.
+- The current fit is a CPU Monte Carlo approximation; it does not reproduce
+  the paper's GPU fitting/reduction/solver or exposure-calibration stages.
+  The player uses 768 directional training points * 64 GGX samples.
+  Higher quality offline bakes are possible with `SheBakeSettings`.
+- Synchronous `bake_environment_she(asset,settings)` is exposed for
+  asset-cooker integrations, with `write_dveibl` / `read_dveibl`.
+- DVE **still allocates its traditional cubemap and BRDF LUT**, because
+  they are needed for sharp surfaces and as an always-safe fallback.
+  Therefore this PR **does not yield a measured VRAM saving** despite
+  compact coefficient storage. The paper's ~200x figure refers to a
+  particular comparison, not a guarantee for DVE.
+- The GPU path currently fits one global sky environment at a time.
+  Local/box-projected reflection probes are CPU contract structures,
+  not an integrated multi-probe GPU renderer. Multi-probe interpolation
+  requires its own residency, binding and blending design.
+- SH evaluation involves more arithmetic and buffer reads than one
+  prefiltered cubemap lookup; the 1080 GPU could be slower. No GPU
+  optimization should be claimed without instrumentation.
+- The CPU fitter and shader use FP32 accumulation for GTX 1080
+  compatibility; native FP16 arithmetic is not assumed or required.
+- No claim yet that the selected fitting resolution beats split-sum in
+  every HDR scene. Highlights can be biased by the log-space fit.
+
+## Tests
+
+- `dve_spherical_harmonic_exponentials_tests`: synthetic exact
+  coefficient fitting, half packing/unpacking, constant HDR probe baking,
+  alpha threshold fallback, CPU override.
+- `dve_production_environment_lighting_tests`: v1.0 and v1.1
+  round-trip, changed-source rejection, NullDevice coefficient upload
+  marker, enabled/disabled state and resource cleanup.
+- `dve_vulkan_environment_lighting_tests`: read-only GPU coefficient
+  upload/readback and marker lifetime on software Vulkan.
+- Existing `dve_vulkan_live_environment_renderer_tests` and player
+  builds are needed to confirm shader reflection/pipeline layout validity.
+
+## Hardware acceptance gates (not yet measured)
+
+On the user's GTX 1080 at 1080p: compare `--ibl she` to
+`--ibl split-sum` on bright HDR scenes and a Cornell Box-like material
+sweep. Record linear HDR MAE/MSE and highlight clips against a high
+sample-count GGX reference; repeat over rotating camera and all alpha
+levels around the 0.25 boundary. Record median/p95/p99 GPU duration,
+frame time while fitting, GPU memory allocated, descriptor/buffer counts
+and energy differences in metals and clear coats. Report cold/warm sky
+switch, fitting CPU time, stale fit avoidance and visual flicker.
+The quality gate is **comparison against a reference**, not appearance
+alone; if a scene regresses, keep split-sum as the default.
+
+## Follow-up candidates after hardware evidence
+
+- Avoid sampling the old cubemap when SHE is selected (currently the
+  shader computes a delta against the old path for correctness).
+- Improve coefficient fitting and brightness compensation against the
+  original reference.
+- Optional cooked HDRI/box-probe arrays with residency/streaming and
+  spatial blending; preserve local parallax corrections and fallbacks.
+- Retire cubemap specular data only if a scene's materials, roughness
+  ranges and fallback policy permit doing so safely.
+

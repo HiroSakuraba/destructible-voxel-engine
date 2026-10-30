@@ -126,10 +126,10 @@ alone; if a scene regresses, keep split-sum as the default.
 
 ## Follow-up candidates after hardware evidence
 
-- Avoid sampling the old cubemap when SHE is selected (currently the
-  shader computes a delta against the old path for correctness).
 - Improve coefficient fitting and brightness compensation against the
-  original reference.
+  original reference. The current shader already skips the old specular
+  cubemap fetch when SHE is selected, but both resources remain resident
+  for sharp-material fallback.
 - Optional cooked HDRI/box-probe arrays with residency/streaming and
   spatial blending; preserve local parallax corrections and fallbacks.
 - Retire cubemap specular data only if a scene's materials, roughness

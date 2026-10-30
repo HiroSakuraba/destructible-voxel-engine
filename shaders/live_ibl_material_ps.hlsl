@@ -1,6 +1,7 @@
 #include "common/material_record.hlsli"
 #include "common/material_mapping.hlsli"
 #include "common/environment_ibl.hlsli"
+#include "common/spherical_harmonic_exponentials.hlsli"
 #include "common/cascaded_shadow_map.hlsli"
 
 #include "common/live_bindings.hlsli"
@@ -11,6 +12,9 @@ DVE_LIVE_BIND(14,3) StructuredBuffer<uint> gLayerData : register(t37);
 DVE_LIVE_IMAGE(0,2) TextureCube<float4> gDiffuseIrradiance : register(t18);
 DVE_LIVE_IMAGE(1,2) TextureCube<float4> gSpecularPrefilter : register(t19);
 DVE_LIVE_IMAGE(2,2) Texture2D<float2> gEnvironmentBrdfLut : register(t20);
+// The environment bind group always supplies 56 uint32s. Word 52 is a
+// validity marker; 0 means no fitted probe and selects the legacy split-sum.
+DVE_LIVE_BIND(3,2) StructuredBuffer<uint> gSheSpecularCoefficients : register(t43);
 DVE_LIVE_IMAGE(11,3) Texture2D<float> gCascadedStaticShadowDepth : register(t22);
 DVE_LIVE_IMAGE(12,3) Texture2D<float> gCascadedDynamicShadowDepth : register(t25);
 DVE_LIVE_BIND(0,3) StructuredBuffer<MaterialRecord> gLiveMaterialRecords : register(t26);
@@ -96,6 +100,38 @@ DVE_LIVE_BIND(0,1) cbuffer LiveObjectConstants : register(b9) {
     float4x4 gObjectToWorld;uint4 gObjectIdentityAndFlags;float4 gObjectMaterialParameters;
 };
 
+// Replace only the GGX environment specular lobe. Diffuse, GI, AO and direct sun
+// remain calculated by the existing renderer. The relative Fresnel factor is
+// approximated with the legacy BRDF LUT: E0 * (F0*A+B)/(A+B).
+float3 SheEnvironmentSpecularDelta(float3 normal, float3 viewDirection,
+                                  float3 baseColor, float metallic, float roughness,
+                                  float specular, float ambientOcclusion) {
+    if(gSheSpecularCoefficients[52u] != 0x53484531u) return 0.0F.xxx;
+    const float alpha=saturate(roughness)*saturate(roughness);
+    if(alpha < DVE_SHE_MIN_ALPHA || alpha > 1.0F) return 0.0F.xxx;
+    const float3 N=normalize(normal);
+    const float3 V=normalize(viewDirection);
+    const float ndv=saturate(dot(N,V));
+    if(ndv<1.0e-4F)return 0.0F.xxx;
+    const float3 f0=lerp((0.08F*saturate(specular)).xxx,
+                         max(baseColor,0.0F.xxx),saturate(metallic));
+    const float2 brdf=gEnvironmentBrdfLut.SampleLevel(
+        gBrdfSampler,float2(ndv,saturate(roughness)),0.0F);
+    const float3 albedo=f0*brdf.x+brdf.y*saturate(50.0F*f0.g);
+    const float denom=max(brdf.x+brdf.y,1.0e-5F);
+    const float3 oldPrefilter=gSpecularPrefilter.SampleLevel(
+        gSpecularSampler,RotateEnvironmentDirectionY(reflect(-V,N),
+            gEnvironmentParameters.x),saturate(roughness)*gEnvironmentParameters.w).rgb;
+    // The fit is expressed in environment-space coordinates. Rotate N and V
+    // together to avoid an unintended view-dependent phase shift.
+    const float3 envN=RotateEnvironmentDirectionY(N,gEnvironmentParameters.x);
+    const float3 envV=RotateEnvironmentDirectionY(V,gEnvironmentParameters.x);
+    const float3 sheBase=DveSheEvaluateBase(gSheSpecularCoefficients,0u,envN,envV,roughness);
+    const float ao=saturate(ambientOcclusion);
+    const float specularOcclusion=saturate(pow(ndv+ao,exp2(-16.0F*saturate(roughness)-1.0F))-1.0F+ao);
+    return (sheBase/denom-oldPrefilter)*albedo*specularOcclusion;
+}
+
 float4 main(float4 position : SV_Position, float3 worldPosition : TEXCOORD0,
             float3 normal : TEXCOORD1, float2 uv : TEXCOORD2,
             float4 color : COLOR0, float3 objectPosition : TEXCOORD3,
@@ -174,11 +210,15 @@ float4 main(float4 position : SV_Position, float3 worldPosition : TEXCOORD0,
         gDiffuseIrradiance, gSpecularPrefilter, gEnvironmentBrdfLut, gEnvironmentSampler,gSpecularSampler,gBrdfSampler,
         shadingNormal, V, baseColor, metallic, roughness, material.specular,
         ambientOcclusion, gEnvironmentParameters.w, gEnvironmentParameters.x, indirect);
+    ibl += SheEnvironmentSpecularDelta(
+        shadingNormal,V,baseColor,metallic,roughness,material.specular,ambientOcclusion);
     if(material.clearCoat>0){
         float fresnel=.04F+.96F*pow(1-saturate(dot(shadingNormal,V)),5);
         float3 coat=EvaluateImageBasedLightingSeparateSamplers(gDiffuseIrradiance,gSpecularPrefilter,
             gEnvironmentBrdfLut,gEnvironmentSampler,gSpecularSampler,gBrdfSampler,shadingNormal,V,
             0.0F.xxx,0,material.clearCoatRoughness,.5F,1,gEnvironmentParameters.w,gEnvironmentParameters.x);
+        coat += SheEnvironmentSpecularDelta(
+            shadingNormal,V,0.0F.xxx,0.0F,material.clearCoatRoughness,0.5F,1.0F);
         ibl=ibl*(1-saturate(material.clearCoat)*fresnel)+coat*saturate(material.clearCoat);
     }
     ibl*=max(0,gEnvironmentParameters.y);

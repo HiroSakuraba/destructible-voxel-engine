@@ -53,6 +53,7 @@ c++ -std=c++23 -ffunction-sections -fdata-sections -Wl,--gc-sections \
     "$repo_dir/src/gpu_material_mapping.cpp" \
     "$repo_dir/src/environment_lighting.cpp" \
     "$repo_dir/src/environment_lighting_asset.cpp" \
+    "$repo_dir/src/spherical_harmonic_exponentials.cpp" \
     "$repo_dir/src/camera_system.cpp" \
     $common_sources -o "$build_dir/live_environment_renderer"
 "$build_dir/live_environment_renderer"

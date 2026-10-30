@@ -78,6 +78,8 @@ struct IblBakeResult {
 [[nodiscard]] IblBakeResult bake_image_based_lighting(const EnvironmentCube& source,
                                                        const IblBakeSettings& settings = {});
 
+struct SheProbeCoefficients;
+
 struct IblMaterialInput {
     Float3 normal{0.0F, 1.0F, 0.0F};
     Float3 viewDirection{0.0F, 0.0F, 1.0F};
@@ -86,6 +88,9 @@ struct IblMaterialInput {
     float roughness{0.5F};
     float specular{0.5F};
     float ambientOcclusion{1.0F};
+    // Optional SHE reference override; null keeps the established split-sum IBL path.
+    // Evaluates only supported GGX alpha >= 0.25; lower alpha falls back to split-sum.
+    const SheProbeCoefficients* sheProbe{};
 };
 
 [[nodiscard]] Float3 evaluate_image_based_lighting(const IblBakeResult& ibl,

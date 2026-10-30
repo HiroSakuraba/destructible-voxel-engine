@@ -1,4 +1,3 @@
-#pragma once
 // Factorized log-space SH-exponential representation for glossy environment probes.
 // Inspired by Silvennoinen et al., CGF/HPG 2025, DOI:10.1111/cgf.70219.
 // E0(r, h_r, alpha) = exp(sum(P_lm Y_lm(r) vMF_l(1/alpha))

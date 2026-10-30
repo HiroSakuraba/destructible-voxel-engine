@@ -35,6 +35,13 @@ struct EnvironmentLightingGpuResources {
     EnvironmentLightingGpuResources& resources,
     std::string* error = nullptr);
 
+// Replace the probe without recreating the binding. Caller must ensure that no
+// in-flight GPU frame is reading this buffer (wait for its fence / device idle).
+// Passing nullptr atomically disables SHE via its zero marker, without changing layouts.
+[[nodiscard]] bool update_environment_she_probe(
+    rhi::IDevice& device, const SheProbeCoefficients* probe,
+    EnvironmentLightingGpuResources& resources, std::string* error = nullptr);
+
 // Rewrites the baked cubes of existing resources in place (same resolutions and mip count as the
 // upload that created them); views, samplers and bind groups stay valid. Callers must make sure
 // the GPU is not reading the textures.

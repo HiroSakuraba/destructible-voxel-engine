@@ -2,7 +2,7 @@ struct Surface { float4 position; float4 normal; };
 [[vk::binding(0,0)]] StructuredBuffer<Surface> surfaces : register(t0);
 [[vk::binding(1,0)]] StructuredBuffer<float4> light : register(t1);
 [[vk::binding(2,0)]] StructuredBuffer<float4> settings : register(t2);
-[[vk::binding(3,0)]] [[vk::image_format("rgba16f")]] RWTexture2D<float4> output : register(u0);
+[[vk::binding(3,0)]] RWTexture2D<float4> output : register(u0);
 [numthreads(8,8,1)]
 void main(uint3 id:SV_DispatchThreadID){
     uint width,height;output.GetDimensions(width,height);if(id.x>=width||id.y>=height)return;

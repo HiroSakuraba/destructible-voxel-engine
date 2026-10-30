@@ -12,9 +12,10 @@
 #include <span>
 #include <string>
 
-#include "dve/environment_lighting.hpp"
+#include "dve/asset_cooker.hpp"
 
 namespace dve {
+struct EnvironmentCube;
 constexpr std::size_t kSheCoefficientCount = 33;
 constexpr std::size_t kShePackedHalfCount = 104; // 99 RGB coefficients plus padding = 208 B
 constexpr float kSheMinimumAlpha = 0.25F;

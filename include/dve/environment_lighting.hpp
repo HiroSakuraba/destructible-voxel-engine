@@ -8,6 +8,7 @@
 
 #include "dve/asset_cooker.hpp"
 #include "dve/camera_system.hpp"
+#include "dve/spherical_harmonic_exponentials.hpp"
 
 namespace dve {
 
@@ -128,6 +129,10 @@ struct EnvironmentLightingAsset {
     float skyboxExposure{};
     EnvironmentCube sourceRadiance;
     IblBakeResult baked;
+    // Optional compact SHE representation of source radiance. The source hash makes
+    // stale coefficients invalid after a cubemap edit; old .dveibl files stay valid.
+    std::optional<SheProbeCoefficients> sheProbe;
+    std::uint64_t sheSourceHash{};
     std::uint64_t contentHash{};
 
     [[nodiscard]] bool validate(std::string* error = nullptr) const noexcept;
@@ -139,6 +144,11 @@ struct EnvironmentLightingReadResult {
     std::string error;
     [[nodiscard]] explicit operator bool() const noexcept { return asset.has_value(); }
 };
+
+[[nodiscard]] std::uint64_t environment_radiance_hash(const EnvironmentCube& source) noexcept;
+[[nodiscard]] bool bake_environment_she(EnvironmentLightingAsset& asset,
+                                        const SheBakeSettings& settings = {},
+                                        std::string* error = nullptr);
 
 [[nodiscard]] EnvironmentLightingAsset make_default_environment_lighting_asset(
     const IblBakeSettings& settings = {});

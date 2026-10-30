@@ -33,10 +33,10 @@ std::vector<std::byte> pack_cube_face(const EnvironmentCube& cube, CubeFace face
     return {reinterpret_cast<const std::byte*>(half.data()),reinterpret_cast<const std::byte*>(half.data()+half.size())};
 }
 constexpr std::size_t kSheGpuWords = 56U;
-std::array<std::uint32_t,kSheGpuWords> pack_gpu_she(const EnvironmentLightingAsset& asset) {
+std::array<std::uint32_t,kSheGpuWords> pack_gpu_she(const SheProbeCoefficients* probe) {
     std::array<std::uint32_t,kSheGpuWords> words{};
-    if(!asset.sheProbe)return words;
-    const auto packed=pack_she_probe_half(*asset.sheProbe);
+    if(!probe)return words;
+    const auto packed=pack_she_probe_half(*probe);
     for(std::size_t i=0;i<packed.half.size()/2U;++i)
         words[i]=static_cast<std::uint32_t>(packed.half[2U*i]) |
                  (static_cast<std::uint32_t>(packed.half[2U*i+1U])<<16U);
@@ -45,7 +45,7 @@ std::array<std::uint32_t,kSheGpuWords> pack_gpu_she(const EnvironmentLightingAss
 }
 bool upload_gpu_she(rhi::IDevice& device, const EnvironmentLightingAsset& asset,
                     rhi::BufferHandle buffer, std::string* error) {
-    const auto words=pack_gpu_she(asset);
+    const auto words=pack_gpu_she(asset.sheProbe ? &*asset.sheProbe : nullptr);
     return device.write_buffer(buffer,0U,std::as_bytes(std::span(words)),error);
 }
 std::vector<std::byte> pack_brdf(const IblBakeResult& ibl) {
@@ -59,6 +59,18 @@ bool upload_cube(rhi::IDevice& device,rhi::TextureHandle texture,const Environme
     return true;
 }
 bool upload_cube(rhi::IDevice& device,rhi::TextureHandle texture,const EnvironmentCube& cube,std::uint64_t& bytes,std::string* error){EnvironmentCubeMipChain chain;chain.levels.push_back(cube);return upload_cube(device,texture,chain,bytes,error);}
+}
+
+bool update_environment_she_probe(rhi::IDevice& device,const SheProbeCoefficients* probe,
+                                  EnvironmentLightingGpuResources& resources,std::string* error) {
+    if(!resources.valid()){set_error(error,"SHE GPU resources are unavailable");return false;}
+    if(probe&&!probe->validate(error))return false;
+    const auto words=pack_gpu_she(probe);
+    if(!device.write_buffer(resources.sheCoefficients,0U,std::as_bytes(std::span(words)),error))
+        return false;
+    resources.sheEnabled=probe!=nullptr;
+    resources.uploadedBytes+=sizeof(words);
+    return true;
 }
 
 bool EnvironmentLightingGpuResources::valid() const noexcept {return diffuseIrradiance&&diffuseIrradianceView&&specularPrefilter&&specularPrefilterView&&brdfLut&&brdfLutView&&sampler&&bindGroupLayout&&bindGroup&&sheCoefficients&&specularMipLevels>0U;}

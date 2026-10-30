@@ -4253,6 +4253,886 @@
           "register": "t8"
         }
       ]
+    },
+    {
+      "name": "player_split_rc_clear_cs",
+      "source": "player_split_rc_clear_cs.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "sums",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u0"
+        },
+        {
+          "name": "atlasA",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u1"
+        },
+        {
+          "name": "atlasB",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u2"
+        }
+      ]
+    },
+    {
+      "name": "player_split_rc_prepare_cs",
+      "source": "player_split_rc_prepare_cs.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "surfaces",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "directions",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t1"
+        },
+        {
+          "name": "config",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t2"
+        },
+        {
+          "name": "rays",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u0"
+        },
+        {
+          "name": "slots",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u1"
+        },
+        {
+          "name": "intervalDirections",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u2"
+        }
+      ]
+    },
+    {
+      "name": "player_split_rc_surface_cs",
+      "source": "player_split_rc_surface_cs.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "PlayerSsaoConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b0"
+        },
+        {
+          "name": "gDepthSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s0"
+        },
+        {
+          "name": "gGiRawSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s7"
+        },
+        {
+          "name": "gGiHistorySampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s8"
+        },
+        {
+          "name": "gDepth",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "gGiRaw",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t7"
+        },
+        {
+          "name": "gGiHistory",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t8"
+        },
+        {
+          "name": "gSplitSurfaces",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u0"
+        }
+      ]
+    },
+    {
+      "name": "player_split_rc_trace_cs",
+      "source": "player_split_rc_trace_cs.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "PlayerSsaoConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b0"
+        },
+        {
+          "name": "gDepthSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s0"
+        },
+        {
+          "name": "gSkyRadianceSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s5"
+        },
+        {
+          "name": "gSkyIrradianceSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s6"
+        },
+        {
+          "name": "gGiRawSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s7"
+        },
+        {
+          "name": "gGiHistorySampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s8"
+        },
+        {
+          "name": "gDepth",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "gGridCells",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t2"
+        },
+        {
+          "name": "gGridPalette",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t3"
+        },
+        {
+          "name": "gSkyRadiance",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t5"
+        },
+        {
+          "name": "gSkyIrradiance",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t6"
+        },
+        {
+          "name": "gGiRaw",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t7"
+        },
+        {
+          "name": "gGiHistory",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t8"
+        },
+        {
+          "name": "gSplitRays",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t10"
+        },
+        {
+          "name": "gSplitRayResults",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u0"
+        }
+      ]
+    },
+    {
+      "name": "player_split_rc_upsample_cs",
+      "source": "player_split_rc_upsample_cs.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        8,
+        8,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "surfaces",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "light",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t1"
+        },
+        {
+          "name": "settings",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t2"
+        },
+        {
+          "name": "output",
+          "kind": "storage_texture",
+          "access": "read_write",
+          "register": "u0"
+        }
+      ]
+    },
+    {
+      "name": "player_split_rc_weighted_merge_cs",
+      "source": "player_split_rc_weighted_merge_cs.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "keys",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "intervals",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t1"
+        },
+        {
+          "name": "parents",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t2"
+        },
+        {
+          "name": "queries",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t3"
+        },
+        {
+          "name": "offsets",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t4"
+        },
+        {
+          "name": "probeCounts",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t5"
+        },
+        {
+          "name": "output",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u0"
+        }
+      ]
+    },
+    {
+      "name": "split_rc_accumulate_cs",
+      "source": "split_rc_accumulate_cs.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "intervals",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "probeSlots",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t1"
+        },
+        {
+          "name": "directions",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t2"
+        },
+        {
+          "name": "config",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t3"
+        },
+        {
+          "name": "offsets",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t4"
+        },
+        {
+          "name": "keys",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t5"
+        },
+        {
+          "name": "sums",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u0"
+        },
+        {
+          "name": "diagnostics",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u1"
+        }
+      ]
+    },
+    {
+      "name": "split_rc_build_queries_cs",
+      "source": "split_rc_build_queries_cs.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "keys",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "offsets",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t1"
+        },
+        {
+          "name": "queries",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u0"
+        }
+      ]
+    },
+    {
+      "name": "split_rc_compact_offsets_cs",
+      "source": "split_rc_compact_offsets_cs.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        1,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "keys",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "config",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t1"
+        },
+        {
+          "name": "offsets",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u0"
+        },
+        {
+          "name": "diagnostics",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u1"
+        }
+      ]
+    },
+    {
+      "name": "split_rc_diffuse_gather_cs",
+      "source": "split_rc_diffuse_gather_cs.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "keys",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "offsets",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t1"
+        },
+        {
+          "name": "radiance",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t2"
+        },
+        {
+          "name": "directions",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t3"
+        },
+        {
+          "name": "queries",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t4"
+        },
+        {
+          "name": "output",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u0"
+        }
+      ]
+    },
+    {
+      "name": "split_rc_directions_cs",
+      "source": "split_rc_directions_cs.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "requests",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "output",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u0"
+        }
+      ]
+    },
+    {
+      "name": "split_rc_expand_probes_cs",
+      "source": "split_rc_expand_probes_cs.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "surfaces",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "candidates",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u0"
+        }
+      ]
+    },
+    {
+      "name": "split_rc_intervals_cs",
+      "source": "split_rc_intervals_cs.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "rays",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "intervals",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u0"
+        }
+      ]
+    },
+    {
+      "name": "split_rc_merge_cs",
+      "source": "split_rc_merge_cs.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "intervals",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "merged",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u0"
+        }
+      ]
+    },
+    {
+      "name": "split_rc_primary_voxel_cs",
+      "source": "split_rc_primary_voxel_cs.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "rays",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "gridInfo",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t1"
+        },
+        {
+          "name": "gGridCells",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t2"
+        },
+        {
+          "name": "gGridPalette",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t3"
+        },
+        {
+          "name": "surfaces",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u0"
+        }
+      ]
+    },
+    {
+      "name": "split_rc_probe_assign_cs",
+      "source": "split_rc_probe_assign_cs.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "samples",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "slots",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u0"
+        },
+        {
+          "name": "result",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u1"
+        },
+        {
+          "name": "counters",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u2"
+        }
+      ]
+    },
+    {
+      "name": "split_rc_resolve_cs",
+      "source": "split_rc_resolve_cs.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "sums",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "means",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u0"
+        },
+        {
+          "name": "valid",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u1"
+        }
+      ]
+    },
+    {
+      "name": "split_rc_scatter_cs",
+      "source": "split_rc_scatter_cs.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "keys",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "offsets",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t1"
+        },
+        {
+          "name": "queries",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t2"
+        },
+        {
+          "name": "values",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t3"
+        },
+        {
+          "name": "atlas",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u0"
+        }
+      ]
+    },
+    {
+      "name": "split_rc_spatial_merge_cs",
+      "source": "split_rc_spatial_merge_cs.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "keys",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "intervals",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t1"
+        },
+        {
+          "name": "parents",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t2"
+        },
+        {
+          "name": "queries",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t3"
+        },
+        {
+          "name": "offsets",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t4"
+        },
+        {
+          "name": "output",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u0"
+        }
+      ]
+    },
+    {
+      "name": "split_rc_voxel_trace_cs",
+      "source": "split_rc_voxel_trace_cs.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "rays",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "gridInfo",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t1"
+        },
+        {
+          "name": "gGridCells",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t2"
+        },
+        {
+          "name": "gGridPalette",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t3"
+        },
+        {
+          "name": "splitRays",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u0"
+        }
+      ]
     }
   ]
 }

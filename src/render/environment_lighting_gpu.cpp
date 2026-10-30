@@ -101,7 +101,7 @@ bool upload_environment_lighting(rhi::IDevice& device,const EnvironmentLightingA
     rhi::SamplerDesc sampler;sampler.addressU=sampler.addressV=sampler.addressW=rhi::AddressMode::ClampToEdge;sampler.maximumLod=static_cast<float>(spec.mipLevels-1U);sampler.debugName="IBL trilinear sampler";r.sampler=device.create_sampler(sampler,&local);if(!r.sampler)return fail(local);
     rhi::BufferDesc sheDesc;
     sheDesc.bytes=sizeof(std::uint32_t)*kSheGpuWords;
-    sheDesc.usage=rhi::BufferUsage::Storage|rhi::BufferUsage::CopyDestination;
+    sheDesc.usage=rhi::BufferUsage::Storage|rhi::BufferUsage::CopyDestination|rhi::BufferUsage::CopySource;
     sheDesc.memory=rhi::MemoryDomain::DeviceLocal;
     sheDesc.initialState=rhi::ResourceState::ShaderRead;
     sheDesc.debugName="SHE packed reflection probe, with zero fallback marker";

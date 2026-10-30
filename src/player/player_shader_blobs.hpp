@@ -22,4 +22,19 @@ namespace dve::player::shader_blobs {
 [[nodiscard]] std::span<const std::byte> player_rc_gather_ps() noexcept;
 [[nodiscard]] std::span<const std::byte> player_gi_temporal_ps() noexcept;
 [[nodiscard]] std::span<const std::byte> player_gi_upsample_ps() noexcept;
+[[nodiscard]] std::span<const std::byte> player_split_rc_surface_cs() noexcept;
+[[nodiscard]] std::span<const std::byte> player_split_rc_trace_cs() noexcept;
+[[nodiscard]] std::span<const std::byte> player_split_rc_upsample_cs() noexcept;
+[[nodiscard]] std::span<const std::byte> player_split_rc_clear_cs() noexcept;
+[[nodiscard]] std::span<const std::byte> player_split_rc_prepare_cs() noexcept;
+[[nodiscard]] std::span<const std::byte> player_split_rc_weighted_merge_cs() noexcept;
+[[nodiscard]] std::span<const std::byte> split_rc_probe_assign_cs() noexcept;
+[[nodiscard]] std::span<const std::byte> split_rc_intervals_cs() noexcept;
+[[nodiscard]] std::span<const std::byte> split_rc_compact_offsets_cs() noexcept;
+[[nodiscard]] std::span<const std::byte> split_rc_build_queries_cs() noexcept;
+[[nodiscard]] std::span<const std::byte> split_rc_accumulate_cs() noexcept;
+[[nodiscard]] std::span<const std::byte> split_rc_resolve_cs() noexcept;
+[[nodiscard]] std::span<const std::byte> split_rc_spatial_merge_cs() noexcept;
+[[nodiscard]] std::span<const std::byte> split_rc_scatter_cs() noexcept;
+[[nodiscard]] std::span<const std::byte> split_rc_diffuse_gather_cs() noexcept;
 } // namespace dve::player::shader_blobs

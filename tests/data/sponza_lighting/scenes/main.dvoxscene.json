@@ -1,0 +1,69 @@
+{
+  "format": "DVOXSCENE",
+  "version": 1,
+  "name": "Sponza",
+  "objects": [
+    {
+      "index": 0,
+      "id": 7101,
+      "name": "Sponza",
+      "nodePath": "/Sponza",
+      "extensions": {
+        "version": 1,
+        "geometry": "polygon"
+      },
+      "file": "sponza.dmesh",
+      "parent": null,
+      "anchored": true,
+      "structural": false,
+      "generateCollision": false,
+      "worldMatrix": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        1
+      ]
+    },
+    {
+      "index": 1,
+      "id": 7102,
+      "name": "SponzaGIProxy",
+      "nodePath": "/SponzaGIProxy",
+      "file": "sponza-voxels.dvox",
+      "parent": null,
+      "anchored": true,
+      "structural": false,
+      "generateCollision": false,
+      "worldMatrix": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        1
+      ]
+    }
+  ]
+}

@@ -232,6 +232,14 @@ public:
         if (presentLayout_) (void)device_->destroy_bind_group_layout(presentLayout_, &ignored);
         if (presentSampler_) (void)device_->destroy_sampler(presentSampler_, &ignored);
         if (depthSampler_) (void)device_->destroy_sampler(depthSampler_, &ignored);
+        for(const auto& entry:splitBufferCache_)if(entry.second.buffer)(void)device_->destroy_buffer(entry.second.buffer,&ignored);
+        for(const auto& entry:splitStageCache_){if(entry.second.pipeline)(void)device_->destroy_compute_pipeline(entry.second.pipeline,&ignored);if(entry.second.layout)(void)device_->destroy_bind_group_layout(entry.second.layout,&ignored);}
+        if (splitProbePipeline_) (void)device_->destroy_compute_pipeline(splitProbePipeline_, &ignored);
+        if (splitProbeLayout_) (void)device_->destroy_bind_group_layout(splitProbeLayout_, &ignored);
+        if (splitTracePipeline_) (void)device_->destroy_compute_pipeline(splitTracePipeline_, &ignored);
+        if (splitTraceLayout_) (void)device_->destroy_bind_group_layout(splitTraceLayout_, &ignored);
+        if (splitSurfacePipeline_) (void)device_->destroy_compute_pipeline(splitSurfacePipeline_, &ignored);
+        if (splitSurfaceLayout_) (void)device_->destroy_bind_group_layout(splitSurfaceLayout_, &ignored);
         if (giPipeline_) (void)device_->destroy_graphics_pipeline(giPipeline_, &ignored);
         if (giTemporalPipeline_) (void)device_->destroy_graphics_pipeline(giTemporalPipeline_, &ignored);
         if (giUpsamplePipeline_) (void)device_->destroy_graphics_pipeline(giUpsamplePipeline_, &ignored);
@@ -383,15 +391,15 @@ public:
         if (!ensure_grid_buffer(16U, error)) return false;
         rhi::BindGroupLayoutDesc aoLayout;
         aoLayout.debugName = "player SSAO layout";
-        aoLayout.bindings = {{0U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment},
-                             {1U, rhi::BindingType::UniformBuffer, rhi::ShaderStage::Fragment},
-                             {2U, rhi::BindingType::StorageBufferReadOnly, rhi::ShaderStage::Fragment},
-                             {3U, rhi::BindingType::StorageBufferReadOnly, rhi::ShaderStage::Fragment},
-                             {4U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment},
-                             {5U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment},
-                             {6U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment},
-                             {7U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment},
-                             {8U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment}};
+        aoLayout.bindings = {{0U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment | rhi::ShaderStage::Compute},
+                             {1U, rhi::BindingType::UniformBuffer, rhi::ShaderStage::Fragment | rhi::ShaderStage::Compute},
+                             {2U, rhi::BindingType::StorageBufferReadOnly, rhi::ShaderStage::Fragment | rhi::ShaderStage::Compute},
+                             {3U, rhi::BindingType::StorageBufferReadOnly, rhi::ShaderStage::Fragment | rhi::ShaderStage::Compute},
+                             {4U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment | rhi::ShaderStage::Compute},
+                             {5U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment | rhi::ShaderStage::Compute},
+                             {6U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment | rhi::ShaderStage::Compute},
+                             {7U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment | rhi::ShaderStage::Compute},
+                             {8U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment | rhi::ShaderStage::Compute}};
         aoLayout_ = device_->create_bind_group_layout(aoLayout, error);
         if (!aoLayout_) return false;
         {
@@ -520,6 +528,7 @@ public:
         if (!aoView_) return false;
         rhi::TextureDesc gi = ao;
         gi.format = rhi::TextureFormat::RGBA16Float;
+        gi.usage = gi.usage | rhi::TextureUsage::CopyDestination | rhi::TextureUsage::Storage;
         gi.debugName = "player indirect light";
         giTexture_ = device_->create_texture(gi, error);
         if (!giTexture_) return false;
@@ -605,8 +614,15 @@ public:
 
         // Geometry: voxel objects -> cached greedy meshes, polygons -> cached uploads.
         draws_.clear();
+        // An explicitly named voxel object can supply the experimental tracer's
+        // coarse geometry while a separate polygon object supplies visible detail.
+        // Keep it in view.objects so update_scene_grid still sees it.
+        const char* splitFlag=std::getenv("DVE_SPLIT_RC_EXPERIMENT");
+        const char* proxyName=std::getenv("DVE_SPLIT_RC_PROXY_NAME");
         for (const GameRenderObject& object : view.objects) {
             if (!object.enabled) continue;
+            if(splitFlag && std::strcmp(splitFlag,"0")!=0 && proxyName && *proxyName &&
+               object.kind==GameGeometryKind::Voxel && object.name && *object.name==proxyName) continue;
             if (object.kind == GameGeometryKind::Voxel && object.voxels != nullptr) {
                 const float voxelSize = object.voxelSizeMeters > 0.0F ? object.voxelSizeMeters : kDefaultMetersPerVoxel;
                 const Float3 cell{object.voxelScale.x * voxelSize, object.voxelScale.y * voxelSize,
@@ -718,6 +734,258 @@ public:
         stats_.renderMilliseconds = milliseconds_since(start);
         rendered_ = true;
         return true;
+    }
+
+    struct SplitSurfaceSample { std::array<float,4> position, normal; };
+    struct SplitTraceInput { std::array<float,4> origin, direction, unused; };
+    struct SplitTraceOutput { std::array<float,4> hit, sky; };
+
+    // Correctness-first prototype. The per-frame allocations and readbacks are
+    // deliberately gated behind an environment variable; this is not a tuned mode.
+    bool debug_split_pipeline(std::span<const SplitSurfaceSample> surfaces,
+                              const std::vector<std::uint32_t>& keys,
+                              const std::vector<std::uint32_t>& assignments,
+                              const RenderEnvironment& environment,std::string* error) {
+        const auto experimentStart=Clock::now();
+        auto splitStamp=experimentStart;const bool profile=std::getenv("DVE_SPLIT_RC_PROFILE")!=nullptr;
+        const auto mark=[&](const char* label){if(profile){std::fprintf(stderr,"[split RC profile] %s %.2f ms\n",label,milliseconds_since(splitStamp));splitStamp=Clock::now();}};
+        struct V {float x,y,z,w;};struct Query {std::uint32_t slot,dir;};
+        struct Gather {std::array<std::uint32_t,4> probe;V normal;};
+        struct PrepareSurface {V origin;std::array<std::uint32_t,4> slots;std::array<std::uint32_t,4> sampleInfo;};
+        struct Stage {rhi::BindGroupLayoutHandle layout; rhi::BindGroupHandle group; rhi::ComputePipelineHandle pipeline;};
+        std::vector<Stage> stages;
+        const auto clean=[&](){device_->wait_idle();std::string ignored;for(auto s:stages)if(s.group)(void)device_->destroy_bind_group(s.group,&ignored);};
+        const auto fail=[&](){clean();return false;};
+        const auto cachedBuffer=[&](std::size_t bytes,const std::string& name,rhi::MemoryDomain domain){
+            bytes=std::max<std::size_t>(bytes,16U);auto it=splitBufferCache_.find(name);
+            if(it!=splitBufferCache_.end()&&it->second.bytes>=bytes)return it->second.buffer;
+            if(it!=splitBufferCache_.end()){device_->wait_idle();std::string ignored;(void)device_->destroy_buffer(it->second.buffer,&ignored);splitBufferCache_.erase(it);}
+            const auto b=device_->create_buffer({bytes,rhi::BufferUsage::Storage|rhi::BufferUsage::CopySource|rhi::BufferUsage::CopyDestination,domain,name.c_str(),ResourceState::ShaderRead},error);
+            if(b)splitBufferCache_.emplace(name,SplitCachedBuffer{b,bytes});return b;};
+        const auto make=[&](std::size_t bytes,const std::string& name){return cachedBuffer(bytes,name,rhi::MemoryDomain::Upload);};
+        const auto makeLocal=[&](std::size_t bytes,const std::string& name){return cachedBuffer(bytes,name,rhi::MemoryDomain::DeviceLocal);};
+        const auto put=[&](rhi::BufferHandle b,auto& data){return device_->write_buffer(b,0U,std::as_bytes(std::span(data)),error);};
+        const auto keyCount=static_cast<std::uint32_t>(keys.size());std::vector<std::uint32_t> offsets(keys.size(),0xffffffffU);std::uint32_t bins=0;
+        std::vector<std::uint32_t> probeCounts(keys.size());
+        for(const auto slot:assignments){if(slot>=probeCounts.size()){set_error(error,"split RC invalid probe assignment");return false;}++probeCounts[slot];}
+        for(std::size_t i=0;i<keys.size();++i)if(keys[i]){const auto level=((keys[i]-1U)>>24U)&3U;const auto n=32U<<(2U*level);if(bins>1048576U-n){set_error(error,"split RC experiment exceeds one million directional bins");return false;}offsets[i]=bins;bins+=n;}
+        if(!bins)return true;
+        std::array<std::vector<Query>,4> levelQueries;
+        std::array<std::size_t,4> queryCounts{};
+        for(const auto key:keys)if(key){const auto level=((key-1U)>>24U)&3U;queryCounts[level]+=32U<<(2U*level);}
+        for(unsigned level=0;level<4;++level)levelQueries[level].reserve(queryCounts[level]);
+        for(std::uint32_t slot=0;slot<keyCount;++slot)if(keys[slot]){
+            const auto level=((keys[slot]-1U)>>24U)&3U;
+            const auto count=32U<<(2U*level);
+            for(std::uint32_t dir=0;dir<count;++dir)levelQueries[level].push_back({slot,dir});
+        }
+        std::array<V,32> directions{};constexpr double pi=3.14159265358979323846;
+        for(unsigned j=0;j<32;++j){const double u=(double(j%8)+.5)/8,v=(double(j/8)+.5)/4,y=1-2*v,r=std::sqrt(1-y*y);directions[j]={float(r*std::cos(2*pi*u)),float(y),float(r*std::sin(2*pi*u)),1};}
+        mark("build probe queries");
+        std::vector<Gather> gather(surfaces.size());std::vector<PrepareSurface> prepareSurfaces;
+        prepareSurfaces.reserve(assignments.size()/4U);
+        const float lift=std::max(std::max(1e-3F,environment.shadowBiasMeters),1.1F*grid_.cell_meters());
+        const float distance=std::max(environment.globalIlluminationMaxDistanceMeters,.1F),cutoff=std::max(distance/64.0F,1e-3F);
+        std::size_t rank=0;for(std::size_t i=0;i<surfaces.size();++i){const auto& s=surfaces[i];gather[i]={{0xffffffffU,0,0,0},{0,0,0,0}};
+            if(s.position[3]<.5F||s.normal[3]<.5F)continue;
+            if(rank*4U+3U>=assignments.size()){set_error(error,"split RC candidate mapping mismatch");return false;}
+            gather[i]={{assignments[rank*4U],0,0,0},{s.normal[0],s.normal[1],s.normal[2],0}};
+            prepareSurfaces.push_back({{s.position[0]+s.normal[0]*lift,s.position[1]+s.normal[1]*lift,s.position[2]+s.normal[2]*lift,cutoff},
+                {assignments[rank*4U],assignments[rank*4U+1U],assignments[rank*4U+2U],assignments[rank*4U+3U]},
+                {static_cast<std::uint32_t>(i),0,0,0}});
+            ++rank;
+        }
+        const std::size_t rayCount=prepareSurfaces.size()*directions.size(),intervalCount=rayCount*4U;
+        if(!rayCount)return true;
+        mark("build surface inputs");
+        const std::size_t sumWords=static_cast<std::size_t>(bins)*6U;std::array<std::uint32_t,3> diag{};std::array<std::uint32_t,4> config{keyCount,bins,0,0};
+        auto kb=make(keys.size()*4U,"split RC keys"),ob=make(keys.size()*4U,"split RC offsets"),pb=make(keys.size()*4U,"split RC probe sample counts");
+        std::array<rhi::BufferHandle,4> queryBuffers{};
+        for(unsigned level=0;level<4;++level)if(!levelQueries[level].empty())queryBuffers[level]=make(levelQueries[level].size()*sizeof(Query),"split RC level queries "+std::to_string(level));
+        auto rb=makeLocal(rayCount*sizeof(SplitTraceInput),"split RC rays"),tb=makeLocal(rayCount*sizeof(SplitTraceOutput),"split RC traced"),ib=makeLocal(intervalCount*sizeof(V),"split RC intervals");
+        auto sb=makeLocal(intervalCount*4U,"split RC slots"),dib=makeLocal(intervalCount*4U,"split RC directions"),cfg=make(16,"split RC config"),sum=makeLocal(sumWords*4U,"split RC sums"),ad=make(12,"split RC diagnostics");
+        auto resolved=makeLocal(static_cast<std::size_t>(bins)*sizeof(V),"split RC resolved"),valid=makeLocal(static_cast<std::size_t>(bins)*4U,"split RC valid"),a=makeLocal(static_cast<std::size_t>(bins)*sizeof(V),"split RC merged A"),b=makeLocal(static_cast<std::size_t>(bins)*sizeof(V),"split RC merged B"),values=makeLocal(static_cast<std::size_t>(bins)*sizeof(V),"split RC merged values");
+        auto db=make(sizeof(directions),"split RC base directions"),gq=make(gather.size()*sizeof(Gather),"split RC gather queries"),go=makeLocal(gather.size()*sizeof(V),"split RC gather output"),upSettings=make(sizeof(V),"split RC upsample settings"),ps=make(prepareSurfaces.size()*sizeof(PrepareSurface),"split RC compact surface inputs"),pc=make(sizeof(V),"split RC prepare config");
+        if(!kb||!ob||!pb||!rb||!tb||!ib||!sb||!dib||!cfg||!sum||!ad||!resolved||!valid||!a||!b||!values||!db||!gq||!go||!upSettings||!ps||!pc)return fail();
+        mark("allocate buffers");
+        if(!put(kb,keys)||!put(ob,offsets)||!put(pb,probeCounts)||!put(cfg,config)||!put(ad,diag)||!put(db,directions)||!put(gq,gather))return fail();
+        for(unsigned level=0;level<4;++level)if(!levelQueries[level].empty()&&(!queryBuffers[level]||!put(queryBuffers[level],levelQueries[level])))return fail();
+        std::array<V,1> upParams{{{std::max(.05F,4.0F*grid_.cell_meters()),0,0,0}}},prepareConfig{{{distance,0,0,0}}};if(!put(upSettings,upParams)||!put(ps,prepareSurfaces)||!put(pc,prepareConfig))return fail();
+        mark("upload buffers");
+        const auto stage=[&](std::span<const std::byte> shader,std::initializer_list<rhi::BindingType> types,std::vector<rhi::BindGroupEntry> entries)->Stage{
+            if(shader.empty()){set_error(error,"missing split RC shader");return {};}
+            auto it=splitStageCache_.find(shader.data());
+            if(it==splitStageCache_.end()){
+                rhi::BindGroupLayoutDesc ld;unsigned binding=0;for(auto type:types)ld.bindings.push_back({binding++,type,rhi::ShaderStage::Compute});auto layout=device_->create_bind_group_layout(ld,error);if(!layout)return {};
+                rhi::ComputePipelineDesc pd;pd.bytecode=copy_bytes(shader);pd.bindGroupLayouts={layout};auto pipeline=device_->create_compute_pipeline(pd,error);
+                if(!pipeline){std::string ignored;(void)device_->destroy_bind_group_layout(layout,&ignored);return {};}
+                it=splitStageCache_.emplace(shader.data(),SplitCachedStage{layout,pipeline}).first;
+            }
+            rhi::BindGroupDesc gd;gd.layout=it->second.layout;gd.entries=std::move(entries);auto group=device_->create_bind_group(gd,error);if(!group)return {};
+            stages.push_back({it->second.layout,group,it->second.pipeline});return stages.back();};
+        const auto R=rhi::BindingType::StorageBufferReadOnly,W=rhi::BindingType::StorageBufferReadWrite;
+        auto prepare=stage(shader_blobs::player_split_rc_prepare_cs(),{R,R,R,W,W,W},{{0,ps,{},0,prepareSurfaces.size()*sizeof(PrepareSurface),{}},{1,db,{},0,sizeof(directions),{}},{2,pc,{},0,sizeof(V),{}},{3,rb,{},0,rayCount*sizeof(SplitTraceInput),{}},{4,sb,{},0,intervalCount*4U,{}},{5,dib,{},0,intervalCount*4U,{}}});
+        auto clear=stage(shader_blobs::player_split_rc_clear_cs(),{W,W,W},{{0,sum,{},0,sumWords*4U,{}},{1,a,{},0,static_cast<std::size_t>(bins)*sizeof(V),{}},{2,b,{},0,static_cast<std::size_t>(bins)*sizeof(V),{}}});
+        auto split=stage(shader_blobs::split_rc_intervals_cs(),{R,W},{{0,tb,{},0,rayCount*sizeof(SplitTraceOutput),{}},{1,ib,{},0,intervalCount*sizeof(V),{}}});
+        auto accum=stage(shader_blobs::split_rc_accumulate_cs(),{R,R,R,R,W,W,R,R},{{0,ib,{},0,intervalCount*sizeof(V),{}},{1,sb,{},0,intervalCount*4U,{}},{2,dib,{},0,intervalCount*4U,{}},{3,cfg,{},0,16,{}},{4,sum,{},0,sumWords*4U,{}},{5,ad,{},0,12,{}},{6,ob,{},0,keys.size()*4U,{}},{7,kb,{},0,keys.size()*4U,{}}});
+        auto resolve=stage(shader_blobs::split_rc_resolve_cs(),{R,W,W},{{0,sum,{},0,sumWords*4U,{}},{1,resolved,{},0,static_cast<std::size_t>(bins)*sizeof(V),{}},{2,valid,{},0,static_cast<std::size_t>(bins)*4U,{}}});
+        const auto merge=[&](rhi::BufferHandle parent,unsigned level){const auto count=levelQueries[level].size();return stage(shader_blobs::player_split_rc_weighted_merge_cs(),{R,R,R,R,W,R,R},{{0,kb,{},0,keys.size()*4U,{}},{1,resolved,{},0,static_cast<std::size_t>(bins)*sizeof(V),{}},{2,parent,{},0,static_cast<std::size_t>(bins)*sizeof(V),{}},{3,queryBuffers[level],{},0,count*sizeof(Query),{}},{4,values,{},0,count*sizeof(V),{}},{5,ob,{},0,keys.size()*4U,{}},{6,pb,{},0,keys.size()*4U,{}}});};
+        const auto scatter=[&](rhi::BufferHandle target,unsigned level){const auto count=levelQueries[level].size();return stage(shader_blobs::split_rc_scatter_cs(),{R,R,R,R,W},{{0,kb,{},0,keys.size()*4U,{}},{1,ob,{},0,keys.size()*4U,{}},{2,queryBuffers[level],{},0,count*sizeof(Query),{}},{3,values,{},0,count*sizeof(V),{}},{4,target,{},0,static_cast<std::size_t>(bins)*sizeof(V),{}}});};
+        std::array<Stage,4> merges{},scatters{};
+        for(unsigned iteration=0;iteration<4;++iteration){const unsigned level=3U-iteration;if(levelQueries[level].empty())continue;
+            merges[level]=merge(iteration%2?b:a,level);scatters[level]=scatter(iteration%2?a:b,level);
+            if(!merges[level].pipeline||!scatters[level].pipeline)return fail();}
+        auto g=stage(shader_blobs::split_rc_diffuse_gather_cs(),{R,R,R,R,R,W},{{0,kb,{},0,keys.size()*4U,{}},{1,ob,{},0,keys.size()*4U,{}},{2,a,{},0,static_cast<std::size_t>(bins)*sizeof(V),{}},{3,db,{},0,sizeof(directions),{}},{4,gq,{},0,gather.size()*sizeof(Gather),{}},{5,go,{},0,gather.size()*sizeof(V),{}}});
+        if(!prepare.pipeline||!clear.pipeline||!split.pipeline||!accum.pipeline||!resolve.pipeline||!g.pipeline)return fail();
+        const auto run=[&](Stage st,std::uint32_t groups){const auto cmd=device_->begin_commands(rhi::QueueKind::Compute,"split RC experiment",error);if(!cmd||!device_->bind_compute_bind_group(cmd,0U,st.group,error)||!device_->dispatch(cmd,st.pipeline,groups,1U,1U,error))return false;const auto fence=device_->submit(cmd,error);return fence&&device_->fence_complete(fence);};
+        mark("create stages");
+        if(!run(prepare,static_cast<std::uint32_t>((rayCount+63U)/64U)))return fail();
+        mark("prepare GPU rays");
+        if(!run(clear,(bins+63U)/64U))return fail();
+        mark("clear GPU buffers");
+        rhi::BindGroupDesc traceGd;traceGd.layout=splitTraceLayout_;traceGd.entries={{0,rb,{},0,rayCount*sizeof(SplitTraceInput),{}},{1,tb,{},0,rayCount*sizeof(SplitTraceOutput),{}}};auto traceGroup=device_->create_bind_group(traceGd,error);if(!traceGroup)return fail();
+        bool traceOk=false;{const auto cmd=device_->begin_commands(rhi::QueueKind::Graphics,"split RC player rays",error);if(cmd&&device_->transition_texture(cmd,depth_,ResourceState::DepthWrite,ResourceState::ShaderRead,error)&&device_->bind_compute_bind_group(cmd,0U,aoGroup_,error)&&device_->bind_compute_bind_group(cmd,1U,traceGroup,error)&&device_->dispatch(cmd,splitTracePipeline_,static_cast<std::uint32_t>((rayCount+63U)/64U),1U,1U,error)&&device_->transition_texture(cmd,depth_,ResourceState::ShaderRead,ResourceState::DepthWrite,error)){const auto fence=device_->submit(cmd,error);traceOk=fence&&device_->fence_complete(fence);}}
+        {std::string ignored;(void)device_->destroy_bind_group(traceGroup,&ignored);}if(!traceOk)return fail();
+        mark("trace");
+        if(!run(split,static_cast<std::uint32_t>((rayCount+63U)/64U)))return fail();mark("interval split");
+        if(!run(accum,static_cast<std::uint32_t>((intervalCount+63U)/64U)))return fail();mark("accumulate");
+        if(!run(resolve,(bins+63U)/64U))return fail();mark("resolve");
+        if(!device_->read_buffer(ad,0U,std::as_writable_bytes(std::span(diag)),error))return fail();if(diag[0]||diag[1]||diag[2]){set_error(error,"split RC experiment rejected or overflowed interval samples");return fail();}
+        for(unsigned iteration=0;iteration<4;++iteration){const unsigned level=3U-iteration;const auto count=levelQueries[level].size();if(count&&(!run(merges[level],static_cast<std::uint32_t>((count+63U)/64U))||!run(scatters[level],static_cast<std::uint32_t>((count+63U)/64U))))return fail();}
+        mark("merge");
+        if(!run(g,static_cast<std::uint32_t>((gather.size()+63U)/64U)))return fail();
+        auto upsample=stage(shader_blobs::player_split_rc_upsample_cs(),{R,R,R,rhi::BindingType::StorageTexture},
+            {{0,splitSurfaceBuffer_,{},0,surfaces.size()*sizeof(SplitSurfaceSample),{}},{1,go,{},0,gather.size()*sizeof(V),{}},
+             {2,upSettings,{},0,sizeof(V),{}},{3,{},giView_,0,0,{}}});
+        if(!upsample.pipeline)return fail();
+        const auto cmd=device_->begin_commands(rhi::QueueKind::Graphics,"split RC upsample",error);
+        if(!cmd||!device_->transition_texture(cmd,giTexture_,ResourceState::ShaderRead,ResourceState::ShaderWrite,error)||
+           !device_->bind_compute_bind_group(cmd,0U,upsample.group,error)||
+           !device_->dispatch(cmd,upsample.pipeline,(width_+7U)/8U,(height_+7U)/8U,1U,error)||
+           !device_->transition_texture(cmd,giTexture_,ResourceState::ShaderWrite,ResourceState::ShaderRead,error))return fail();
+        const auto upFence=device_->submit(cmd,error);if(!upFence||!device_->fence_complete(upFence))return fail();
+        mark("GPU gather and upsample");
+        if(profile)std::fprintf(stderr,"[split RC] experimental GI: %zu rays, %u bins, %.2f ms\n",rayCount,bins,milliseconds_since(experimentStart));
+        clean();return true;
+    }
+
+    // Diagnostic only: build world-space probe keys from the actual player depth pass.
+    bool debug_split_probes(std::span<const SplitSurfaceSample> surfaces, std::vector<std::uint32_t>& outKeys,
+                            std::vector<std::uint32_t>& outAssignments, std::string* error) {
+        if(!splitProbeLayout_){
+            rhi::BindGroupLayoutDesc ld;ld.bindings={{0U,rhi::BindingType::StorageBufferReadOnly,rhi::ShaderStage::Compute},
+                {1U,rhi::BindingType::StorageBufferReadWrite,rhi::ShaderStage::Compute},
+                {2U,rhi::BindingType::StorageBufferReadWrite,rhi::ShaderStage::Compute},
+                {3U,rhi::BindingType::StorageBufferReadWrite,rhi::ShaderStage::Compute}};
+            splitProbeLayout_=device_->create_bind_group_layout(ld,error);if(!splitProbeLayout_)return false;
+            rhi::ComputePipelineDesc pd;pd.debugName="split RC world probe diagnostic";
+            pd.bytecode=copy_bytes(shader_blobs::split_rc_probe_assign_cs());pd.bindGroupLayouts={splitProbeLayout_};
+            splitProbePipeline_=device_->create_compute_pipeline(pd,error);if(!splitProbePipeline_)return false;
+        }
+        struct ProbeSample {std::array<float,4> position;std::array<std::int32_t,4> meta;};
+        static_assert(sizeof(ProbeSample)==32);
+        std::vector<ProbeSample> candidates;const Float3 origin=grid_.origin();
+        const float spacing=std::max(.25F,4.0F*grid_.cell_meters());
+        for(const auto& s:surfaces){
+            if(s.position[3]<.5F||s.normal[3]<.5F)continue;
+            const float ax=std::abs(s.normal[0]),ay=std::abs(s.normal[1]),az=std::abs(s.normal[2]);
+            const unsigned axis=ax>=ay&&ax>=az?0U:(ay>=az?1U:2U);
+            const auto sheet=static_cast<std::int32_t>(axis*2U+(s.normal[axis]<0?1U:0U));
+            for(std::int32_t level=0;level<4;++level)candidates.push_back({
+                {s.position[0]-origin.x,s.position[1]-origin.y,s.position[2]-origin.z,spacing},{level,sheet,0,0}});
+        }
+        if(candidates.empty())return true;
+        if(candidates.size()>65536U){set_error(error,"split RC diagnostic exceeds 65536 probe candidates");return false;}
+        std::size_t capacity=1024U;while(capacity<candidates.size()*2U)capacity*=2U;
+        std::vector<std::uint32_t> empty(capacity),keys(capacity),assignments(candidates.size());std::array<std::uint32_t,2> counters{};
+        const auto inputBytes=candidates.size()*sizeof(ProbeSample),slotBytes=capacity*sizeof(std::uint32_t),resultBytes=candidates.size()*sizeof(std::uint32_t);
+        const auto make=[&](std::size_t bytes,const char* name){return device_->create_buffer({bytes,rhi::BufferUsage::Storage|rhi::BufferUsage::CopySource,rhi::MemoryDomain::Upload,name,ResourceState::ShaderRead},error);};
+        const auto input=make(inputBytes,"split RC candidates"),table=make(slotBytes,"split RC keys"),result=make(resultBytes,"split RC slots"),diag=make(sizeof(counters),"split RC probe diagnostics");
+        rhi::BindGroupHandle group{};bool ok=input&&table&&result&&diag;
+        if(ok)ok=device_->write_buffer(input,0U,std::as_bytes(std::span(candidates)),error)&&device_->write_buffer(table,0U,std::as_bytes(std::span(empty)),error)&&device_->write_buffer(diag,0U,std::as_bytes(std::span(counters)),error);
+        if(ok){rhi::BindGroupDesc gd;gd.layout=splitProbeLayout_;gd.entries={{0U,input,{},0U,inputBytes,{}},{1U,table,{},0U,slotBytes,{}},{2U,result,{},0U,resultBytes,{}},{3U,diag,{},0U,sizeof(counters),{}}};group=device_->create_bind_group(gd,error);ok=static_cast<bool>(group);}
+        if(ok){const auto cmd=device_->begin_commands(rhi::QueueKind::Compute,"split RC player probes",error);ok=static_cast<bool>(cmd)&&device_->bind_compute_bind_group(cmd,0U,group,error)&&device_->dispatch(cmd,splitProbePipeline_,static_cast<std::uint32_t>((candidates.size()+63U)/64U),1U,1U,error);if(ok){const auto fence=device_->submit(cmd,error);ok=static_cast<bool>(fence)&&device_->fence_complete(fence);}}
+        if(ok)ok=device_->read_buffer(table,0U,std::as_writable_bytes(std::span(keys)),error)&&device_->read_buffer(result,0U,std::as_writable_bytes(std::span(assignments)),error)&&device_->read_buffer(diag,0U,std::as_writable_bytes(std::span(counters)),error);
+        if(ok){const auto occupied=std::count_if(keys.begin(),keys.end(),[](std::uint32_t key){return key!=0U;});
+            std::array<std::size_t,4> levels{};std::size_t directionBins=0;
+            for(const auto key:keys)if(key){const auto level=((key-1U)>>24U)&3U;++levels[level];directionBins+=32U<<(2U*level);}
+            if(std::getenv("DVE_SPLIT_RC_PROFILE")||std::getenv("DVE_SPLIT_RC_SURFACE_DEBUG"))std::fprintf(stderr,"[split RC] player probes: %zu candidates, %zu unique, %u invalid, %u overflow; levels %zu/%zu/%zu/%zu, bins %zu\n",candidates.size(),static_cast<std::size_t>(occupied),counters[0],counters[1],levels[0],levels[1],levels[2],levels[3],directionBins);
+            if(counters[0]||counters[1]){set_error(error,"split RC player probe diagnostic rejected samples");ok=false;}
+            else {outKeys=std::move(keys);outAssignments=std::move(assignments);}}
+        std::string ignored;if(group)(void)device_->destroy_bind_group(group,&ignored);for(auto b:{input,table,result,diag})if(b)(void)device_->destroy_buffer(b,&ignored);
+        return ok;
+    }
+
+    // Diagnostic only: exercise the player sky/voxel trace against camera samples.
+    // It does not modify the lighting output or constitute a Split RC mode.
+    bool debug_split_trace(std::span<const SplitSurfaceSample> surfaces, const RenderEnvironment& environment,
+                           bool runDiagnostic, std::string* error) {
+        if (!splitTraceLayout_) {
+            rhi::BindGroupLayoutDesc desc;desc.bindings={{0U,rhi::BindingType::StorageBufferReadOnly,rhi::ShaderStage::Compute},
+                {1U,rhi::BindingType::StorageBufferReadWrite,rhi::ShaderStage::Compute}};
+            splitTraceLayout_=device_->create_bind_group_layout(desc,error);if(!splitTraceLayout_)return false;
+            rhi::ComputePipelineDesc pipeline;pipeline.debugName="split RC player trace diagnostic";
+            pipeline.bytecode=copy_bytes(shader_blobs::player_split_rc_trace_cs());
+            pipeline.bindGroupLayouts={aoLayout_,splitTraceLayout_};
+            splitTracePipeline_=device_->create_compute_pipeline(pipeline,error);if(!splitTracePipeline_)return false;
+        }
+        if(!runDiagnostic)return true;
+        std::vector<SplitTraceInput> rays;const float lift=std::max(std::max(1.0e-3F,environment.shadowBiasMeters),1.1F*grid_.cell_meters());
+        for(const auto& s:surfaces){
+            if(s.position[3]<.5F || s.normal[3]<.5F)continue;
+            const Float3 direction=unit({s.normal[0],s.normal[1],s.normal[2]},{0,1,0});
+            rays.push_back({{s.position[0]+direction.x*lift,s.position[1]+direction.y*lift,s.position[2]+direction.z*lift,0.5F},
+                            {direction.x,direction.y,direction.z,std::max(environment.globalIlluminationMaxDistanceMeters,0.1F)}, {}});
+            if(rays.size()==256U)break;
+        }
+        if(rays.empty())return true;
+        const auto inBytes=rays.size()*sizeof(SplitTraceInput),outBytes=rays.size()*sizeof(SplitTraceOutput);
+        const auto input=device_->create_buffer({inBytes,rhi::BufferUsage::Storage,rhi::MemoryDomain::Upload,"split RC trace rays",ResourceState::ShaderRead},error);
+        const auto output=device_->create_buffer({outBytes,rhi::BufferUsage::Storage|rhi::BufferUsage::CopySource,rhi::MemoryDomain::Upload,"split RC traced rays",ResourceState::ShaderRead},error);
+        rhi::BindGroupHandle group{};bool ok=static_cast<bool>(input)&&static_cast<bool>(output);
+        if(ok)ok=device_->write_buffer(input,0U,std::as_bytes(std::span(rays)),error);
+        if(ok){rhi::BindGroupDesc gd;gd.layout=splitTraceLayout_;gd.entries={{0U,input,{},0U,inBytes,{}},{1U,output,{},0U,outBytes,{}}};group=device_->create_bind_group(gd,error);ok=static_cast<bool>(group);}
+        if(ok){const auto cmd=device_->begin_commands(rhi::QueueKind::Graphics,"split RC player trace diagnostic",error);
+            ok=static_cast<bool>(cmd)&&device_->transition_texture(cmd,depth_,ResourceState::DepthWrite,ResourceState::ShaderRead,error)&&
+               device_->bind_compute_bind_group(cmd,0U,aoGroup_,error)&&device_->bind_compute_bind_group(cmd,1U,group,error)&&
+               device_->dispatch(cmd,splitTracePipeline_,static_cast<std::uint32_t>((rays.size()+63U)/64U),1U,1U,error)&&
+               device_->transition_texture(cmd,depth_,ResourceState::ShaderRead,ResourceState::DepthWrite,error);
+            if(ok){const auto fence=device_->submit(cmd,error);ok=static_cast<bool>(fence)&&device_->fence_complete(fence);}}
+        std::vector<SplitTraceOutput> results(rays.size());if(ok)ok=device_->read_buffer(output,0U,std::as_writable_bytes(std::span(results)),error);
+        if(ok){std::size_t hits=0,invalid=0;for(const auto& result:results){if(result.hit[3]>=0)++hits;
+                for(unsigned channel=0;channel<3;++channel)if(!std::isfinite(result.hit[channel])||!std::isfinite(result.sky[channel]))++invalid;}
+            std::fprintf(stderr,"[split RC] player trace: %zu rays, %zu voxel hits, %zu invalid channels\n",rays.size(),hits,invalid);
+            if(invalid){set_error(error,"split RC diagnostic produced non-finite radiance");ok=false;}}
+        std::string ignored;if(group)(void)device_->destroy_bind_group(group,&ignored);if(input)(void)device_->destroy_buffer(input,&ignored);if(output)(void)device_->destroy_buffer(output,&ignored);
+        return ok;
+    }
+
+    bool ensure_split_surface_debug(std::string* error) {
+        if (!splitSurfaceLayout_) {
+            rhi::BindGroupLayoutDesc desc;
+            desc.bindings = {{0U,rhi::BindingType::SampledTexture,rhi::ShaderStage::Compute},
+                             {1U,rhi::BindingType::UniformBuffer,rhi::ShaderStage::Compute},
+                             {9U,rhi::BindingType::StorageBufferReadWrite,rhi::ShaderStage::Compute}};
+            splitSurfaceLayout_ = device_->create_bind_group_layout(desc,error);
+            if (!splitSurfaceLayout_) return false;
+            rhi::ComputePipelineDesc pipeline;
+            pipeline.debugName = "split RC camera surface extraction";
+            pipeline.bytecode = copy_bytes(shader_blobs::player_split_rc_surface_cs());
+            pipeline.bindGroupLayouts = {splitSurfaceLayout_};
+            splitSurfacePipeline_ = device_->create_compute_pipeline(pipeline,error);
+            if (!splitSurfacePipeline_) return false;
+        }
+        if (splitSurfaceGroup_) return true;
+        splitSurfaceCount_ = ((width_+7U)/8U)*((height_+7U)/8U);
+        const auto bytes = static_cast<std::size_t>(splitSurfaceCount_)*32U;
+        splitSurfaceBuffer_ = device_->create_buffer({bytes,rhi::BufferUsage::Storage|rhi::BufferUsage::CopySource,
+            rhi::MemoryDomain::Upload,"split RC camera surfaces",ResourceState::ShaderRead},error);
+        if (!splitSurfaceBuffer_) return false;
+        rhi::BindGroupDesc group;group.layout=splitSurfaceLayout_;
+        group.entries={{0U,{},depthView_,0U,0U,depthSampler_},{1U,aoConstants_,{},0U,512U,{}},
+                       {9U,splitSurfaceBuffer_,{},0U,bytes,{}}};
+        splitSurfaceGroup_=device_->create_bind_group(group,error);
+        return static_cast<bool>(splitSurfaceGroup_);
     }
 
     bool ensure_grid_buffer(std::size_t bytes, std::string* error) {
@@ -843,6 +1111,8 @@ public:
                               std::span<const std::byte> frameConstants,
                               const render::CascadedShadowPlan& plan, bool aoOn, bool aoTraced, bool giTraced, bool giCascades,
                               std::string* error) {
+        const char* experimentFlag=std::getenv("DVE_SPLIT_RC_EXPERIMENT");
+        const bool splitExperiment=experimentFlag && std::strcmp(experimentFlag,"0")!=0;
         render::LiveEnvironmentFrameDesc prepass;
         prepass.depthTarget = depth_;
         prepass.width = width_;
@@ -910,6 +1180,8 @@ public:
             constants.giTemporal = {historyBlend, historyValid_ ? 0.0F : 1.0F, static_cast<float>(halfWidth()),
                                     static_cast<float>(halfHeight())};
         }
+        // The experimental split-RC surface pass samples the existing depth at an 8-pixel stride.
+        constants.rcLevel[2] = 8.0F;
         constants.target = {static_cast<float>(width_), static_cast<float>(height_), 1.0F / static_cast<float>(width_),
                             1.0F / static_cast<float>(height_)};
         {
@@ -961,7 +1233,7 @@ public:
         };
         if (aoOn && !fullscreen_pass(aoTexture_, aoTraced ? tracedAoPipeline_ : aoPipeline_, "player ambient occlusion", 1.0F, aoGroup_, width_, height_))
             return false;
-        if (giCascades) {
+        if (giCascades && !splitExperiment) {
             // Top level first: each level reads the one above it.
             const float maxDistance = std::max(environment.globalIlluminationMaxDistanceMeters, 0.1F);
             const float firstLength = std::max(maxDistance / 85.0F, 2.0F * grid_.cell_meters());
@@ -995,7 +1267,7 @@ public:
             if (!device_->write_buffer(rcConstants_[kRcLevels], 0U, std::as_bytes(std::span(&gather, 1U)), error)) return false;
             if (!fullscreen_pass(giTexture_, rcGatherPipeline_, "player radiance cascade gather", 0.0F,
                                  rcGroups_[kRcLevels], width_, height_)) return false;
-        } else if (giTraced) {
+        } else if (giTraced && !splitExperiment) {
             const std::size_t current = 1U - giHistoryIndex_;
             const std::size_t previous = giHistoryIndex_;
             if (giTemporalPipeline_ && giUpsamplePipeline_ && giRaw_) {
@@ -1012,9 +1284,33 @@ public:
             }
         }
         if (!giTraced || giCascades) historyValid_ = false;
+        const char* debugSurface = std::getenv("DVE_SPLIT_RC_SURFACE_DEBUG");
+        const bool captureSurfaces = splitExperiment || (debugSurface && std::strcmp(debugSurface, "0") != 0);
+        if (captureSurfaces) {
+            if (!ensure_split_surface_debug(error)) return false;
+            if (!device_->bind_compute_bind_group(commands, 0U, splitSurfaceGroup_, error) ||
+                !device_->dispatch(commands, splitSurfacePipeline_, (splitSurfaceCount_ + 63U) / 64U, 1U, 1U, error)) return false;
+        }
         if (!device_->transition_texture(commands, depth_, ResourceState::ShaderRead, ResourceState::DepthWrite, error))
             return false;
-        return static_cast<bool>(device_->submit(commands, error));
+        const auto fence = device_->submit(commands, error);
+        if (!fence) return false;
+        if (captureSurfaces) {
+            std::vector<SplitSurfaceSample> samples(splitSurfaceCount_);
+            if (!device_->fence_complete(fence) || !device_->read_buffer(splitSurfaceBuffer_, 0U,
+                    std::as_writable_bytes(std::span(samples)), error)) return false;
+            const auto visible=std::count_if(samples.begin(), samples.end(), [](const SplitSurfaceSample& surface) {
+                return surface.position[3] > 0.5F && std::isfinite(surface.position[0]) &&
+                       std::isfinite(surface.position[1]) && std::isfinite(surface.position[2]);
+            });
+            if(debugSurface||std::getenv("DVE_SPLIT_RC_PROFILE"))std::fprintf(stderr, "[split RC] depth surface samples: %zu/%u visible\n", static_cast<std::size_t>(visible), splitSurfaceCount_);
+            if (giTraced && !grid_.empty()) {
+                std::vector<std::uint32_t> probeKeys, probeAssignments;
+                if (!debug_split_probes(samples, probeKeys, probeAssignments, error) || !debug_split_trace(samples, environment, !splitExperiment, error)) return false;
+                if(splitExperiment && !debug_split_pipeline(samples,probeKeys,probeAssignments,environment,error))return false;
+            }
+        }
+        return true;
     }
 
     bool present(std::string* error) override {
@@ -1448,6 +1744,9 @@ private:
         if (presentGroup_) (void)device_->destroy_bind_group(presentGroup_, &ignored);
         if (hdrView_) (void)device_->destroy_texture_view(hdrView_, &ignored);
         if (hdr_) (void)device_->destroy_texture(hdr_, &ignored);
+        if (splitSurfaceGroup_) (void)device_->destroy_bind_group(splitSurfaceGroup_, &ignored);
+        if (splitSurfaceBuffer_) (void)device_->destroy_buffer(splitSurfaceBuffer_, &ignored);
+        splitSurfaceGroup_ = {}; splitSurfaceBuffer_ = {}; splitSurfaceCount_ = 0;
         if (depthView_) (void)device_->destroy_texture_view(depthView_, &ignored);
         if (depth_) (void)device_->destroy_texture(depth_, &ignored);
         if (capture_) (void)device_->destroy_texture(capture_, &ignored);
@@ -1473,6 +1772,19 @@ private:
     rhi::BindGroupLayoutHandle presentLayout_{};
     rhi::BindGroupHandle presentGroup_{};
     rhi::BufferHandle aoConstants_{};
+    struct SplitCachedStage {rhi::BindGroupLayoutHandle layout; rhi::ComputePipelineHandle pipeline;};
+    std::unordered_map<const std::byte*,SplitCachedStage> splitStageCache_;
+    struct SplitCachedBuffer {rhi::BufferHandle buffer; std::size_t bytes;};
+    std::unordered_map<std::string,SplitCachedBuffer> splitBufferCache_;
+    rhi::BindGroupLayoutHandle splitProbeLayout_{};
+    rhi::ComputePipelineHandle splitProbePipeline_{};
+    rhi::BindGroupLayoutHandle splitTraceLayout_{};
+    rhi::ComputePipelineHandle splitTracePipeline_{};
+    rhi::BindGroupLayoutHandle splitSurfaceLayout_{};
+    rhi::ComputePipelineHandle splitSurfacePipeline_{};
+    rhi::BindGroupHandle splitSurfaceGroup_{};
+    rhi::BufferHandle splitSurfaceBuffer_{};
+    std::uint32_t splitSurfaceCount_{};
     rhi::BindGroupLayoutHandle aoLayout_{};
     rhi::GraphicsPipelineHandle aoPipeline_{};
     rhi::GraphicsPipelineHandle tracedAoPipeline_{};

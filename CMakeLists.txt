@@ -1989,9 +1989,11 @@ if(DVE_BUILD_PLAYER AND DVE_BUILD_RHI AND DVE_BUILD_PLATFORM)
             set(_dve_player_spv)
             foreach(_shader IN ITEMS live_ibl_material_vs live_ibl_material_ps live_environment_skybox_vs
                                      live_environment_skybox_ps live_csm_caster_vs live_csm_caster_ps
-                                     player_present_vs player_present_ps player_ssao_ps player_traced_ao_ps player_traced_gi_ps player_rc_cascade_ps player_rc_gather_ps player_gi_temporal_ps player_gi_upsample_ps)
+                                     player_present_vs player_present_ps player_ssao_ps player_traced_ao_ps player_traced_gi_ps player_rc_cascade_ps player_rc_gather_ps player_gi_temporal_ps player_gi_upsample_ps player_split_rc_surface_cs player_split_rc_trace_cs player_split_rc_upsample_cs player_split_rc_clear_cs player_split_rc_prepare_cs player_split_rc_weighted_merge_cs split_rc_probe_assign_cs split_rc_intervals_cs split_rc_compact_offsets_cs split_rc_build_queries_cs split_rc_accumulate_cs split_rc_resolve_cs split_rc_spatial_merge_cs split_rc_scatter_cs split_rc_diffuse_gather_cs)
                 if(_shader MATCHES "_vs$")
                     set(_profile vs_6_0)
+                elseif(_shader MATCHES "_cs$")
+                    set(_profile cs_6_0)
                 else()
                     set(_profile ps_6_0)
                 endif()
@@ -2228,6 +2230,202 @@ if(DVE_BUILD_TESTS)
                 endif()
             endif()
             if(_dve_dxc_spirv)
+                set(_split_rc_shader "${CMAKE_CURRENT_BINARY_DIR}/split-rc/split_rc_intervals_cs.spv")
+                add_custom_command(OUTPUT "${_split_rc_shader}"
+                    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/split-rc"
+                    COMMAND "${DVE_DXC_EXECUTABLE}" -spirv -fspv-target-env=vulkan1.2
+                        -T cs_6_0 -E main -Fo "${_split_rc_shader}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/split_rc_intervals_cs.hlsl"
+                    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/split_rc_intervals_cs.hlsl"
+                    VERBATIM)
+                add_custom_target(dve_split_rc_interval_shader DEPENDS "${_split_rc_shader}")
+                add_executable(dve_gpu_split_rc_interval_tests tests/test_gpu_split_rc_intervals.cpp)
+                target_link_libraries(dve_gpu_split_rc_interval_tests PRIVATE dve::rhi_vulkan)
+                add_dependencies(dve_gpu_split_rc_interval_tests dve_split_rc_interval_shader)
+                add_test(NAME dve_gpu_split_rc_interval_tests
+                    COMMAND dve_gpu_split_rc_interval_tests "${_split_rc_shader}")
+                set(_split_rc_probe_shader "${CMAKE_CURRENT_BINARY_DIR}/split-rc/split_rc_probe_assign_cs.spv")
+                add_custom_command(OUTPUT "${_split_rc_probe_shader}"
+                    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/split-rc"
+                    COMMAND "${DVE_DXC_EXECUTABLE}" -spirv -fspv-target-env=vulkan1.2
+                        -T cs_6_0 -E main -Fo "${_split_rc_probe_shader}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/split_rc_probe_assign_cs.hlsl"
+                    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/split_rc_probe_assign_cs.hlsl"
+                    VERBATIM)
+                add_custom_target(dve_split_rc_probe_shader DEPENDS "${_split_rc_probe_shader}")
+                add_executable(dve_gpu_split_rc_probe_tests tests/test_gpu_split_rc_probes.cpp)
+                target_link_libraries(dve_gpu_split_rc_probe_tests PRIVATE dve::rhi_vulkan)
+                add_dependencies(dve_gpu_split_rc_probe_tests dve_split_rc_probe_shader)
+                add_test(NAME dve_gpu_split_rc_probe_tests
+                    COMMAND dve_gpu_split_rc_probe_tests "${_split_rc_probe_shader}")
+                set(_split_rc_merge_shader "${CMAKE_CURRENT_BINARY_DIR}/split-rc/split_rc_merge_cs.spv")
+                add_custom_command(OUTPUT "${_split_rc_merge_shader}"
+                    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/split-rc"
+                    COMMAND "${DVE_DXC_EXECUTABLE}" -spirv -fspv-target-env=vulkan1.2
+                        -T cs_6_0 -E main -Fo "${_split_rc_merge_shader}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/split_rc_merge_cs.hlsl"
+                    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/split_rc_merge_cs.hlsl"
+                    VERBATIM)
+                add_custom_target(dve_split_rc_merge_shader DEPENDS "${_split_rc_merge_shader}")
+                set(_split_rc_voxel_shader "${CMAKE_CURRENT_BINARY_DIR}/split-rc/split_rc_voxel_trace_cs.spv")
+                add_custom_command(OUTPUT "${_split_rc_voxel_shader}"
+                    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/split-rc"
+                    COMMAND "${DVE_DXC_EXECUTABLE}" -spirv -fspv-target-env=vulkan1.2
+                        -T cs_6_0 -E main -Fo "${_split_rc_voxel_shader}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/split_rc_voxel_trace_cs.hlsl"
+                    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/split_rc_voxel_trace_cs.hlsl"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/common/scene_voxel_trace.hlsli"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/common/live_bindings.hlsli"
+                    VERBATIM)
+                add_custom_target(dve_split_rc_voxel_shader DEPENDS "${_split_rc_voxel_shader}")
+                add_executable(dve_gpu_split_rc_voxel_tests tests/test_gpu_split_rc_voxels.cpp)
+                target_link_libraries(dve_gpu_split_rc_voxel_tests PRIVATE dve::rhi_vulkan)
+                add_dependencies(dve_gpu_split_rc_voxel_tests dve_split_rc_voxel_shader dve_split_rc_interval_shader dve_split_rc_merge_shader)
+                add_test(NAME dve_gpu_split_rc_voxel_tests
+                    COMMAND dve_gpu_split_rc_voxel_tests "${_split_rc_voxel_shader}" "${_split_rc_shader}" "${_split_rc_merge_shader}")
+                set(_split_rc_compact_shader "${CMAKE_CURRENT_BINARY_DIR}/split-rc/split_rc_compact_offsets_cs.spv")
+                set(_split_rc_accum_shader "${CMAKE_CURRENT_BINARY_DIR}/split-rc/split_rc_accumulate_cs.spv")
+                set(_split_rc_resolve_shader "${CMAKE_CURRENT_BINARY_DIR}/split-rc/split_rc_resolve_cs.spv")
+                foreach(_split_stage IN ITEMS accumulate resolve)
+                    set(_stage_spv "${CMAKE_CURRENT_BINARY_DIR}/split-rc/split_rc_${_split_stage}_cs.spv")
+                    add_custom_command(OUTPUT "${_stage_spv}"
+                        COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/split-rc"
+                        COMMAND "${DVE_DXC_EXECUTABLE}" -spirv -fspv-target-env=vulkan1.2
+                            -T cs_6_0 -E main -Fo "${_stage_spv}"
+                            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/split_rc_${_split_stage}_cs.hlsl"
+                        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/split_rc_${_split_stage}_cs.hlsl"
+                        VERBATIM)
+                endforeach()
+                add_custom_target(dve_split_rc_accum_shaders DEPENDS "${_split_rc_accum_shader}" "${_split_rc_resolve_shader}")
+                add_executable(dve_gpu_split_rc_accum_tests tests/test_gpu_split_rc_accumulation.cpp)
+                target_link_libraries(dve_gpu_split_rc_accum_tests PRIVATE dve::rhi_vulkan)
+                add_dependencies(dve_gpu_split_rc_accum_tests dve_split_rc_accum_shaders dve_split_rc_probe_shader dve_split_rc_voxel_shader dve_split_rc_interval_shader dve_split_rc_compact_shader)
+                add_test(NAME dve_gpu_split_rc_accum_tests
+                    COMMAND dve_gpu_split_rc_accum_tests "${_split_rc_probe_shader}" "${_split_rc_accum_shader}" "${_split_rc_resolve_shader}" "${_split_rc_voxel_shader}" "${_split_rc_shader}" "${_split_rc_compact_shader}")
+                add_custom_command(OUTPUT "${_split_rc_compact_shader}"
+                    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/split-rc"
+                    COMMAND "${DVE_DXC_EXECUTABLE}" -spirv -fspv-target-env=vulkan1.2
+                        -T cs_6_0 -E main -Fo "${_split_rc_compact_shader}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/split_rc_compact_offsets_cs.hlsl"
+                    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/split_rc_compact_offsets_cs.hlsl"
+                    VERBATIM)
+                add_custom_target(dve_split_rc_compact_shader DEPENDS "${_split_rc_compact_shader}")
+                set(_split_rc_scatter_shader "${CMAKE_CURRENT_BINARY_DIR}/split-rc/split_rc_scatter_cs.spv")
+                add_custom_command(OUTPUT "${_split_rc_scatter_shader}"
+                    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/split-rc"
+                    COMMAND "${DVE_DXC_EXECUTABLE}" -spirv -fspv-target-env=vulkan1.2
+                        -T cs_6_0 -E main -Fo "${_split_rc_scatter_shader}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/split_rc_scatter_cs.hlsl"
+                    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/split_rc_scatter_cs.hlsl"
+                    VERBATIM)
+                add_custom_target(dve_split_rc_scatter_shader DEPENDS "${_split_rc_scatter_shader}")
+                set(_split_rc_spatial_shader "${CMAKE_CURRENT_BINARY_DIR}/split-rc/split_rc_spatial_merge_cs.spv")
+                add_custom_command(OUTPUT "${_split_rc_spatial_shader}"
+                    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/split-rc"
+                    COMMAND "${DVE_DXC_EXECUTABLE}" -spirv -fspv-target-env=vulkan1.2
+                        -T cs_6_0 -E main -Fo "${_split_rc_spatial_shader}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/split_rc_spatial_merge_cs.hlsl"
+                    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/split_rc_spatial_merge_cs.hlsl"
+                    VERBATIM)
+                add_custom_target(dve_split_rc_spatial_shader DEPENDS "${_split_rc_spatial_shader}")
+                add_executable(dve_gpu_split_rc_spatial_tests tests/test_gpu_split_rc_spatial_merge.cpp)
+                target_link_libraries(dve_gpu_split_rc_spatial_tests PRIVATE dve::rhi_vulkan)
+                add_dependencies(dve_gpu_split_rc_spatial_tests dve_split_rc_spatial_shader dve_split_rc_compact_shader dve_split_rc_scatter_shader dve_split_rc_gather_shader)
+                add_test(NAME dve_gpu_split_rc_spatial_tests
+                    COMMAND dve_gpu_split_rc_spatial_tests "${_split_rc_spatial_shader}" "${_split_rc_compact_shader}" "${_split_rc_scatter_shader}" "${CMAKE_CURRENT_BINARY_DIR}/split-rc/split_rc_diffuse_gather_cs.spv")
+                set(_split_rc_expand_shader "${CMAKE_CURRENT_BINARY_DIR}/split-rc/split_rc_expand_probes_cs.spv")
+                set(_split_rc_directions_shader "${CMAKE_CURRENT_BINARY_DIR}/split-rc/split_rc_directions_cs.spv")
+                foreach(_split_stage IN ITEMS expand_probes directions)
+                    set(_stage_spv "${CMAKE_CURRENT_BINARY_DIR}/split-rc/split_rc_${_split_stage}_cs.spv")
+                    add_custom_command(OUTPUT "${_stage_spv}"
+                        COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/split-rc"
+                        COMMAND "${DVE_DXC_EXECUTABLE}" -spirv -fspv-target-env=vulkan1.2
+                            -T cs_6_0 -E main -Fo "${_stage_spv}"
+                            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/split_rc_${_split_stage}_cs.hlsl"
+                        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/split_rc_${_split_stage}_cs.hlsl"
+                        VERBATIM)
+                endforeach()
+                add_custom_target(dve_split_rc_geometry_shaders DEPENDS "${_split_rc_expand_shader}" "${_split_rc_directions_shader}")
+                add_executable(dve_gpu_split_rc_geometry_tests tests/test_gpu_split_rc_geometry.cpp)
+                target_link_libraries(dve_gpu_split_rc_geometry_tests PRIVATE dve::rhi_vulkan)
+                add_dependencies(dve_gpu_split_rc_geometry_tests dve_split_rc_geometry_shaders dve_split_rc_probe_shader)
+                add_test(NAME dve_gpu_split_rc_geometry_tests
+                    COMMAND dve_gpu_split_rc_geometry_tests "${_split_rc_expand_shader}" "${_split_rc_probe_shader}" "${_split_rc_directions_shader}")
+                set(_split_rc_gather_shader "${CMAKE_CURRENT_BINARY_DIR}/split-rc/split_rc_diffuse_gather_cs.spv")
+                add_custom_command(OUTPUT "${_split_rc_gather_shader}"
+                    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/split-rc"
+                    COMMAND "${DVE_DXC_EXECUTABLE}" -spirv -fspv-target-env=vulkan1.2
+                        -T cs_6_0 -E main -Fo "${_split_rc_gather_shader}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/split_rc_diffuse_gather_cs.hlsl"
+                    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/split_rc_diffuse_gather_cs.hlsl"
+                    VERBATIM)
+                add_custom_target(dve_split_rc_gather_shader DEPENDS "${_split_rc_gather_shader}")
+                add_executable(dve_gpu_split_rc_gather_tests tests/test_gpu_split_rc_gather.cpp)
+                target_link_libraries(dve_gpu_split_rc_gather_tests PRIVATE dve::rhi_vulkan)
+                add_dependencies(dve_gpu_split_rc_gather_tests dve_split_rc_gather_shader)
+                add_test(NAME dve_gpu_split_rc_gather_tests
+                    COMMAND dve_gpu_split_rc_gather_tests "${_split_rc_gather_shader}")
+                set(_split_rc_queries_shader "${CMAKE_CURRENT_BINARY_DIR}/split-rc/split_rc_build_queries_cs.spv")
+                add_custom_command(OUTPUT "${_split_rc_queries_shader}"
+                    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/split-rc"
+                    COMMAND "${DVE_DXC_EXECUTABLE}" -spirv -fspv-target-env=vulkan1.2
+                        -T cs_6_0 -E main -Fo "${_split_rc_queries_shader}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/split_rc_build_queries_cs.hlsl"
+                    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/split_rc_build_queries_cs.hlsl"
+                    VERBATIM)
+                add_custom_target(dve_split_rc_queries_shader DEPENDS "${_split_rc_queries_shader}")
+                add_executable(dve_gpu_split_rc_hierarchy_tests tests/test_gpu_split_rc_hierarchy.cpp)
+                target_link_libraries(dve_gpu_split_rc_hierarchy_tests PRIVATE dve::rhi_vulkan)
+                add_dependencies(dve_gpu_split_rc_hierarchy_tests dve_split_rc_queries_shader dve_split_rc_compact_shader dve_split_rc_spatial_shader dve_split_rc_scatter_shader dve_split_rc_gather_shader)
+                add_test(NAME dve_gpu_split_rc_hierarchy_tests
+                    COMMAND dve_gpu_split_rc_hierarchy_tests "${_split_rc_compact_shader}" "${_split_rc_queries_shader}" "${_split_rc_spatial_shader}" "${_split_rc_scatter_shader}" "${_split_rc_gather_shader}")
+                add_executable(dve_gpu_split_rc_scene_tests tests/test_gpu_split_rc_scene_fixture.cpp)
+                target_link_libraries(dve_gpu_split_rc_scene_tests PRIVATE dve::rhi_vulkan)
+                add_dependencies(dve_gpu_split_rc_scene_tests dve_split_rc_queries_shader dve_split_rc_compact_shader dve_split_rc_spatial_shader dve_split_rc_scatter_shader dve_split_rc_gather_shader dve_split_rc_voxel_shader dve_split_rc_interval_shader dve_split_rc_accum_shaders)
+                add_test(NAME dve_gpu_split_rc_scene_tests
+                    COMMAND dve_gpu_split_rc_scene_tests "${_split_rc_compact_shader}" "${_split_rc_queries_shader}" "${_split_rc_spatial_shader}" "${_split_rc_scatter_shader}" "${_split_rc_gather_shader}" "${_split_rc_voxel_shader}" "${_split_rc_shader}" "${_split_rc_accum_shader}" "${_split_rc_resolve_shader}")
+                add_executable(dve_gpu_split_rc_floor_tests tests/test_gpu_split_rc_floor_fixture.cpp)
+                target_link_libraries(dve_gpu_split_rc_floor_tests PRIVATE dve::rhi_vulkan)
+                add_dependencies(dve_gpu_split_rc_floor_tests dve_split_rc_queries_shader dve_split_rc_compact_shader dve_split_rc_spatial_shader dve_split_rc_scatter_shader dve_split_rc_gather_shader dve_split_rc_voxel_shader dve_split_rc_interval_shader dve_split_rc_accum_shaders)
+                add_test(NAME dve_gpu_split_rc_floor_tests
+                    COMMAND dve_gpu_split_rc_floor_tests "${_split_rc_compact_shader}" "${_split_rc_queries_shader}" "${_split_rc_spatial_shader}" "${_split_rc_scatter_shader}" "${_split_rc_gather_shader}" "${_split_rc_voxel_shader}" "${_split_rc_shader}" "${_split_rc_accum_shader}" "${_split_rc_resolve_shader}")
+                set(_split_rc_primary_shader "${CMAKE_CURRENT_BINARY_DIR}/split-rc/split_rc_primary_voxel_cs.spv")
+                add_custom_command(OUTPUT "${_split_rc_primary_shader}"
+                    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/split-rc"
+                    COMMAND "${DVE_DXC_EXECUTABLE}" -spirv -fspv-target-env=vulkan1.2
+                        -T cs_6_0 -E main -Fo "${_split_rc_primary_shader}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/split_rc_primary_voxel_cs.hlsl"
+                    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/split_rc_primary_voxel_cs.hlsl"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/common/scene_voxel_trace.hlsli"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/common/live_bindings.hlsli"
+                    VERBATIM)
+                add_custom_target(dve_split_rc_primary_shader DEPENDS "${_split_rc_primary_shader}")
+                add_executable(dve_gpu_split_rc_camera_tests tests/test_gpu_split_rc_camera_fixture.cpp)
+                target_link_libraries(dve_gpu_split_rc_camera_tests PRIVATE dve::rhi_vulkan)
+                add_dependencies(dve_gpu_split_rc_camera_tests dve_split_rc_primary_shader dve_split_rc_queries_shader dve_split_rc_compact_shader dve_split_rc_spatial_shader dve_split_rc_scatter_shader dve_split_rc_gather_shader dve_split_rc_voxel_shader dve_split_rc_interval_shader dve_split_rc_accum_shaders)
+                add_test(NAME dve_gpu_split_rc_camera_tests
+                    COMMAND dve_gpu_split_rc_camera_tests "${_split_rc_compact_shader}" "${_split_rc_queries_shader}" "${_split_rc_spatial_shader}" "${_split_rc_scatter_shader}" "${_split_rc_gather_shader}" "${_split_rc_voxel_shader}" "${_split_rc_shader}" "${_split_rc_accum_shader}" "${_split_rc_resolve_shader}" "${_split_rc_primary_shader}")
+                add_executable(dve_gpu_split_rc_voxel_lighting_tests tests/test_gpu_split_rc_voxel_lighting.cpp)
+                target_link_libraries(dve_gpu_split_rc_voxel_lighting_tests PRIVATE dve::rhi_vulkan)
+                add_dependencies(dve_gpu_split_rc_voxel_lighting_tests dve_split_rc_voxel_shader)
+                add_test(NAME dve_gpu_split_rc_voxel_lighting_tests
+                    COMMAND dve_gpu_split_rc_voxel_lighting_tests "${_split_rc_voxel_shader}")
+                set(_split_rc_screen_shader "${CMAKE_CURRENT_BINARY_DIR}/split-rc/player_split_rc_surface_cs.spv")
+                add_custom_command(OUTPUT "${_split_rc_screen_shader}"
+                    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/split-rc"
+                    COMMAND "${DVE_DXC_EXECUTABLE}" -spirv -fspv-target-env=vulkan1.2 -fvk-use-dx-layout
+                        -T cs_6_0 -E main -Fo "${_split_rc_screen_shader}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/player_split_rc_surface_cs.hlsl"
+                    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/player_split_rc_surface_cs.hlsl"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/common/player_screen_geometry.hlsli"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/common/live_bindings.hlsli"
+                    VERBATIM)
+                add_custom_target(dve_split_rc_screen_shader DEPENDS "${_split_rc_screen_shader}")
+                add_executable(dve_gpu_split_rc_screen_tests tests/test_gpu_split_rc_screen_surface.cpp)
+                target_link_libraries(dve_gpu_split_rc_screen_tests PRIVATE dve::rhi_vulkan)
+                add_dependencies(dve_gpu_split_rc_screen_tests dve_split_rc_screen_shader)
+                add_test(NAME dve_gpu_split_rc_screen_tests
+                    COMMAND dve_gpu_split_rc_screen_tests "${_split_rc_screen_shader}")
                 set(_surface_shader_dir "${CMAKE_CURRENT_BINARY_DIR}/surface-shaders")
                 file(GLOB _surface_shader_headers CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/common/*.hlsli")
                 set(_surface_shader_outputs)
@@ -2900,6 +3098,22 @@ if(DVE_BUILD_TESTS)
             add_executable(dve_vulkan_player_renderer_tests tests/test_vulkan_player_renderer.cpp)
             target_link_libraries(dve_vulkan_player_renderer_tests PRIVATE dve::player_runtime)
             add_test(NAME dve_vulkan_player_renderer_tests COMMAND dve_vulkan_player_renderer_tests)
+            add_executable(dve_split_rc_player_tests tests/test_split_rc_player.cpp)
+            target_link_libraries(dve_split_rc_player_tests PRIVATE dve::player_runtime)
+            add_test(NAME dve_split_rc_player_tests COMMAND dve_split_rc_player_tests)
+            if(DVE_DXC_EXECUTABLE AND TARGET dve_split_rc_compact_shader AND TARGET dve_split_rc_scatter_shader AND TARGET dve_split_rc_gather_shader AND _dve_player_shader_dir)
+                add_executable(dve_gpu_split_rc_prepare_tests tests/test_gpu_split_rc_prepare.cpp)
+                target_link_libraries(dve_gpu_split_rc_prepare_tests PRIVATE dve::rhi_vulkan)
+                add_dependencies(dve_gpu_split_rc_prepare_tests dve_player_runtime)
+                add_test(NAME dve_gpu_split_rc_prepare_tests COMMAND dve_gpu_split_rc_prepare_tests "${_dve_player_shader_dir}/player_split_rc_prepare_cs.spv")
+                add_executable(dve_gpu_split_rc_weighted_merge_tests tests/test_gpu_split_rc_weighted_merge.cpp)
+                target_link_libraries(dve_gpu_split_rc_weighted_merge_tests PRIVATE dve::rhi_vulkan)
+                add_dependencies(dve_gpu_split_rc_weighted_merge_tests dve_player_runtime dve_split_rc_compact_shader dve_split_rc_scatter_shader dve_split_rc_gather_shader)
+                add_test(NAME dve_gpu_split_rc_weighted_merge_tests COMMAND dve_gpu_split_rc_weighted_merge_tests "${_dve_player_shader_dir}/player_split_rc_weighted_merge_cs.spv" "${_split_rc_compact_shader}" "${_split_rc_scatter_shader}" "${_split_rc_gather_shader}")
+                set_tests_properties(dve_gpu_split_rc_weighted_merge_tests PROPERTIES FAIL_REGULAR_EXPRESSION "\\[dve vulkan error\\]")
+                set_tests_properties(dve_gpu_split_rc_prepare_tests PROPERTIES FAIL_REGULAR_EXPRESSION "\\[dve vulkan error\\]")
+            endif()
+            set_tests_properties(dve_split_rc_player_tests PROPERTIES FAIL_REGULAR_EXPRESSION "\\[dve vulkan error\\];doesn.t match the VkImageView")
             # Validation-layer errors (when DVE_VULKAN_VALIDATION=1) fail the test.
             set_tests_properties(dve_vulkan_player_renderer_tests PROPERTIES
                 FAIL_REGULAR_EXPRESSION "\\[dve vulkan error\\]")

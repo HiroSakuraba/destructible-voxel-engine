@@ -1,4 +1,5 @@
 #include "dve/environment_lighting.hpp"
+#include "dve/spherical_harmonic_exponentials.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -561,9 +562,22 @@ Float3 evaluate_image_based_lighting(const IblBakeResult& ibl,
     const float maximumLod = static_cast<float>(ibl.specularPrefilter.levels.size() - 1U);
     const Float3 prefiltered = sample_environment_cube_lod(
         ibl.specularPrefilter, reflection, roughness * maximumLod);
-    const Float3 specularLighting = hadamard(
+    Float3 specularLighting = hadamard(
         prefiltered,
         vadd(vmul(f0, brdf.scale), {brdf.bias, brdf.bias, brdf.bias}));
+    if (material.sheProbe != nullptr) {
+        // SHE fits the Fresnel=1 GGX base integral E0, not a prefiltered cubemap.
+        // Scale by the BRDF-LUT average Fresnel ratio to approximate its tail.
+        // This retains the existing diffuse and AO paths while replacing specular only.
+        const auto base = evaluate_she_base_reflectance(
+            *material.sheProbe, normal, view, roughness * roughness);
+        if (base) {
+            const float denominator = std::max(1.0e-5F, brdf.scale + brdf.bias);
+            specularLighting = hadamard(*base,
+                vmul(vadd(vmul(f0, brdf.scale),
+                          {brdf.bias, brdf.bias, brdf.bias}), 1.0F / denominator));
+        }
+    }
     return vadd(vmul(diffuse, ao),
                 vmul(specularLighting, specular_occlusion(ndotv, ao, roughness)));
 }

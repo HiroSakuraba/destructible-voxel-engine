@@ -1,4 +1,5 @@
 #include "dve/spherical_harmonic_exponentials.hpp"
+#include "dve/environment_lighting.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -16,12 +17,12 @@ dve::Float3 normal_at(int i) {
     const float a=float(i)*2.3999632297286533F;
     return {radius*std::cos(a),y,radius*std::sin(a)};
 }
-float dot(dve::Float3 a,dve::Float3 b){return a.x*b.x+a.y*b.y+a.z*b.z;}
+float local_dot(dve::Float3 a,dve::Float3 b){return a.x*b.x+a.y*b.y+a.z*b.z;}
 dve::Float3 cross(dve::Float3 a,dve::Float3 b) {
     return {a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x};
 }
 dve::Float3 norm(dve::Float3 v){
-    const float l=std::sqrt(dot(v,v));
+    const float l=std::sqrt(local_dot(v,v));
     return {v.x/l,v.y/l,v.z/l};
 }
 void test_synthetic_fit_and_half_packing() {

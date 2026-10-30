@@ -15,19 +15,19 @@ using Row = std::array<double, kSheCoefficientCount>;
 using Matrix = std::array<Row, kSheCoefficientCount>;
 using Channels = std::array<std::array<double, 3>, kSheCoefficientCount>;
 
-Float3 add(Float3 a, Float3 b) noexcept { return {a.x+b.x, a.y+b.y, a.z+b.z}; }
+Float3 she_add(Float3 a, Float3 b) noexcept { return {a.x+b.x, a.y+b.y, a.z+b.z}; }
 Float3 sub(Float3 a, Float3 b) noexcept { return {a.x-b.x, a.y-b.y, a.z-b.z}; }
 Float3 scale(Float3 a, float s) noexcept { return {a.x*s, a.y*s, a.z*s}; }
-float dot(Float3 a, Float3 b) noexcept { return a.x*b.x+a.y*b.y+a.z*b.z; }
+float she_dot(Float3 a, Float3 b) noexcept { return a.x*b.x+a.y*b.y+a.z*b.z; }
 Float3 cross(Float3 a, Float3 b) noexcept {
     return {a.y*b.z-a.z*b.y, a.z*b.x-a.x*b.z, a.x*b.y-a.y*b.x};
 }
 bool finite(Float3 a) noexcept {
     return std::isfinite(a.x)&&std::isfinite(a.y)&&std::isfinite(a.z);
 }
-bool direction(Float3 a) noexcept { return finite(a)&&dot(a,a)>1.0e-12F; }
-Float3 unit(Float3 a) noexcept { return scale(a,1.0F/std::sqrt(dot(a,a))); }
-Float3 reflect(Float3 v, Float3 n) noexcept { return sub(v,scale(n,2.0F*dot(v,n))); }
+bool direction(Float3 a) noexcept { return finite(a)&&she_dot(a,a)>1.0e-12F; }
+Float3 unit(Float3 a) noexcept { return scale(a,1.0F/std::sqrt(she_dot(a,a))); }
+Float3 reflect(Float3 v, Float3 n) noexcept { return sub(v,scale(n,2.0F*she_dot(v,n))); }
 float fract(float x) noexcept { return x-std::floor(x); }
 
 // Orthonormal real SH, ordered by increasing degree and m=-l,...,+l.
@@ -63,10 +63,10 @@ std::optional<Row> make_row(Float3 n, Float3 v, float alpha) noexcept {
     if(!direction(n)||!direction(v)||!std::isfinite(alpha)||
        alpha<kSheMinimumAlpha||alpha>1.0F)return std::nullopt;
     n=unit(n);v=unit(v);
-    if(dot(n,v)<1.0e-4F)return std::nullopt;
+    if(she_dot(n,v)<1.0e-4F)return std::nullopt;
     const Float3 r=reflect(scale(v,-1.0F),n);
-    if(!direction(add(n,r)))return std::nullopt;
-    const Float3 hr=unit(add(n,r));
+    if(!direction(she_add(n,r)))return std::nullopt;
+    const Float3 hr=unit(she_add(n,r));
     const auto p=sh4(r),q=sh4(hr);
     Row row{};
     for(int i=0;i<25;++i){
@@ -139,7 +139,7 @@ Float3 monte_carlo_base(const EnvironmentCube& cube, Float3 n, Float3 v, float a
                         std::uint32_t samples) {
     const Float3 axis=std::abs(n.y)<0.9F?Float3{0,1,0}:Float3{1,0,0};
     const Float3 t=unit(cross(axis,n)),b=cross(n,t);
-    const float nDotV=std::max(dot(n,v),1.0e-4F);
+    const float nDotV=std::max(she_dot(n,v),1.0e-4F);
     Float3 sum{};
     for(std::uint32_t j=0;j<samples;++j){
         const float xiX=(static_cast<float>(j)+0.5F)/static_cast<float>(samples);
@@ -149,17 +149,17 @@ Float3 monte_carlo_base(const EnvironmentCube& cube, Float3 n, Float3 v, float a
                                                      (1.0F+(a2-1.0F)*xiY))));
         const float st=std::sqrt(std::max(0.0F,1.0F-ct*ct));
         const float phi=2.0F*static_cast<float>(kPi)*xiX;
-        const Float3 h=unit(add(add(scale(t,std::cos(phi)*st),scale(b,std::sin(phi)*st)),
+        const Float3 h=unit(she_add(she_add(scale(t,std::cos(phi)*st),scale(b,std::sin(phi)*st)),
                                 scale(n,ct)));
-        const float vDotH=dot(v,h);
+        const float vDotH=she_dot(v,h);
         if(vDotH<=0.0F)continue;
         const Float3 l=sub(scale(h,2.0F*vDotH),v);
-        const float nDotL=dot(n,l);
+        const float nDotL=she_dot(n,l);
         if(nDotL<=0.0F)continue;
         const float visibility=1.0F/(1.0F+smith_lambda(nDotV,alpha)+
                                       smith_lambda(nDotL,alpha));
         const float weight=visibility*vDotH/(nDotV*std::max(ct,1.0e-5F));
-        sum=add(sum,scale(sample_environment_cube(cube,l),weight));
+        sum=she_add(sum,scale(sample_environment_cube(cube,l),weight));
     }
     return scale(sum,1.0F/static_cast<float>(samples));
 }
@@ -291,8 +291,8 @@ std::optional<SheFitResult> bake_she_probe(
         const float ndotv=0.05F+0.95F*fract(static_cast<float>(i)*0.75487766625F);
         const float phi=2.0F*static_cast<float>(kPi)*fract(static_cast<float>(i)*0.56984029099F);
         const float sint=std::sqrt(std::max(0.0F,1.0F-ndotv*ndotv));
-        const Float3 v=unit(add(scale(n,ndotv),
-                            add(scale(t,sint*std::cos(phi)),scale(b,sint*std::sin(phi)))));
+        const Float3 v=unit(she_add(scale(n,ndotv),
+                            she_add(scale(t,sint*std::cos(phi)),scale(b,sint*std::sin(phi)))));
         const float alpha=kSheMinimumAlpha+(1.0F-kSheMinimumAlpha)*
                           fract(static_cast<float>(i)*0.61803398875F);
         const Float3 target=monte_carlo_base(source,n,v,alpha,

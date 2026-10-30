@@ -14,12 +14,17 @@ struct EnvironmentLightingGpuResources {
     rhi::TextureHandle specularPrefilter;
     rhi::TextureViewHandle specularPrefilterView;
     rhi::TextureHandle brdfLut;
+    // 56 uint32s: 52 packed coefficient words, one validity marker and 3 padding.
+    // This buffer is always bound; a zero marker selects the legacy specular path.
+    rhi::BufferHandle sheCoefficients;
+    bool sheEnabled{};
     rhi::TextureViewHandle brdfLutView;
     rhi::SamplerHandle sampler;
     rhi::BindGroupLayoutHandle bindGroupLayout;
     rhi::BindGroupHandle bindGroup;
     std::uint32_t specularMipLevels{};
     std::uint64_t uploadedBytes{};
+    static constexpr std::uint32_t sheValidityMarker = 0x53484531U; // SHE1
 
     [[nodiscard]] bool valid() const noexcept;
 };

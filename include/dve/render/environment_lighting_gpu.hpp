@@ -14,12 +14,17 @@ struct EnvironmentLightingGpuResources {
     rhi::TextureHandle specularPrefilter;
     rhi::TextureViewHandle specularPrefilterView;
     rhi::TextureHandle brdfLut;
+    // 56 uint32s: 52 packed coefficient words, one validity marker and 3 padding.
+    // This buffer is always bound; a zero marker selects the legacy specular path.
+    rhi::BufferHandle sheCoefficients;
+    bool sheEnabled{};
     rhi::TextureViewHandle brdfLutView;
     rhi::SamplerHandle sampler;
     rhi::BindGroupLayoutHandle bindGroupLayout;
     rhi::BindGroupHandle bindGroup;
     std::uint32_t specularMipLevels{};
     std::uint64_t uploadedBytes{};
+    static constexpr std::uint32_t sheValidityMarker = 0x53484531U; // SHE1
 
     [[nodiscard]] bool valid() const noexcept;
 };
@@ -29,6 +34,13 @@ struct EnvironmentLightingGpuResources {
     const EnvironmentLightingAsset& asset,
     EnvironmentLightingGpuResources& resources,
     std::string* error = nullptr);
+
+// Replace the probe without recreating the binding. Caller must ensure that no
+// in-flight GPU frame is reading this buffer (wait for its fence / device idle).
+// Passing nullptr atomically disables SHE via its zero marker, without changing layouts.
+[[nodiscard]] bool update_environment_she_probe(
+    rhi::IDevice& device, const SheProbeCoefficients* probe,
+    EnvironmentLightingGpuResources& resources, std::string* error = nullptr);
 
 // Rewrites the baked cubes of existing resources in place (same resolutions and mip count as the
 // upload that created them); views, samplers and bind groups stay valid. Callers must make sure

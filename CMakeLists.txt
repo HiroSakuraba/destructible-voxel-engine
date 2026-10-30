@@ -198,6 +198,7 @@ add_library(dve_core
     src/procedural_noise.cpp
     src/material_authoring.cpp
     src/environment_lighting.cpp
+    src/spherical_harmonic_exponentials.cpp
     src/environment_lighting_asset.cpp
     src/gpu_material_parameter_collection.cpp
     src/master_material.cpp
@@ -3598,6 +3599,9 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     add_executable(dve_environment_lighting_tests tests/test_environment_lighting.cpp)
     target_link_libraries(dve_environment_lighting_tests PRIVATE dve::core)
     add_test(NAME dve_environment_lighting_tests COMMAND dve_environment_lighting_tests)
+    add_executable(dve_spherical_harmonic_exponentials_tests tests/test_spherical_harmonic_exponentials.cpp)
+    target_link_libraries(dve_spherical_harmonic_exponentials_tests PRIVATE dve::core)
+    add_test(NAME dve_spherical_harmonic_exponentials_tests COMMAND dve_spherical_harmonic_exponentials_tests)
     add_executable(dve_v2292_lighting_rendering_fixes_tests tests/test_lighting_rendering_fixes_v2292.cpp)
     target_link_libraries(dve_v2292_lighting_rendering_fixes_tests PRIVATE dve::render_bridge)
     target_compile_definitions(dve_v2292_lighting_rendering_fixes_tests PRIVATE

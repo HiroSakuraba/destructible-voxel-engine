@@ -2,6 +2,7 @@
 #include "dve/rhi/null_device.hpp"
 
 #include <array>
+#include <span>
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
@@ -155,11 +156,22 @@ dve::render::EnvironmentLightingGpuResources make_lighting(
     sampler.addressU=sampler.addressV=sampler.addressW=dve::rhi::AddressMode::ClampToEdge;
     lighting.sampler=device.create_sampler(sampler,&error);
 
+    dve::rhi::BufferDesc sheDesc;
+    sheDesc.bytes=224U;
+    sheDesc.usage=dve::rhi::BufferUsage::Storage|dve::rhi::BufferUsage::CopyDestination;
+    sheDesc.memory=dve::rhi::MemoryDomain::DeviceLocal;
+    sheDesc.initialState=dve::rhi::ResourceState::ShaderRead;
+    lighting.sheCoefficients=device.create_buffer(sheDesc,&error);
+    require(lighting.sheCoefficients,error.c_str());
+    const std::array<std::uint32_t,56> disabledShe{};
+    require(device.write_buffer(lighting.sheCoefficients,0U,
+            std::as_bytes(std::span(disabledShe)),&error),error.c_str());
     dve::rhi::BindGroupLayoutDesc layout;
     layout.bindings={
         {0U,dve::rhi::BindingType::SampledTexture,dve::rhi::ShaderStage::Fragment},
         {1U,dve::rhi::BindingType::SampledTexture,dve::rhi::ShaderStage::Fragment},
         {2U,dve::rhi::BindingType::SampledTexture,dve::rhi::ShaderStage::Fragment},
+        {3U,dve::rhi::BindingType::StorageBufferReadOnly,dve::rhi::ShaderStage::Fragment},
     };
     lighting.bindGroupLayout=device.create_bind_group_layout(layout,&error);
     dve::rhi::BindGroupDesc group;
@@ -168,6 +180,7 @@ dve::render::EnvironmentLightingGpuResources make_lighting(
         {0U,{},lighting.diffuseIrradianceView,0U,0U,lighting.sampler},
         {1U,{},lighting.specularPrefilterView,0U,0U,lighting.sampler},
         {2U,{},lighting.brdfLutView,0U,0U,lighting.sampler},
+        {3U,lighting.sheCoefficients,{},0U,224U,{}},
     };
     lighting.bindGroup=device.create_bind_group(group,&error);
     lighting.specularMipLevels=1U;

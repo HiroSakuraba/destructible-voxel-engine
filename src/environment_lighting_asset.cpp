@@ -14,7 +14,7 @@ namespace dve {
 namespace {
 constexpr std::array<char, 8> kMagic{'D','V','E','I','B','L','1','\0'};
 constexpr std::uint16_t kMajor = 1U;
-constexpr std::uint16_t kMinor = 0U;
+constexpr std::uint16_t kMinor = 1U;
 constexpr std::uint32_t kMaximumResolution = 8192U;
 constexpr std::uint64_t kMaximumTexels = 512ULL * 1024ULL * 1024ULL;
 
@@ -76,6 +76,11 @@ std::uint64_t calculate_hash(const EnvironmentLightingAsset& asset) noexcept {
     for(const auto& level:asset.baked.specularPrefilter.levels) hash_cube(hash,level);
     hash_value(hash, asset.baked.brdfResolution);
     for(const auto sample:asset.baked.brdfLut){hash_value(hash,sample.scale);hash_value(hash,sample.bias);}
+    if (asset.sheProbe) {
+        hash_value(hash,asset.sheSourceHash);
+        const auto packed=pack_she_probe_half(*asset.sheProbe);
+        for(auto half:packed.half)hash_value(hash,half);
+    }
     return hash;
 }
 void write_cube(Writer& writer, const EnvironmentCube& cube) {
@@ -97,12 +102,36 @@ float dot3(Float3 a,Float3 b) noexcept{return a.x*b.x+a.y*b.y+a.z*b.z;}
 Float3 normalize3(Float3 a,Float3 fallback) noexcept{const float l=std::sqrt(std::max(0.0F,dot3(a,a)));return l>1.0e-8F?mul3(a,1.0F/l):fallback;}
 }
 
+std::uint64_t environment_radiance_hash(const EnvironmentCube& source) noexcept {
+    std::uint64_t hash=1469598103934665603ULL;
+    hash_cube(hash,source);
+    return hash;
+}
+bool bake_environment_she(EnvironmentLightingAsset& asset,
+                          const SheBakeSettings& settings, std::string* error) {
+    if(!asset.sourceRadiance.validate(error) || !settings.validate()) {
+        if(error && error->empty())*error="invalid SHE bake settings";
+        return false;
+    }
+    const auto fitted=bake_she_probe(asset.sourceRadiance,settings);
+    if(!fitted){set_error(error,"SHE fitting failed");return false;}
+    asset.sheProbe=fitted->coefficients;
+    asset.sheSourceHash=environment_radiance_hash(asset.sourceRadiance);
+    asset.recompute_content_hash();
+    return asset.validate(error);
+}
+
 bool EnvironmentLightingAsset::validate(std::string* error) const noexcept {
     auto fail=[&](const char* message){set_error(error,message);return false;};
     if(name.empty() || name.size()>(1U<<20U)) return fail("environment-lighting name is empty or too long");
     if(!std::isfinite(rotationRadians)||!std::isfinite(intensity)||intensity<0.0F||!std::isfinite(skyboxExposure)||skyboxExposure<-32.0F||skyboxExposure>32.0F)
         return fail("environment-lighting exposure, intensity, or rotation is invalid");
     if(!sourceRadiance.validate(error)||!baked.validate(error)) return false;
+    if(sheProbe) {
+        if(!sheProbe->validate(error)||
+           sheSourceHash!=environment_radiance_hash(sourceRadiance))
+            return fail("SHE coefficients are invalid or source radiance has changed");
+    } else if(sheSourceHash!=0U) return fail("SHE source hash without coefficients");
     if(contentHash!=0U && contentHash!=calculate_hash(*this)) return fail("environment-lighting content hash mismatch");
     return true;
 }
@@ -123,13 +152,25 @@ EnvironmentLightingAsset make_default_environment_lighting_asset(const IblBakeSe
 bool write_dveibl(const std::filesystem::path& path,const EnvironmentLightingAsset& input,std::string* error) {
     try {
         EnvironmentLightingAsset asset=input; if(asset.contentHash==0U)asset.recompute_content_hash(); std::string validation;if(!asset.validate(&validation))throw std::runtime_error(validation);
-        Writer writer;writer.bytes(kMagic.data(),kMagic.size());writer.u16(kMajor);writer.u16(kMinor);writer.u64(asset.contentHash);writer.f32(asset.rotationRadians);writer.f32(asset.intensity);writer.f32(asset.skyboxExposure);writer.f32(0.0F);writer.text(asset.name);
+        Writer writer;writer.bytes(kMagic.data(),kMagic.size());writer.u16(kMajor);writer.u16(asset.sheProbe ? kMinor : 0U);writer.u64(asset.contentHash);writer.f32(asset.rotationRadians);writer.f32(asset.intensity);writer.f32(asset.skyboxExposure);writer.f32(0.0F);writer.text(asset.name);
         write_cube(writer,asset.sourceRadiance);write_cube(writer,asset.baked.diffuseIrradiance);writer.u32(static_cast<std::uint32_t>(asset.baked.specularPrefilter.levels.size()));for(const auto& level:asset.baked.specularPrefilter.levels)write_cube(writer,level);writer.u32(asset.baked.brdfResolution);writer.u64(static_cast<std::uint64_t>(asset.baked.brdfLut.size()));for(const auto sample:asset.baked.brdfLut){writer.f32(sample.scale);writer.f32(sample.bias);}
+        if(asset.sheProbe) {
+            writer.u64(asset.sheSourceHash);
+            const auto packed=pack_she_probe_half(*asset.sheProbe);
+            for(auto value:packed.half)writer.u16(value);
+        }
         std::filesystem::create_directories(path.parent_path().empty()?std::filesystem::path{"."}:path.parent_path());const auto temporary=path.string()+".tmp";std::ofstream stream(temporary,std::ios::binary|std::ios::trunc);if(!stream)throw std::runtime_error("failed to open temporary DVEIBL file");stream.write(reinterpret_cast<const char*>(writer.data.data()),static_cast<std::streamsize>(writer.data.size()));stream.close();if(!stream)throw std::runtime_error("failed to write DVEIBL file");std::error_code ec;std::filesystem::rename(temporary,path,ec);if(ec){std::filesystem::remove(path,ec);ec.clear();std::filesystem::rename(temporary,path,ec);}if(ec)throw std::runtime_error("failed to commit DVEIBL file: "+ec.message());return true;
     } catch(const std::exception& exception){set_error(error,exception.what());return false;}
 }
 EnvironmentLightingReadResult read_dveibl(const std::filesystem::path& path,std::uint64_t maximumBytes) {
-    EnvironmentLightingReadResult result;try{std::ifstream stream(path,std::ios::binary);if(!stream)throw std::runtime_error("failed to open DVEIBL file");stream.seekg(0,std::ios::end);const auto end=stream.tellg();if(end<0||static_cast<std::uint64_t>(end)>maximumBytes)throw std::runtime_error("DVEIBL file exceeds size limit");stream.seekg(0);std::vector<std::byte> bytes(static_cast<std::size_t>(end));if(!bytes.empty())stream.read(reinterpret_cast<char*>(bytes.data()),static_cast<std::streamsize>(bytes.size()));if(!stream&&!bytes.empty())throw std::runtime_error("failed to read DVEIBL file");Reader reader(bytes);for(const char expected:kMagic)if(reader.u8()!=static_cast<std::uint8_t>(expected))throw std::runtime_error("DVEIBL magic mismatch");const auto major=reader.u16(),minor=reader.u16();if(major!=kMajor||minor>kMinor)throw std::runtime_error("unsupported DVEIBL version");EnvironmentLightingAsset asset;asset.contentHash=reader.u64();asset.rotationRadians=reader.f32();asset.intensity=reader.f32();asset.skyboxExposure=reader.f32();(void)reader.f32();asset.name=reader.text();asset.sourceRadiance=read_cube(reader);asset.baked.diffuseIrradiance=read_cube(reader);const auto levels=reader.u32();if(levels==0U||levels>32U)throw std::runtime_error("invalid DVEIBL mip count");for(std::uint32_t i=0;i<levels;++i)asset.baked.specularPrefilter.levels.push_back(read_cube(reader));asset.baked.brdfResolution=reader.u32();const auto count=reader.u64();if(asset.baked.brdfResolution==0U||asset.baked.brdfResolution>kMaximumResolution||count!=static_cast<std::uint64_t>(asset.baked.brdfResolution)*asset.baked.brdfResolution||count>kMaximumTexels)throw std::runtime_error("invalid DVEIBL BRDF LUT dimensions");asset.baked.brdfLut.resize(static_cast<std::size_t>(count));for(auto& sample:asset.baked.brdfLut)sample={reader.f32(),reader.f32()};if(!reader.at_end())throw std::runtime_error("DVEIBL has trailing data");std::string validation;if(!asset.validate(&validation))throw std::runtime_error(validation);result.asset=std::move(asset);return result;}catch(const std::exception& exception){result.error=exception.what();return result;}}
+    EnvironmentLightingReadResult result;try{std::ifstream stream(path,std::ios::binary);if(!stream)throw std::runtime_error("failed to open DVEIBL file");stream.seekg(0,std::ios::end);const auto end=stream.tellg();if(end<0||static_cast<std::uint64_t>(end)>maximumBytes)throw std::runtime_error("DVEIBL file exceeds size limit");stream.seekg(0);std::vector<std::byte> bytes(static_cast<std::size_t>(end));if(!bytes.empty())stream.read(reinterpret_cast<char*>(bytes.data()),static_cast<std::streamsize>(bytes.size()));if(!stream&&!bytes.empty())throw std::runtime_error("failed to read DVEIBL file");Reader reader(bytes);for(const char expected:kMagic)if(reader.u8()!=static_cast<std::uint8_t>(expected))throw std::runtime_error("DVEIBL magic mismatch");const auto major=reader.u16(),minor=reader.u16();if(major!=kMajor||minor>kMinor)throw std::runtime_error("unsupported DVEIBL version");EnvironmentLightingAsset asset;asset.contentHash=reader.u64();asset.rotationRadians=reader.f32();asset.intensity=reader.f32();asset.skyboxExposure=reader.f32();(void)reader.f32();asset.name=reader.text();asset.sourceRadiance=read_cube(reader);asset.baked.diffuseIrradiance=read_cube(reader);const auto levels=reader.u32();if(levels==0U||levels>32U)throw std::runtime_error("invalid DVEIBL mip count");for(std::uint32_t i=0;i<levels;++i)asset.baked.specularPrefilter.levels.push_back(read_cube(reader));asset.baked.brdfResolution=reader.u32();const auto count=reader.u64();if(asset.baked.brdfResolution==0U||asset.baked.brdfResolution>kMaximumResolution||count!=static_cast<std::uint64_t>(asset.baked.brdfResolution)*asset.baked.brdfResolution||count>kMaximumTexels)throw std::runtime_error("invalid DVEIBL BRDF LUT dimensions");asset.baked.brdfLut.resize(static_cast<std::size_t>(count));for(auto& sample:asset.baked.brdfLut)sample={reader.f32(),reader.f32()};
+        if(minor==1U){
+            asset.sheSourceHash=reader.u64();
+            ShePackedProbe packed{};
+            for(auto& value:packed.half)value=reader.u16();
+            asset.sheProbe=unpack_she_probe_half(packed);
+        }
+        if(!reader.at_end())throw std::runtime_error("DVEIBL has trailing data");std::string validation;if(!asset.validate(&validation))throw std::runtime_error(validation);result.asset=std::move(asset);return result;}catch(const std::exception& exception){result.error=exception.what();return result;}}
 
 bool EnvironmentSkyboxSettings::validate(std::string* error) const noexcept {auto fail=[&](const char* message){set_error(error,message);return false;};if(width==0U||height==0U||width>16384U||height>16384U)return fail("skybox dimensions are invalid");if(!std::isfinite(rotationRadians)||!std::isfinite(intensity)||intensity<0.0F||!std::isfinite(exposure)||exposure<-32.0F||exposure>32.0F)return fail("skybox rotation, intensity, or exposure is invalid");return true;}
 Float3 rotate_environment_direction(Float3 direction,float yaw) noexcept {const float c=std::cos(yaw),s=std::sin(yaw);return normalize3({c*direction.x+s*direction.z,direction.y,-s*direction.x+c*direction.z},{0,0,1});}

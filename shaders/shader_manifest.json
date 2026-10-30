@@ -2295,6 +2295,12 @@
           "kind": "sampled_texture",
           "access": "read",
           "register": "t42"
+        },
+        {
+          "name": "gSheSpecularCoefficients",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t43"
         }
       ],
       "vulkan_bindings": [

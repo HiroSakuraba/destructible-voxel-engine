@@ -7,6 +7,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <future>
+#include <optional>
 #include <numbers>
 #include <span>
 #include <unordered_map>
@@ -1146,6 +1148,41 @@ private:
         return true;
     }
 
+    bool poll_she_fit(std::string* error) {
+        if(!options_.sheGlossyReflections || !lighting_.valid())return true;
+        if(pendingSheFit_ &&
+           pendingSheFit_->wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            std::optional<SheFitResult> fit;
+            try { fit=pendingSheFit_->get(); }
+            catch(...) { /* fitting failure never breaks the split-sum renderer */ }
+            pendingSheFit_.reset();
+            if(pendingSheSourceHash_==currentSheSourceHash_) {
+                if(fit && fit->coefficients.validate()) {
+                    // The fit never mutates GPU state. Swap its completed result
+                    // only when all previously submitted draws have retired.
+                    device_->wait_idle();
+                    if(!render::update_environment_she_probe(
+                           *device_, &fit->coefficients, lighting_, error))return false;
+                } else {
+                    sheFitFailedForSky_=true; // avoid per-frame failed recomputation
+                }
+            }
+        }
+        if(!pendingSheFit_ && !lighting_.sheEnabled && !sheFitFailedForSky_ &&
+           !sheSourceRadiance_.texels.empty()) {
+            pendingSheSourceHash_=currentSheSourceHash_;
+            const EnvironmentCube source=sheSourceRadiance_;
+            pendingSheFit_.emplace(std::async(std::launch::async,[source]() {
+                SheBakeSettings settings;
+                settings.trainingSamples=768U;
+                settings.ggxSamplesPerTrainingPoint=64U;
+                settings.regularization=0.001F;
+                return bake_she_probe(source,settings);
+            }));
+        }
+        return true;
+    }
+
     bool ensure_environment(const RenderEnvironment& environment, std::string* error) {
         update_sky(environment);
         const bool physical = sky_.physical;
@@ -1165,7 +1202,7 @@ private:
             const Float3 sunLight = sky_.sun_light();
             key.insert(key.end(), {sunLight.x, sunLight.y, sunLight.z, environment.sunDisc});
         }
-        if (lighting_.valid() && key == skyKey_) return true;
+        if (lighting_.valid() && key == skyKey_) return poll_she_fit(error);
         device_->wait_idle();
         const EnvironmentLightingAsset asset = sky_environment_asset(sky_);
         // A new sky (the sun moved, ...) rewrites the baked cubes in place: the live renderer's
@@ -1182,8 +1219,13 @@ private:
             if (!render::upload_environment_lighting(*device_, asset, lighting_, error)) return false;
         }
         if (physical && !upload_sky_tables(error)) return false;
+        if(options_.sheGlossyReflections) {
+            sheSourceRadiance_=asset.sourceRadiance;
+            currentSheSourceHash_=environment_radiance_hash(sheSourceRadiance_);
+            sheFitFailedForSky_=false;
+        }
         skyKey_ = std::move(key);
-        return true;
+        return poll_she_fit(error);
     }
 
     // Equirectangular radiance (by direction) and irradiance (by normal) tables of the physical sky.
@@ -1482,6 +1524,11 @@ private:
     render::CascadedShadowAtlasResources atlas_{};
     render::LiveEnvironmentRendererResources live_{};
     std::vector<float> skyKey_;
+    EnvironmentCube sheSourceRadiance_;
+    std::optional<std::future<std::optional<SheFitResult>>> pendingSheFit_;
+    std::uint64_t pendingSheSourceHash_{};
+    std::uint64_t currentSheSourceHash_{};
+    bool sheFitFailedForSky_{};
     SkySampler sky_;
     int skyElevationDegrees_{};
     bool skyModelValid_{};

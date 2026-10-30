@@ -1,4 +1,5 @@
 #include "dve/spherical_harmonic_exponentials.hpp"
+#include "dve/environment_lighting.hpp"
 
 #include <algorithm>
 #include <array>

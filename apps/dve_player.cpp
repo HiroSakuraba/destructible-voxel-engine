@@ -212,7 +212,7 @@ window / rendering
                              SHE fits asynchronously, fallback for sharp surfaces)
   --sky colors|physical     override the scene's sky model (physical: atmosphere sky, sun colour and
                             sky light from the engine's atmosphere model)
-  --free-camera             mouse look; WASD move; Space up; C down; Esc quits
+  --free-camera             Maya-style Alt+mouse orbit/pan/dolly; RMB look; WASD move
   --no-vsync                vulkan: present without waiting for vertical blank (mailbox
                             when available, else immediate)
   --quality fast|balanced|reference   CPU lighting cost (default fast: hard shadows,
@@ -796,7 +796,13 @@ int run(int argc, char** argv) {
     bool cameraReady = false, forwardKey = false, backKey = false, leftKey = false, rightKey = false;
     bool upKey = false, downKey = false;
     float cameraYaw = 0.0F, cameraPitch = 0.0F, cameraDt = 0.0F;
-    Float3 cameraPosition{};
+    Float3 cameraPosition{}, cameraPivot{};
+    float cameraDistance = 1.0F;
+    bool leftMouse = false, middleMouse = false, rightMouse = false;
+    const auto cameraForward = [&]() -> Float3 {
+        const float cp = std::cos(cameraPitch);
+        return {std::sin(cameraYaw) * cp, std::sin(cameraPitch), -std::cos(cameraYaw) * cp};
+    };
     const auto render_frame = [&](bool captureWindow) -> bool {
         const auto frameStart = Clock::now();
         const float aspect = static_cast<float>(renderWidth) / static_cast<float>(renderHeight);
@@ -810,6 +816,8 @@ int run(int argc, char** argv) {
                 cameraPosition = view.camera.position;
                 const Float3 direction{view.camera.target.x - cameraPosition.x,
                     view.camera.target.y - cameraPosition.y, view.camera.target.z - cameraPosition.z};
+                cameraPivot = view.camera.target;
+                cameraDistance = std::max(0.1F, std::sqrt(direction.x*direction.x + direction.y*direction.y + direction.z*direction.z));
                 cameraYaw = std::atan2(direction.x, -direction.z);
                 cameraPitch = std::atan2(direction.y, std::sqrt(direction.x * direction.x + direction.z * direction.z));
                 cameraReady = true;
@@ -820,6 +828,10 @@ int run(int argc, char** argv) {
             cameraPosition.x += move * (along * sine + side * cosine);
             cameraPosition.z += move * (-along * cosine + side * sine);
             cameraPosition.y += move * (float(upKey) - float(downKey));
+            const Float3 facing = cameraForward();
+            cameraPivot = {cameraPosition.x + facing.x * cameraDistance,
+                           cameraPosition.y + facing.y * cameraDistance,
+                           cameraPosition.z + facing.z * cameraDistance};
             const float cp = std::cos(cameraPitch);
             view.camera.position = cameraPosition;
             view.camera.target = {cameraPosition.x + sine * cp, cameraPosition.y + std::sin(cameraPitch),
@@ -838,15 +850,50 @@ int run(int argc, char** argv) {
     };
     std::vector<platform::PlatformEvent> pendingHostEvents;
     const auto poll = [&]() {
-        if(host.has_window()&&!options.headless){const auto* hud=app->prototype_hud();bool wanted=(options.freeCamera||(hud&&hud->phase==PrototypePhase::Playing))&&host.window_metrics().focused;if(host.relative_mouse_mode()!=wanted)(void)host.set_relative_mouse_mode(wanted);}
+        if(host.has_window()&&!options.headless){const auto* hud=app->prototype_hud();bool wanted=((options.freeCamera && (leftMouse || middleMouse || rightMouse)) || (!options.freeCamera && hud && hud->phase==PrototypePhase::Playing))&&host.window_metrics().focused;if(host.relative_mouse_mode()!=wanted)(void)host.set_relative_mouse_mode(wanted);}
         platform::PlatformEvent event;
         while (host.has_window() && host.poll_event(event)) {
             if (options.freeCamera) {
                 if (event.type == platform::EventType::WindowFocusLost) {
                     forwardKey = backKey = leftKey = rightKey = upKey = downKey = false;
+                    leftMouse = middleMouse = rightMouse = false;
+                } else if (event.type == platform::EventType::PointerButtonDown || event.type == platform::EventType::PointerButtonUp) {
+                    const bool held = event.type == platform::EventType::PointerButtonDown;
+                    if (event.button == platform::PointerButton::Primary) leftMouse = held;
+                    else if (event.button == platform::PointerButton::Auxiliary) middleMouse = held;
+                    else if (event.button == platform::PointerButton::Secondary) rightMouse = held;
                 } else if (event.type == platform::EventType::PointerMove && cameraReady && host.window_metrics().focused) {
-                    cameraYaw += event.deltaX * 0.0025F;
-                    cameraPitch = std::clamp(cameraPitch - event.deltaY * 0.0025F, -1.55F, 1.55F);
+                    const bool alt = platform::has_modifier(event.modifiers, platform::Modifier::Alt);
+                    if (alt && leftMouse) {
+                        cameraYaw -= event.deltaX * 0.005F;
+                        cameraPitch = std::clamp(cameraPitch + event.deltaY * 0.005F, -1.55F, 1.55F);
+                        const Float3 f = cameraForward();
+                        cameraPosition = {cameraPivot.x - f.x * cameraDistance, cameraPivot.y - f.y * cameraDistance,
+                                          cameraPivot.z - f.z * cameraDistance};
+                    } else if (alt && middleMouse) {
+                        const float scale = cameraDistance * 0.002F;
+                        const float sx = std::cos(cameraYaw), sz = std::sin(cameraYaw);
+                        const Float3 up{-std::sin(cameraYaw) * std::sin(cameraPitch), std::cos(cameraPitch),
+                                        std::cos(cameraYaw) * std::sin(cameraPitch)};
+                        const Float3 delta{-event.deltaX * scale * sx + event.deltaY * scale * up.x,
+                                           event.deltaY * scale * up.y,
+                                           -event.deltaX * scale * sz + event.deltaY * scale * up.z};
+                        cameraPosition = {cameraPosition.x + delta.x, cameraPosition.y + delta.y, cameraPosition.z + delta.z};
+                        cameraPivot = {cameraPivot.x + delta.x, cameraPivot.y + delta.y, cameraPivot.z + delta.z};
+                    } else if (alt && rightMouse) {
+                        cameraDistance = std::clamp(cameraDistance * std::exp(event.deltaX * 0.01F), 0.05F, 1000.0F);
+                        const Float3 f = cameraForward();
+                        cameraPosition = {cameraPivot.x - f.x * cameraDistance, cameraPivot.y - f.y * cameraDistance,
+                                          cameraPivot.z - f.z * cameraDistance};
+                    } else if (rightMouse && !alt) {
+                        cameraYaw += event.deltaX * 0.0025F;
+                        cameraPitch = std::clamp(cameraPitch - event.deltaY * 0.0025F, -1.55F, 1.55F);
+                    }
+                } else if (event.type == platform::EventType::PointerWheel && cameraReady) {
+                    cameraDistance = std::clamp(cameraDistance * std::exp(-event.wheelY * 0.12F), 0.05F, 1000.0F);
+                    const Float3 f = cameraForward();
+                    cameraPosition = {cameraPivot.x - f.x * cameraDistance, cameraPivot.y - f.y * cameraDistance,
+                                      cameraPivot.z - f.z * cameraDistance};
                 } else if (event.type == platform::EventType::KeyDown || event.type == platform::EventType::KeyUp) {
                     const bool held = event.type == platform::EventType::KeyDown;
                     if (event.key == "w") forwardKey = held; else if (event.key == "s") backKey = held;

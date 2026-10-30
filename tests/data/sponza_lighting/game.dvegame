@@ -1,0 +1,13 @@
+DVE_GAME 1
+name=Sponza Lighting Test
+version=0.1.0
+entryScene=scenes/main.dvoxscene.json
+startupScript=scripts/main.lua
+settings=game_settings.txt
+camera=5,2,0 -> -10,2,0
+bind.sun_left=key:q
+bind.sun_right=key:e
+bind.sun_up=key:x
+bind.sun_down=key:z
+bind.sun_reset=key:r
+bind.gi_toggle=key:g

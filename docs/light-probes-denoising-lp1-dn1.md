@@ -95,6 +95,13 @@ the existing temporal/upsampling shader behavior.
   **irradiance**, not incoming radiance; do not apply cosine convolution
   a second time when shading.
 - Probe-grid sampling reuses the same orthonormal basis as the baker.
+- `bake_irradiance_probe_grid_sh9` can run a scene-owned cubemap
+  capture callback over a regular grid, preserve per-probe confidence,
+  and commit the new SH9 coefficients only after **every capture**
+  succeeds. Missing/invalid capture never half-overwrites a valid
+  baked grid. The callback may use the CPU scene tracer or a GPU
+  cubemap capture in a future integration; no capture backend is
+  invoked automatically by the current player.
 - New `sample_irradiance_probe_grid_visible` supports a caller-owned
   line-of-sight/visibility predicate for each of up to eight surrounding
   probes. Occluded probes do **not** redistribute their weight to probes

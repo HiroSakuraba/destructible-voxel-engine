@@ -181,6 +181,17 @@ bool SheBakeSettings::validate() const noexcept {
            std::isfinite(regularization)&&regularization>=0.0F&&regularization<=1.0F;
 }
 
+std::optional<Float3> reference_ggx_environment_integral(
+    const EnvironmentCube& source, Float3 normal, Float3 viewDirection,
+    float alpha, std::uint32_t samples) {
+    if(!source.validate() || !direction(normal) || !direction(viewDirection) ||
+       !std::isfinite(alpha) || alpha<=0.0F || alpha>1.0F ||
+       samples<16U || samples>1000000U) return std::nullopt;
+    const Float3 n=unit(normal),v=unit(viewDirection);
+    if(she_dot(n,v)<1.0e-4F)return std::nullopt;
+    return monte_carlo_base(source,n,v,alpha,samples);
+}
+
 std::optional<Float3> evaluate_she_base_reflectance(
     const SheProbeCoefficients& probe, Float3 normal, Float3 viewDirection,
     float alpha) noexcept {

@@ -80,6 +80,16 @@ void test_constant_environment_bake() {
     environment.resolution=4U;
     environment.texels.assign(6U*4U*4U,{1.0F,0.5F,0.25F});
     CHECK(environment.validate());
+    // Independent direct GGX oracle: finite, bounded, and not selected by
+    // a SHE coefficient toggle or the split-sum BRDF prefilter.
+    const auto highSample=dve::reference_ggx_environment_integral(
+        environment,{0,1,0},{0,1,0},0.64F,2048U);
+    CHECK(highSample && std::isfinite(highSample->x));
+    CHECK(highSample->x>0.0F && highSample->y>0.0F);
+    CHECK(!dve::reference_ggx_environment_integral(
+        environment,{0,0,0},{0,1,0},0.64F,64U));
+    CHECK(!dve::reference_ggx_environment_integral(
+        environment,{0,1,0},{0,1,0},0.64F,8U));
     dve::SheBakeSettings settings;
     settings.trainingSamples=256U;
     settings.ggxSamplesPerTrainingPoint=24U;

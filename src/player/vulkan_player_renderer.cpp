@@ -705,6 +705,8 @@ public:
                               !draws_.empty() && shader_blobs::player_traced_gi_ps().size() > 0U;
         const bool giCascades = giTraced && options_.globalIllumination == PlayerGlobalIlluminationMode::RadianceCascades &&
                                 rcCascadePipeline_ && rcGatherPipeline_ && rcViews_[0];
+        // Switching GI owners must never reuse the previous split RC texture.
+        if(!giCascades)splitStaticFrameValid_=false;
         if ((aoTraced || giTraced) && !update_scene_grid(view, view.camera.position, error))
             return stage_failed("scene voxel grid", error);
         if ((aoOn || giTraced) &&
@@ -1098,6 +1100,7 @@ public:
         settings.cellMeters = options_.tracedAoCellMeters;
         settings.maximumDimension = options_.tracedAoMaximumDimension;
         const bool changed = grid_.update(gridObjects_, settings, focus);
+        if(changed){++splitGridRevision_;splitStaticFrameValid_=false;}
         if (grid_.empty()) return true;
         if (!changed && gridUploaded_) return true;
         const auto cells = grid_.cells();
@@ -1135,7 +1138,31 @@ public:
                               const render::CascadedShadowPlan& plan, bool aoOn, bool aoTraced, bool giTraced, bool giCascades,
                               std::string* error) {
         const char* experimentFlag=std::getenv("DVE_SPLIT_RC_EXPERIMENT");
-        const bool splitExperiment=experimentFlag && std::strcmp(experimentFlag,"0")!=0;
+        const bool splitExperiment=giCascades && experimentFlag && std::strcmp(experimentFlag,"0")!=0;
+        if(!splitExperiment)splitStaticFrameValid_=false;
+        const char* debugSurface=std::getenv("DVE_SPLIT_RC_SURFACE_DEBUG");
+        const bool forceDebug=debugSurface && std::strcmp(debugSurface,"0")!=0;
+        // Strict temporal reuse is limited to fully known, unchanged voxel geometry.
+        // Polygon meshes and diagnostic capture still retrace every frame.
+        std::vector<float> splitFrameKey(camera.viewProjection.begin(),camera.viewProjection.end());
+        splitFrameKey.insert(splitFrameKey.end(),{
+            camera.position.x,camera.position.y,camera.position.z,
+            environment.sunDirection.x,environment.sunDirection.y,environment.sunDirection.z,
+            environment.sunIntensity,environment.sunColor.x,environment.sunColor.y,environment.sunColor.z,
+            environment.skyColor.x,environment.skyColor.y,environment.skyColor.z,
+            environment.groundColor.x,environment.groundColor.y,environment.groundColor.z,
+            environment.globalIlluminationIntensity,environment.globalIlluminationMaxDistanceMeters,
+            environment.shadowBiasMeters,environment.shadowMaxDistanceMeters,
+            environment.shadowStrength,
+            static_cast<float>(environment.skyMode==SkyMode::Physical?1:0),
+            static_cast<float>(environment.globalIlluminationMode==GlobalIlluminationMode::Off?0:1)
+        });
+        splitFrameKey.insert(splitFrameKey.end(),skyKey_.begin(),skyKey_.end());
+        const bool reuseSplitFrame=splitExperiment && !forceDebug && splitStaticFrameValid_ &&
+            stats_.polygonInstances==0U && stats_.skippedObjects==0U && !grid_.empty() &&
+            splitFrameGridRevision_==splitGridRevision_ && splitFrameKey==splitStaticFrameKey_;
+        if(reuseSplitFrame && std::getenv("DVE_SPLIT_RC_PROFILE"))
+            std::fprintf(stderr,"[split RC profile] reused unchanged voxel frame: no probe or trace work\n");
         render::LiveEnvironmentFrameDesc prepass;
         prepass.depthTarget = depth_;
         prepass.width = width_;
@@ -1307,8 +1334,7 @@ public:
             }
         }
         if (!giTraced || giCascades) historyValid_ = false;
-        const char* debugSurface = std::getenv("DVE_SPLIT_RC_SURFACE_DEBUG");
-        const bool captureSurfaces = splitExperiment || (debugSurface && std::strcmp(debugSurface, "0") != 0);
+        const bool captureSurfaces = (splitExperiment && !reuseSplitFrame) || forceDebug;
         if (captureSurfaces) {
             if (!ensure_split_surface_debug(error)) return false;
             if (!device_->bind_compute_bind_group(commands, 0U, splitSurfaceGroup_, error) ||
@@ -1330,7 +1356,15 @@ public:
             if (giTraced && !grid_.empty()) {
                 std::vector<std::uint32_t> probeKeys, probeAssignments;
                 if (!debug_split_probes(samples, probeKeys, probeAssignments, error) || !debug_split_trace(samples, environment, !splitExperiment, error)) return false;
-                if(splitExperiment && !debug_split_pipeline(samples,probeKeys,probeAssignments,environment,error))return false;
+                if(splitExperiment) {
+                    if(!debug_split_pipeline(samples,probeKeys,probeAssignments,environment,error)) {
+                        splitStaticFrameValid_=false;
+                        return false;
+                    }
+                    splitStaticFrameValid_=stats_.polygonInstances==0U && stats_.skippedObjects==0U;
+                    splitStaticFrameKey_=splitFrameKey;
+                    splitFrameGridRevision_=splitGridRevision_;
+                }
             }
         }
         return true;
@@ -1758,6 +1792,8 @@ private:
         if (giRaw_) (void)device_->destroy_texture(giRaw_, &ignored);
         giRawView_ = {}; giRaw_ = {};
         historyValid_ = false;
+        splitStaticFrameValid_ = false;
+        splitProbeLayoutCache_.invalidate();
         for (rhi::BindGroupHandle& g : rcGroups_) if (g) { (void)device_->destroy_bind_group(g, &ignored); g = {}; }
         for (std::size_t i = 0; i < kRcLevels; ++i) {
             if (rcViews_[i]) (void)device_->destroy_texture_view(rcViews_[i], &ignored);
@@ -1802,6 +1838,10 @@ private:
     rhi::BindGroupLayoutHandle splitProbeLayout_{};
     rhi::ComputePipelineHandle splitProbePipeline_{};
     SplitRcProbeLayoutCache splitProbeLayoutCache_{};
+    // Cached full-resolution indirect diffuse output, valid only for exact static repeats.
+    bool splitStaticFrameValid_{};
+    std::uint64_t splitGridRevision_{}, splitFrameGridRevision_{};
+    std::vector<float> splitStaticFrameKey_;
     rhi::BindGroupLayoutHandle splitTraceLayout_{};
     rhi::ComputePipelineHandle splitTracePipeline_{};
     rhi::BindGroupLayoutHandle splitSurfaceLayout_{};

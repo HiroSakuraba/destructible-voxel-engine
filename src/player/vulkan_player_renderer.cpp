@@ -24,6 +24,7 @@
 #include "dve/render/cascaded_shadow_atlas.hpp"
 #include "dve/render/cascaded_shadow_map.hpp"
 #include "dve/render/environment_lighting_gpu.hpp"
+#include "dve/render/local_light_probes_gpu.hpp"
 #include "dve/render/live_environment_renderer.hpp"
 #include "dve/render/mesh_rhi_mirror.hpp"
 #include "dve/render/scene_voxel_grid.hpp"
@@ -270,6 +271,9 @@ public:
         if (presentConstants_) (void)device_->destroy_buffer(presentConstants_, &ignored);
         if (triangleIndices_) (void)device_->destroy_buffer(triangleIndices_, &ignored);
         if (live_.valid()) (void)render::destroy_live_environment_renderer(*device_, live_, &ignored);
+        for (auto& capture : localReflectionGpu_)
+            if(capture.texture)(void)render::destroy_local_reflection_capture(
+                *device_,capture,&ignored);
         if (lighting_.valid()) (void)render::destroy_environment_lighting(*device_, lighting_, &ignored);
         if (atlas_.valid()) (void)render::destroy_cascaded_shadow_atlas(*device_, atlas_, &ignored);
         if (swapchain_) (void)device_->destroy_swapchain(swapchain_, &ignored);
@@ -719,8 +723,14 @@ public:
             return stage_failed("ambient occlusion / indirect light", error);
 
         render::LiveEnvironmentFrameDesc frame;
+        if(!update_local_probe_resources(view,error))
+            return stage_failed("local probe upload",error);
         frame.ambientOcclusion = aoOn ? aoView_ : rhi::TextureViewHandle{};
         frame.indirectLight = giTraced ? giView_ : rhi::TextureViewHandle{};
+        frame.localProbeWords = localProbeWords_;
+        frame.localProbeRevision = localProbeGeneration_;
+        for(std::size_t p=0;p<2;++p)
+            frame.localReflectionCubes[p]=localReflectionGpu_[p].view;
         frame.colorTarget = hdr_;
         frame.depthTarget = depth_;
         frame.width = width_;
@@ -1439,6 +1449,63 @@ private:
         return false;
     }
 
+    bool update_local_probe_resources(const PlayerRenderView& view,
+                                      std::string* error) {
+        const bool unchanged=view.localProbeRevision==probeSourceRevision_ &&
+            view.localIrradianceGrid==probeSourceGrid_ &&
+            view.localReflectionVolumes.data()==probeSourceVolumes_ &&
+            view.localReflectionCaptures.data()==probeSourceCaptures_;
+        if(unchanged)return true;
+        // Cubemap views can be referenced by multiple queued frames: retire
+        // their work before swapping. Nothing is uploaded on steady frames.
+        device_->wait_idle();
+        for(auto& existing:localReflectionGpu_)
+            if(existing.texture) {
+                std::string ignored;
+                (void)render::destroy_local_reflection_capture(
+                    *device_,existing,&ignored);
+            }
+        std::vector<ReflectionProbe> selected;
+        std::vector<float> maximumMip;
+        // Restrict GPU residency to the two highest-priority captured volumes.
+        // Region influence / per-pixel priority is evaluated in HLSL.
+        std::vector<std::pair<ReflectionProbe,const IblBakeResult*>> available;
+        for(const auto& volume:view.localReflectionVolumes) {
+            if(!volume.validate())continue;
+            for(const auto& resident:view.localReflectionCaptures)
+                if(resident.id==volume.id && resident.baked) {
+                    available.push_back({volume,resident.baked});
+                    break;
+                }
+        }
+        std::sort(available.begin(),available.end(),[](const auto& a,const auto& b) {
+            if(a.first.priority!=b.first.priority)
+                return a.first.priority>b.first.priority;
+            return a.first.id<b.first.id;
+        });
+        for(const auto& [volume,baked]:available) {
+            if(selected.size()>=2U)break;
+            render::LocalReflectionCaptureGpu temporary;
+            if(!render::upload_local_reflection_capture(
+                    *device_,*baked,temporary,error))return false;
+            localReflectionGpu_[selected.size()]=temporary;
+            selected.push_back(volume);
+            maximumMip.push_back(static_cast<float>(temporary.mipLevels-1U));
+        }
+        const auto packed=render::pack_local_probe_gpu(
+            view.localIrradianceGrid,selected,maximumMip);
+        // No local captures and no valid diffuse grid: send zero header
+        // so the pre-existing sky/environment path remains bit-identical.
+        localProbeWords_=(packed.irradiance_enabled()||!selected.empty())
+            ? packed.words:std::vector<render::ProbeFloat4>{};
+        probeSourceRevision_=view.localProbeRevision;
+        probeSourceGrid_=view.localIrradianceGrid;
+        probeSourceVolumes_=view.localReflectionVolumes.data();
+        probeSourceCaptures_=view.localReflectionCaptures.data();
+        ++localProbeGeneration_;
+        return true;
+    }
+
     bool create_live(std::string* error) {
         render::LiveEnvironmentShaderBytecode bytecode;
         bytecode.materialVertex = copy_bytes(shader_blobs::live_ibl_material_vs());
@@ -1923,6 +1990,13 @@ private:
     rhi::GraphicsPipelineHandle presentPipelineOffscreen_{};
     rhi::GraphicsPipelineHandle presentPipelineSwapchain_{};
     rhi::FenceHandle lastFence_{};
+    std::array<render::LocalReflectionCaptureGpu,2> localReflectionGpu_{};
+    std::vector<render::ProbeFloat4> localProbeWords_;
+    std::uint64_t localProbeGeneration_{};
+    std::uint64_t probeSourceRevision_{~std::uint64_t{0}};
+    const IrradianceProbeGrid* probeSourceGrid_{};
+    const ReflectionProbe* probeSourceVolumes_{};
+    const ReflectionProbeRadiance* probeSourceCaptures_{};
     render::EnvironmentLightingGpuResources lighting_{};
     render::CascadedShadowAtlasResources atlas_{};
     render::LiveEnvironmentRendererResources live_{};

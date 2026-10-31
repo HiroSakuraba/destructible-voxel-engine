@@ -171,6 +171,9 @@ void test_shader_source_contracts() {
     const std::string playerTemporal = read_text(root / "shaders/player_gi_temporal_ps.hlsl");
     const std::string playerUpsample = read_text(root / "shaders/player_gi_upsample_ps.hlsl");
     const std::string playerRenderer = read_text(root / "src/player/vulkan_player_renderer.cpp");
+    const std::string localProbes = read_text(root / "shaders/common/local_light_probes.hlsli");
+    const std::string liveIbl = read_text(root / "shaders/live_ibl_material_ps.hlsl");
+    const std::string liveRenderer = read_text(root / "src/render/live_environment_renderer.cpp");
 
     CHECK(environment.find("float gMetersPerVoxel") != std::string::npos);
     CHECK(environment.find("MetersToVoxelUnits") != std::string::npos);
@@ -202,6 +205,17 @@ void test_shader_source_contracts() {
     CHECK(playerUpsample.find("gGiTemporal.y>=1.5F") != std::string::npos);
     CHECK(playerUpsample.find("SurfaceAtPixel(pixel,centrePosition,centreNormal)") != std::string::npos);
     CHECK(playerUpsample.find("planeDifference>planeSigma*3.0F") != std::string::npos);
+    CHECK(localProbes.find("DVE_LIVE_BIND(3,0)") != std::string::npos);
+    CHECK(localProbes.find("DVE_LIVE_IMAGE(4,0)") != std::string::npos);
+    CHECK(localProbes.find("DVE_LIVE_IMAGE(5,0)") != std::string::npos);
+    CHECK(localProbes.find("LocalSH9Irradiance(") != std::string::npos);
+    CHECK(localProbes.find("LocalSpecularRadiance(") != std::string::npos);
+    CHECK(localProbes.find("gLocalReflectionSampler0") != std::string::npos);
+    CHECK(liveIbl.find("probeIrradiance-skyIrradiance*diffuseCoverage") != std::string::npos);
+    CHECK(liveIbl.find("(1.0F-saturate(indirectDiffuse.a))") != std::string::npos);
+    CHECK(liveRenderer.find("kLocalProbeGpuCapacity") != std::string::npos);
+    CHECK(liveRenderer.find("frame.localReflectionCubes[0]") != std::string::npos);
+    CHECK(playerRenderer.find("update_local_probe_resources(view,error)") != std::string::npos);
 }
 
 } // namespace

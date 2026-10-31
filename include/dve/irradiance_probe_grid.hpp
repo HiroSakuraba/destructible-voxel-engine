@@ -107,8 +107,14 @@ struct IrradianceProbeLookup {
     float coverage{};  // 0..1; residual weight belongs to the fallback sky
 };
 
-[[nodiscard]] inline IrradianceProbeLookup sample_irradiance_probe_grid(
-    const IrradianceProbeGrid& grid, Float3 position, Float3 normal) noexcept {
+// Visibility callback receives probe centre and receiver world position.
+// It may raytrace a static scene or query a precomputed visibility atlas.
+// Returning false discards the probe without re-normalizing its weight;
+// rejected contributions must become fallback sky, not bleed through walls.
+template<typename Visibility>
+[[nodiscard]] inline IrradianceProbeLookup sample_irradiance_probe_grid_visible(
+    const IrradianceProbeGrid& grid, Float3 position, Float3 normal,
+    Visibility&& visible) {
     IrradianceProbeLookup out{};
     // The full validate() is a bake/load operation; never walk the whole
     // probe array on every shading query.
@@ -146,6 +152,11 @@ struct IrradianceProbeLookup {
         const auto at=[&](int axis,bool upper){return upper?hi[axis]:lo[axis];};
         const std::size_t index=at(0,ix!=0)+strideY*at(1,iy!=0)+strideZ*at(2,iz!=0);
         const auto& probe=grid.probes[index];
+        const Float3 probePosition{
+            grid.origin.x+grid.cellSize.x*static_cast<float>(at(0,ix!=0)),
+            grid.origin.y+grid.cellSize.y*static_cast<float>(at(1,iy!=0)),
+            grid.origin.z+grid.cellSize.z*static_cast<float>(at(2,iz!=0))};
+        if(!visible(probePosition,position))continue;
         if(!std::isfinite(probe.confidence)||
            probe.confidence<=0.0F||probe.confidence>1.0F)continue;
         const float weight=geometric*probe.confidence;
@@ -164,5 +175,10 @@ struct IrradianceProbeLookup {
     }
     out.coverage=std::clamp(out.coverage,0.0F,1.0F);
     return out; // energy-weighted: add (1 - coverage) * sky irradiance
+}
+[[nodiscard]] inline IrradianceProbeLookup sample_irradiance_probe_grid(
+    const IrradianceProbeGrid& grid, Float3 position, Float3 normal) noexcept {
+    return sample_irradiance_probe_grid_visible(grid,position,normal,
+        [](Float3,Float3) noexcept {return true;});
 }
 } // namespace dve

@@ -93,6 +93,36 @@ void test_irradiance_probe_sh9_bake(){
     CHECK(rejected);
 }
 
+void test_probe_grid_capture_driver(){
+    using namespace dve;
+    IrradianceProbeGrid grid;
+    grid.dimensions={2,1,1};
+    grid.probes.resize(2);
+    grid.probes[1].confidence=.25F;
+    int calls=0;
+    const auto source=[&](Float3 position){
+        ++calls;
+        const float strength=position.x<.5F?1.0F:2.0F;
+        return EnvironmentCube{8U,
+            std::vector<Float3>(6ULL*8U*8U,{strength,0,0})};
+    };
+    CHECK(bake_irradiance_probe_grid_sh9(grid,source));
+    CHECK(calls==2);
+    CHECK(close(grid.probes[0].confidence,1.0F));
+    CHECK(close(grid.probes[1].confidence,.25F));
+    const auto left=sample_irradiance_probe_grid(grid,{0,0,0},{0,1,0});
+    const auto right=sample_irradiance_probe_grid(grid,{1,0,0},{0,1,0});
+    CHECK(close(left.irradiance.x,3.14159265F,.08F));
+    CHECK(close(right.irradiance.x,2.0F*.25F*3.14159265F,.08F));
+    const auto old=grid.probes[0].sh[0].x;
+    const auto failCapture=[&](Float3 p){
+        if(p.x>.5F)return EnvironmentCube{};
+        return EnvironmentCube{8U,std::vector<Float3>(6ULL*8U*8U,{99,0,0})};
+    };
+    CHECK(!bake_irradiance_probe_grid_sh9(grid,failCapture));
+    CHECK(close(grid.probes[0].sh[0].x,old,1.0e-5F));
+}
+
 void test_visibility_gated_irradiance(){
     using namespace dve;
     IrradianceProbeGrid grid;
@@ -204,4 +234,4 @@ void test_bounded_local_probe_mixing(){
 }
 }
 
-int main(){try{test_cube_coordinates();test_constant_environment_bake();test_equirectangular_and_probes();test_bounded_local_probe_mixing();test_irradiance_probe_sh9_bake();test_visibility_gated_irradiance();test_irradiance_probe_grid();std::cout<<"dve_environment_lighting_tests: PASS\n";return 0;}catch(const std::exception& e){std::cerr<<"dve_environment_lighting_tests: FAIL: "<<e.what()<<'\n';return 1;}}
+int main(){try{test_cube_coordinates();test_constant_environment_bake();test_equirectangular_and_probes();test_bounded_local_probe_mixing();test_irradiance_probe_sh9_bake();test_probe_grid_capture_driver();test_visibility_gated_irradiance();test_irradiance_probe_grid();std::cout<<"dve_environment_lighting_tests: PASS\n";return 0;}catch(const std::exception& e){std::cerr<<"dve_environment_lighting_tests: FAIL: "<<e.what()<<'\n';return 1;}}

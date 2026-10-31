@@ -136,7 +136,7 @@ float3 EvaluateLiveImageBasedLighting(float3 normal,float3 viewDirection,
 
     float specularCoverage;
     const float3 localSpec=LocalSpecularRadiance(
-        worldPosition,R,roughness,gSpecularSampler,specularCoverage);
+        worldPosition,R,roughness,specularCoverage);
     if(gSheSpecularCoefficients[52u]==0x53484531u &&
        specularCoverage<=1.0e-5F &&
        saturate(roughness)*saturate(roughness)>=DVE_SHE_MIN_ALPHA &&

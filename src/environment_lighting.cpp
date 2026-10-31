@@ -633,6 +633,54 @@ std::vector<ReflectionProbeWeight> select_reflection_probes(
     return output;
 }
 
+ReflectionProbeMix select_reflection_probe_mix(
+    const std::vector<ReflectionProbe>& probes, Float3 position,
+    std::uint32_t maximumProbeCount) {
+    struct Candidate {
+        ReflectionProbeId id{};
+        float influence{};
+        std::int32_t priority{};
+    };
+    std::vector<Candidate> candidates;
+    if(maximumProbeCount==0U || !finite3(position))return {};
+    for(const auto& probe:probes){
+        if(!probe.validate())continue;
+        const Float3 d{probe.halfExtents.x-std::abs(position.x-probe.position.x),
+                       probe.halfExtents.y-std::abs(position.y-probe.position.y),
+                       probe.halfExtents.z-std::abs(position.z-probe.position.z)};
+        // Unlike the legacy selection routine, never sample outside the local
+        // box: a neighbouring room receives the sky/environment fallback.
+        const float inside=std::min({d.x,d.y,d.z});
+        if(inside<=0.0F)continue;
+        const float edgeFade=probe.blendDistance==0.0F ? 1.0F :
+            std::clamp(inside/probe.blendDistance,0.0F,1.0F);
+        const float influence=probe.intensity*edgeFade;
+        if(std::isfinite(influence) && influence>0.0F)
+            candidates.push_back({probe.id,influence,probe.priority});
+    }
+    std::sort(candidates.begin(),candidates.end(),[](const Candidate& a,const Candidate& b){
+        if(a.priority!=b.priority)return a.priority>b.priority;
+        if(a.influence!=b.influence)return a.influence>b.influence;
+        return a.id<b.id;
+    });
+    ReflectionProbeMix mix{};
+    if(candidates.empty())return mix;
+    // Higher priority zones replace lower priority zones. Equal-priority
+    // overlapping captures blend; the remaining influence returns to sky.
+    const std::int32_t highest=candidates.front().priority;
+    double total=0.0;
+    for(const auto& c:candidates){
+        if(c.priority!=highest||mix.probes.size()>=maximumProbeCount)break;
+        mix.probes.push_back({c.id,c.influence});
+        total+=c.influence;
+    }
+    const float norm=static_cast<float>(std::max(1.0,total));
+    float occupied=0.0F;
+    for(auto& weight:mix.probes){weight.weight/=norm;occupied+=weight.weight;}
+    mix.environmentWeight=std::clamp(1.0F-occupied,0.0F,1.0F);
+    return mix;
+}
+
 Float3 box_project_reflection_direction(const ReflectionProbe& probe, Float3 worldPosition,
                                         Float3 reflectionDirection) noexcept {
     reflectionDirection = normalize3(reflectionDirection, {0.0F, 0.0F, 1.0F});
@@ -654,4 +702,41 @@ Float3 box_project_reflection_direction(const ReflectionProbe& probe, Float3 wor
                             reflectionDirection)
                : reflectionDirection;
 }
+Float3 sample_reflection_probe_radiance(
+    const ReflectionProbeMix& mix,
+    std::span<const ReflectionProbe> probes,
+    std::span<const ReflectionProbeRadiance> resident,
+    const IblBakeResult& environment,
+    Float3 position, Float3 reflectionDirection, float roughness) noexcept {
+    if(!finite3(position)||!finite3(reflectionDirection)||
+       dot3(reflectionDirection,reflectionDirection)<1.0e-12F||
+       !std::isfinite(roughness))return {};
+    const Float3 dir=normalize3(reflectionDirection,{0,0,1});
+    const float r=std::clamp(roughness,0.0F,1.0F);
+    const auto sample=[&](const IblBakeResult& ibl,Float3 direction)->Float3{
+        if(ibl.specularPrefilter.levels.empty())return {};
+        const float lod=r*static_cast<float>(ibl.specularPrefilter.levels.size()-1U);
+        return sample_environment_cube_lod(ibl.specularPrefilter,direction,lod);
+    };
+    // Missing resident captures return their entire share to global IBL.
+    // This is deliberately *specular radiance only*: the normal material
+    // BRDF applies Fresnel and Smith attenuation once downstream.
+    float environmentWeight=std::clamp(mix.environmentWeight,0.0F,1.0F);
+    Float3 result{};
+    for(const auto& entry:mix.probes){
+        if(!std::isfinite(entry.weight)||entry.weight<=0.0F)continue;
+        const ReflectionProbe* volume=nullptr;
+        const IblBakeResult* image=nullptr;
+        for(const auto& probe:probes)
+            if(probe.id==entry.id && probe.validate()){volume=&probe;break;}
+        for(const auto& loaded:resident)
+            if(loaded.id==entry.id && loaded.baked && loaded.baked->validate()){image=loaded.baked;break;}
+        if(!volume||!image){environmentWeight+=entry.weight;continue;}
+        const Float3 corrected=box_project_reflection_direction(*volume,position,dir);
+        const Float3 radiance=sample(*image,corrected);
+        result=vadd(result,vmul(radiance,entry.weight));
+    }
+    return vadd(result,vmul(sample(environment,dir),environmentWeight));
+}
+
 } // namespace dve

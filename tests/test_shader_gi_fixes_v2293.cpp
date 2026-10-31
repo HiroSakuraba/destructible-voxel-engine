@@ -168,6 +168,9 @@ void test_shader_source_contracts() {
     const std::string sampling = read_text(root / "shaders/common/random_sampling.hlsli");
     const std::string temporal = read_text(root / "shaders/temporal_lighting_accumulate.hlsl");
     const std::string denoise = read_text(root / "shaders/spatial_lighting_denoise.hlsl");
+    const std::string playerTemporal = read_text(root / "shaders/player_gi_temporal_ps.hlsl");
+    const std::string playerUpsample = read_text(root / "shaders/player_gi_upsample_ps.hlsl");
+    const std::string playerRenderer = read_text(root / "src/player/vulkan_player_renderer.cpp");
 
     CHECK(environment.find("float gMetersPerVoxel") != std::string::npos);
     CHECK(environment.find("MetersToVoxelUnits") != std::string::npos);
@@ -187,6 +190,18 @@ void test_shader_source_contracts() {
     CHECK(temporal.find("dot(currentNormal, historyNormal)") != std::string::npos);
     CHECK(denoise.find("depthWeight") != std::string::npos);
     CHECK(denoise.find("normalWeight") != std::string::npos);
+    // DN-1 is opt-in, uses the existing GI constants ABI, and explicitly
+    // rejects cross-depth temporal history instead of blending ghost light.
+    CHECK(playerRenderer.find("DVE_GI_DENOISER") != std::string::npos);
+    CHECK(playerTemporal.find("gGiTemporal.y < 0.5F") != std::string::npos);
+    CHECK(playerTemporal.find("float3 lo=raw.rgb,hi=raw.rgb") != std::string::npos);
+    CHECK(playerTemporal.find("max(.03F,.04F*distanceToCamera)") != std::string::npos);
+    CHECK(playerTemporal.find("dot(centreNormal,n)<.85F") != std::string::npos);
+    CHECK(playerTemporal.find("sumLum2/count-mean*mean") != std::string::npos);
+    CHECK(playerTemporal.find("motion*4.0F") != std::string::npos);
+    CHECK(playerUpsample.find("gGiTemporal.y>=1.5F") != std::string::npos);
+    CHECK(playerUpsample.find("SurfaceAtPixel(pixel,centrePosition,centreNormal)") != std::string::npos);
+    CHECK(playerUpsample.find("planeDifference>planeSigma*3.0F") != std::string::npos);
 }
 
 } // namespace

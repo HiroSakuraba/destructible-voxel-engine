@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -117,6 +118,34 @@ struct ReflectionProbeWeight {
 [[nodiscard]] std::vector<ReflectionProbeWeight> select_reflection_probes(
     const std::vector<ReflectionProbe>& probes, Float3 worldPosition,
     std::uint32_t maximumProbeCount = 4U);
+
+// Local specular reflection mixing, separate from diffuse GI. The old
+// select_reflection_probes API returns normalized probe-only weights. This
+// new API reserves the unoccupied influence for a global/sky IBL fallback.
+// A probe influences positions INSIDE its axis-aligned box, fades inward
+// from the box faces, and never extends into unrelated adjacent rooms.
+struct ReflectionProbeMix {
+    std::vector<ReflectionProbeWeight> probes;
+    float environmentWeight{1.0F};
+};
+[[nodiscard]] ReflectionProbeMix select_reflection_probe_mix(
+    const std::vector<ReflectionProbe>& probes, Float3 worldPosition,
+    std::uint32_t maximumProbeCount = 2U);
+
+// A probe's already-baked cubemap (including roughness mips). All entries
+// must outlive the call. Unlike diffuse GI, this samples specular *radiance*
+// before the material BRDF and avoids double-counting environment irradiance.
+struct ReflectionProbeRadiance {
+    ReflectionProbeId id{};
+    const IblBakeResult* baked{};
+};
+[[nodiscard]] Float3 sample_reflection_probe_radiance(
+    const ReflectionProbeMix& mix,
+    std::span<const ReflectionProbe> probes,
+    std::span<const ReflectionProbeRadiance> resident,
+    const IblBakeResult& globalEnvironment,
+    Float3 worldPosition, Float3 reflectionDirection, float roughness) noexcept;
+
 [[nodiscard]] Float3 box_project_reflection_direction(const ReflectionProbe& probe,
                                                        Float3 worldPosition,
                                                        Float3 reflectionDirection) noexcept;

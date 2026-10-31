@@ -48,6 +48,59 @@ void test_equirectangular_and_probes(){
     const auto weights=select_reflection_probes(probes,{0,0,0},2U);CHECK(weights.size()==2U);CHECK(weights.front().id==2U);CHECK(close(weights[0].weight+weights[1].weight,1.0F,1.0e-5F));
     const Float3 projected=box_project_reflection_direction(probes.front(),{0,0,0},{1,0.2F,0});CHECK(projected.x>0.8F);
 }
+
+void test_bounded_local_probe_mixing(){
+    using namespace dve;
+    std::vector<ReflectionProbe> zones{
+        {1,{0,0,0},{2,2,2},1,1,0,true},
+        {2,{0.5F,0,0},{2,2,2},1,1,0,true},
+        {3,{0,0,0},{1,1,1},0.5F,1,2,true}
+    };
+    const auto in=select_reflection_probe_mix(zones,{0,0,0});
+    CHECK(in.probes.size()==1U && in.probes[0].id==3);
+    CHECK(close(in.probes[0].weight,1.0F,1.0e-5F));
+    CHECK(close(in.environmentWeight,0.0F,1.0e-5F));
+    // Removing the high-priority capture blends two equally ranked zones.
+    zones.pop_back();
+    const auto shared=select_reflection_probe_mix(zones,{0,0,0});
+    CHECK(shared.probes.size()==2U);
+    CHECK(close(shared.probes[0].weight+shared.probes[1].weight+
+                shared.environmentWeight,1.0F,1.0e-5F));
+    const auto faded=select_reflection_probe_mix(zones,{1.95F,0,0});
+    CHECK(faded.probes.size()==2U || faded.probes.size()==1U);
+    CHECK(faded.environmentWeight>0.01F);
+    const auto outside=select_reflection_probe_mix(zones,{3.0F,0,0});
+    CHECK(outside.probes.empty() && close(outside.environmentWeight,1.0F));
+    CHECK(select_reflection_probe_mix(zones,{0,0,0},0U).probes.empty());
+    std::vector<ReflectionProbe> invalid{{4,{0,0,0},{-1,1,1},1,1,10,true}};
+    CHECK(select_reflection_probe_mix(invalid,{0,0,0}).probes.empty());
+
+    // Radiance mixing uses local specular cubemaps and the sky remainder,
+    // but never adds local diffuse irradiation to traced diffuse GI.
+    IblBakeSettings cfg;cfg.irradianceResolution=4;cfg.specularResolution=8;
+    cfg.specularMipLevels=4;cfg.sampleCount=32;cfg.brdfResolution=8;
+    const auto make=[&](float v){
+        EnvironmentCube src{8U,std::vector<Float3>(6ULL*8U*8U,{v,v,v})};
+        return bake_image_based_lighting(src,cfg);
+    };
+    const auto environment=make(.25F), red=make(1.0F), blue=make(2.0F);
+    const std::vector<ReflectionProbeRadiance> resident{{1,&red},{2,&blue}};
+    const auto shade=[&](const ReflectionProbeMix& mix,
+                         std::span<const ReflectionProbeRadiance> entries){
+        return sample_reflection_probe_radiance(mix,zones,entries,environment,
+                                               {0,0,0},{1,0,0},.75F);
+    };
+    const Float3 x=shade(shared,resident);
+    CHECK(x.x>.25F && x.x<2.01F);
+    const Float3 sky=shade(outside,resident);
+    CHECK(close(sky.x,.25F,.04F));
+    const std::vector<ReflectionProbeRadiance> onlyOne{{1,&red}};
+    const Float3 missing=shade(shared,onlyOne);
+    CHECK(missing.x<x.x && missing.x>.24F);
+    const Float3 zero=sample_reflection_probe_radiance(shared,zones,resident,environment,
+                                                       {0,0,0},{0,0,0},.75F);
+    CHECK(close(zero.x,0.0F,1.0e-6F));
+}
 }
 
-int main(){try{test_cube_coordinates();test_constant_environment_bake();test_equirectangular_and_probes();std::cout<<"dve_environment_lighting_tests: PASS\n";return 0;}catch(const std::exception& e){std::cerr<<"dve_environment_lighting_tests: FAIL: "<<e.what()<<'\n';return 1;}}
+int main(){try{test_cube_coordinates();test_constant_environment_bake();test_equirectangular_and_probes();test_bounded_local_probe_mixing();std::cout<<"dve_environment_lighting_tests: PASS\n";return 0;}catch(const std::exception& e){std::cerr<<"dve_environment_lighting_tests: FAIL: "<<e.what()<<'\n';return 1;}}

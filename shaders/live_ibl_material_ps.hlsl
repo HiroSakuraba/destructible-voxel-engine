@@ -117,7 +117,7 @@ float3 EvaluateLiveImageBasedLighting(float3 normal, float3 viewDirection,
         const float3 f0=lerp(dielectricF0,max(baseColor,0.0F.xxx),saturate(metallic));
         float3 irradiance=gDiffuseIrradiance.SampleLevel(gEnvironmentSampler,
             RotateEnvironmentDirectionY(N,gEnvironmentParameters.x),0.0F).rgb;
-        irradiance=lerp(irradiance,indirectDiffuse.rgb*kPi,saturate(indirectDiffuse.a));
+        irradiance=ResolveDiffuseIndirectIrradiance(irradiance,indirectDiffuse);
         float3 diffuse=irradiance*max(baseColor,0.0F.xxx)*
                        ((1.0F-saturate(metallic))/kPi);
         const float2 brdf=gEnvironmentBrdfLut.SampleLevel(
@@ -136,7 +136,7 @@ float3 EvaluateLiveImageBasedLighting(float3 normal, float3 viewDirection,
         const float ao=saturate(ambientOcclusion);
         const float specularOcclusion=saturate(
             pow(ndv+ao,exp2(-16.0F*saturate(roughness)-1.0F))-1.0F+ao);
-        return diffuse*lerp(ao,1.0F,saturate(indirectDiffuse.a))+
+        return diffuse*DiffuseIndirectOcclusion(ao,indirectDiffuse.a)+
                sheSpecular*specularOcclusion;
     }
     return EvaluateImageBasedLightingWithIndirect(

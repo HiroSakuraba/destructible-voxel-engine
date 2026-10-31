@@ -196,6 +196,9 @@ void test_shader_source_contracts() {
     CHECK(playerTemporal.find("gGiTemporal.y < 0.5F") != std::string::npos);
     CHECK(playerTemporal.find("float3 lo=raw.rgb,hi=raw.rgb") != std::string::npos);
     CHECK(playerTemporal.find("max(.03F,.04F*distanceToCamera)") != std::string::npos);
+    CHECK(playerTemporal.find("dot(centreNormal,n)<.85F") != std::string::npos);
+    CHECK(playerTemporal.find("sumLum2/count-mean*mean") != std::string::npos);
+    CHECK(playerTemporal.find("motion*4.0F") != std::string::npos);
     CHECK(playerUpsample.find("gGiTemporal.y>=1.5F") != std::string::npos);
     CHECK(playerUpsample.find("SurfaceAtPixel(pixel,centrePosition,centreNormal)") != std::string::npos);
     CHECK(playerUpsample.find("planeDifference>planeSigma*3.0F") != std::string::npos);

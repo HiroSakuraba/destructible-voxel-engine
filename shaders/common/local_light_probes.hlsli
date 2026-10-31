@@ -5,7 +5,9 @@
 #include "live_bindings.hlsli"
 DVE_LIVE_BIND(3,0) StructuredBuffer<float4> gLocalProbeData : register(t44);
 DVE_LIVE_IMAGE(4,0) TextureCube<float4> gLocalReflection0 : register(t45);
+DVE_LIVE_IMAGE(4,0) SamplerState gLocalReflectionSampler0 : register(s15);
 DVE_LIVE_IMAGE(5,0) TextureCube<float4> gLocalReflection1 : register(t46);
+DVE_LIVE_IMAGE(5,0) SamplerState gLocalReflectionSampler1 : register(s16);
 
 static const uint kLocalProbeHeader=4u;
 static const uint kLocalProbeStride=10u;
@@ -86,8 +88,7 @@ float3 LocalBoxCorrectedDirection(float3 worldPosition,float3 reflected,
 // Returns locally captured *radiance* and the fraction of specular lighting
 // it owns. The environment is mixed by the caller using (1 - coverage).
 float3 LocalSpecularRadiance(float3 worldPosition,float3 reflectionDirection,
-                            float roughness,SamplerState cubeSampler,
-                            out float coverage) {
+                            float roughness,out float coverage) {
     coverage=0.0F;
     const float4 header=gLocalProbeData[0];
     const uint3 dims=header.w>.5F?uint3(header.xyz):uint3(0u,0u,0u);
@@ -129,8 +130,8 @@ float3 LocalSpecularRadiance(float3 worldPosition,float3 reflectionDirection,
                                                            position.xyz,extents.xyz);
         const float lod=saturate(roughness)*params.y;
         result+=w*(k==0u?
-            gLocalReflection0.SampleLevel(cubeSampler,corrected,lod).rgb:
-            gLocalReflection1.SampleLevel(cubeSampler,corrected,lod).rgb);
+            gLocalReflection0.SampleLevel(gLocalReflectionSampler0,corrected,lod).rgb:
+            gLocalReflection1.SampleLevel(gLocalReflectionSampler1,corrected,lod).rgb);
         coverage+=w;
     }
     coverage=saturate(coverage);

@@ -48,7 +48,16 @@ struct IrradianceProbeLookup {
 [[nodiscard]] inline IrradianceProbeLookup sample_irradiance_probe_grid(
     const IrradianceProbeGrid& grid, Float3 position, Float3 normal) noexcept {
     IrradianceProbeLookup out{};
-    if(!grid.validate()||!std::isfinite(position.x)||!std::isfinite(position.y)||
+    // The full validate() is a bake/load operation; never walk the whole
+    // probe array on every shading query.
+    const auto dims=grid.dimensions;
+    const std::uint64_t count=static_cast<std::uint64_t>(dims[0])*dims[1]*dims[2];
+    if(dims[0]==0U||dims[1]==0U||dims[2]==0U||
+       dims[0]>256U||dims[1]>256U||dims[2]>256U||
+       count>262144U||count!=grid.probes.size()||
+       !(grid.cellSize.x>0&&grid.cellSize.y>0&&grid.cellSize.z>0)||
+       !std::isfinite(grid.cellSize.x)||!std::isfinite(grid.cellSize.y)||!std::isfinite(grid.cellSize.z)||
+       !std::isfinite(position.x)||!std::isfinite(position.y)||
        !std::isfinite(position.z)||!std::isfinite(normal.x)||!std::isfinite(normal.y)||
        !std::isfinite(normal.z))return out;
     const float n2=normal.x*normal.x+normal.y*normal.y+normal.z*normal.z;
@@ -83,6 +92,8 @@ struct IrradianceProbeLookup {
         const auto at=[&](int axis,bool upper){return upper?hi[axis]:lo[axis];};
         const std::size_t index=at(0,ix!=0)+strideY*at(1,iy!=0)+strideZ*at(2,iz!=0);
         const auto& probe=grid.probes[index];
+        if(!std::isfinite(probe.confidence)||
+           probe.confidence<=0.0F||probe.confidence>1.0F)continue;
         const float weight=geometric*probe.confidence;
         if(weight<=0)continue;
         Float3 irradiance{};

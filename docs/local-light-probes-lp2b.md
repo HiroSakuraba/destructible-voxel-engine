@@ -82,7 +82,8 @@ local probe shading: the scene references do.
   fallback metadata, existing SH9 energy/baking and CPU visibility tests.
 - `dve_gpu_local_light_probes_tests`: headless offscreen Vulkan readback
   compares global fallback vs red SH9, a revision change to blue SH9,
-  a local amber cubemap reflection and removal restoring global fallback.
+  a local amber cubemap reflection, two-capture overlapping-volume
+  priority selection, and removal restoring global fallback.
 - A test without compiled Vulkan shaders returns an explicit skip; a
   nonexistent Vulkan device is a skip unless `DVE_REQUIRE_VULKAN=1`.
   **Passing CI with skips is not proof of graphics-card execution.**

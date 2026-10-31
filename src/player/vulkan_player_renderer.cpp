@@ -1106,7 +1106,13 @@ public:
         settings.cellMeters = options_.tracedAoCellMeters;
         settings.maximumDimension = options_.tracedAoMaximumDimension;
         const bool changed = grid_.update(gridObjects_, settings, focus);
-        if(changed){++splitGridRevision_;splitStaticFrameValid_=false;}
+        if(changed){
+            ++splitGridRevision_;
+            splitStaticFrameValid_=false;
+            // A changed voxel material, destroyed wall, or shifted proxy can
+            // invalidate the previous one-bounce GI even at fixed camera depth.
+            historyValid_=false;
+        }
         if (grid_.empty()) return true;
         if (!changed && gridUploaded_) return true;
         const auto cells = grid_.cells();

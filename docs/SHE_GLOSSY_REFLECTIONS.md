@@ -111,6 +111,17 @@ including DC plus 8 Q without DC.
 - Existing `dve_vulkan_live_environment_renderer_tests` and player
   builds are needed to confirm shader reflection/pipeline layout validity.
 
+### Diffuse/specular ownership after lighting integration
+
+`environment_ibl.hlsli` now supplies the common diffuse-GI selection and AO
+policy used by both SHE and split-sum paths. SHE replaces **only** specular
+environment reflections on supported roughness. A valid traced GI value
+replaces environment diffuse rather than being added, and AO is not applied
+again to the already occluded traced diffuse. When traced GI lacks support,
+environment diffuse plus its AO remains available. Baked-lightmap integration
+is still a separate future renderer path and must adopt the same ownership
+rule before being enabled concurrently.
+
 ## Reproducible CPU quality comparison
 
 The new optional `dve_she_quality_benchmark` target compares both SHE and

@@ -1,6 +1,7 @@
 #include "dve/environment_lighting.hpp"
 #include "dve/irradiance_probe_grid.hpp"
 
+#include <array>
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
@@ -48,6 +49,71 @@ void test_equirectangular_and_probes(){
     std::vector<ReflectionProbe> probes{{1,{0,0,0},{2,2,2},1,1,0,true},{2,{1,0,0},{2,2,2},1,2,1,true},{3,{20,0,0},{1,1,1},1,1,10,true}};
     const auto weights=select_reflection_probes(probes,{0,0,0},2U);CHECK(weights.size()==2U);CHECK(weights.front().id==2U);CHECK(close(weights[0].weight+weights[1].weight,1.0F,1.0e-5F));
     const Float3 projected=box_project_reflection_direction(probes.front(),{0,0,0},{1,0.2F,0});CHECK(projected.x>0.8F);
+}
+
+void test_irradiance_probe_sh9_bake(){
+    using namespace dve;
+    // For a uniform full-sphere radiance C, integrated Lambertian
+    // irradiance must approach pi*C, independent of shading normal.
+    constexpr float pi=3.14159265358979323846F;
+    EnvironmentCube white{16U,std::vector<Float3>(6ULL*16U*16U,{1.0F,.5F,.25F})};
+    const IrradianceProbe baked=bake_irradiance_probe_sh9(white);
+    IrradianceProbeGrid grid;
+    grid.probes={baked};
+    CHECK(grid.validate());
+    for(Float3 direction:std::array<Float3,5>{{{0,1,0},{1,0,0},{0,0,1},
+                                               {-.3F,.2F,-.9F},{0,-1,0}}}){
+        const auto value=sample_irradiance_probe_grid(grid,{0,0,0},direction);
+        CHECK(close(value.coverage,1.0F,1e-5F));
+        CHECK(close(value.irradiance.x,pi,.045F));
+        CHECK(close(value.irradiance.y,pi*.5F,.025F));
+        CHECK(close(value.irradiance.z,pi*.25F,.015F));
+    }
+    // Environment emits only above the horizon: facing up must receive
+    // far more irradiance than facing down.
+    EnvironmentCube horizon=white;
+    for(std::uint32_t face=0;face<6U;++face){
+        for(std::uint32_t y=0;y<16U;++y)for(std::uint32_t x=0;x<16U;++x){
+            const auto direction=cube_lookup_to_direction(static_cast<CubeFace>(face),
+                {(static_cast<float>(x)+.5F)/16.0F,(static_cast<float>(y)+.5F)/16.0F});
+            horizon.texels[horizon.face_offset(static_cast<CubeFace>(face))+
+                           static_cast<std::size_t>(y)*16U+x]=
+                direction.y>0?Float3{1,0,0}:Float3{};
+        }
+    }
+    grid.probes={bake_irradiance_probe_sh9(horizon)};
+    const auto up=sample_irradiance_probe_grid(grid,{0,0,0},{0,1,0});
+    const auto down=sample_irradiance_probe_grid(grid,{0,0,0},{0,-1,0});
+    CHECK(up.irradiance.x>1.0F);
+    CHECK(down.irradiance.x<up.irradiance.x*.15F);
+    // The bake does not silently accept incomplete cubemap data.
+    bool rejected=false;
+    try{(void)bake_irradiance_probe_sh9(EnvironmentCube{});}
+    catch(const std::invalid_argument&){rejected=true;}
+    CHECK(rejected);
+}
+
+void test_visibility_gated_irradiance(){
+    using namespace dve;
+    IrradianceProbeGrid grid;
+    grid.dimensions={2,1,1};
+    grid.probes.resize(2);
+    const float base=1.0F/0.28209479177387814F;
+    grid.probes[0].sh[0]={base,0,0}; // left room red
+    grid.probes[1].sh[0]={0,0,base}; // right room blue
+    CHECK(grid.validate());
+    const auto at=.4F;
+    const auto unrestricted=sample_irradiance_probe_grid(grid,{at,0,0},{0,1,0});
+    CHECK(unrestricted.irradiance.z>.3F); // blue leaks without visibility
+    const auto blocked=sample_irradiance_probe_grid_visible(
+        grid,{at,0,0},{0,1,0},
+        [](Float3 from,Float3 receiver){
+            // A barrier at x=.5 only blocks the far probe, not the left one.
+            return (from.x<.5F)==(receiver.x<.5F);
+        });
+    CHECK(close(blocked.irradiance.x,.6F,1e-4F));
+    CHECK(close(blocked.irradiance.z,0.0F,1e-4F));
+    CHECK(close(blocked.coverage,.6F,1e-4F));
 }
 
 void test_irradiance_probe_grid(){
@@ -138,4 +204,4 @@ void test_bounded_local_probe_mixing(){
 }
 }
 
-int main(){try{test_cube_coordinates();test_constant_environment_bake();test_equirectangular_and_probes();test_bounded_local_probe_mixing();test_irradiance_probe_grid();std::cout<<"dve_environment_lighting_tests: PASS\n";return 0;}catch(const std::exception& e){std::cerr<<"dve_environment_lighting_tests: FAIL: "<<e.what()<<'\n';return 1;}}
+int main(){try{test_cube_coordinates();test_constant_environment_bake();test_equirectangular_and_probes();test_bounded_local_probe_mixing();test_irradiance_probe_sh9_bake();test_visibility_gated_irradiance();test_irradiance_probe_grid();std::cout<<"dve_environment_lighting_tests: PASS\n";return 0;}catch(const std::exception& e){std::cerr<<"dve_environment_lighting_tests: FAIL: "<<e.what()<<'\n';return 1;}}

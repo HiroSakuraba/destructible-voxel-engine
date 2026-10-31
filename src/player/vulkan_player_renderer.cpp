@@ -804,6 +804,7 @@ public:
             ++rank;
         }
         const std::size_t rayCount=prepareSurfaces.size()*directions.size(),intervalCount=rayCount*4U;
+        stats_.tracedRays=rayCount;  // diagnostic: zero on a valid static-frame cache hit
         if(!rayCount)return true;
         mark("build surface inputs");
         const std::size_t sumWords=static_cast<std::size_t>(bins)*6U;std::array<std::uint32_t,3> diag{};std::array<std::uint32_t,4> config{keyCount,bins,0,0};

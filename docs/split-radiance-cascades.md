@@ -8,6 +8,64 @@ The prototype reconstructs one visible depth sample per 8x8 pixels, inserts four
 
 The prototype uses a bounded hash key and atlas, a coarse scene voxel grid and one nearest probe per sample per level. It is missing the paper's full hierarchical ray allocator, distance-based probe LODs, persistent world-space temporal history and multi-bounce cache. Sparse interpolation can leak light, and secondary hits use voxel palette values rather than full polygon textures or glass transmission. It is not a path-traced reference or a caustics renderer.
 
+## Follow-up: performance, temporal reuse, and GI ownership
+
+This remains an **experimental** dynamic diffuse-GI mode. The follow-up removes
+one avoidable GPU-to-CPU round trip by computing the world-space probe hash
+and assignments on the CPU. The implementation matches the level/sheet/cell
+packing of `split_rc_probe_assign_cs.hlsl`, including negative cells. It retains
+the original GPU assignment path for explicit comparison:
+
+```text
+DVE_SPLIT_RC_EXPERIMENT=1
+DVE_SPLIT_RC_PROFILE=1
+DVE_SPLIT_RC_GPU_ASSIGN=1  (optional: re-enable the GPU diagnostic assignment)
+```
+
+World-space *probe layout* keys are retained while the candidate positions,
+levels and surface sheets remain identical. This is not persistent radiance
+history during a moving-camera sequence.
+
+A separate **strict static-frame GI cache** reuses the previously resolved
+full-resolution indirect-light texture, eliminating the entire experimental
+trace/merge/readback sequence for an exact repeat frame. It requires unchanged
+camera/view-projection, grid content generation, sky and sun parameters, and
+diffuse GI settings. Camera movement, voxel destruction, in-place emissive
+edits, resize and render-mode changes invalidate it. It excludes polygon
+scenes, hidden proxy overrides, and explicitly requested surface diagnostics.
+The player exposes the actual experimental trace count in
+`last_stats().tracedRays`; zero on a valid static reuse.
+
+**Limitations:** A moving camera still reads the coarse depth-derived
+surfaces back to the CPU each frame; the diagnostic counters also require
+readback. Most compute stages still submit and synchronize separately. These
+remain architectural optimization tasks; no 60 fps claim is made. In particular,
+Sponza's polygon draw path does **not** use the static reuse fast path.
+
+The Vulkan player now selects one exclusive runtime *diffuse* indirect source:
+environment IBL, traced one-bounce, screen-space cascades, or experimental split
+cascades. In the material shader, traced indirect diffuse replaces environment
+diffuse only at valid pixels; it is not added a second time. AO is applied
+to environment diffuse but not re-applied to already occluded traced diffuse.
+SHE/split-sum are alternative **specular** representations; direct sun and
+clear coat are owned separately. An experimental split flag cannot hijack
+one-bounce lighting.
+
+**Acceptance:**
+- Build `dve_split_rc_probe_layout_tests`,
+  `dve_indirect_lighting_ownership_tests`,
+  `dve_split_rc_player_tests`, and the existing split-RC Vulkan fixtures.
+- Repeat the same voxel frame: first frame traces, next frame must report
+  zero newly traced rays and produce the same output.
+- Change emissive intensity in-place, remove voxels, move camera and resize:
+  cache must invalidate and the lighting must update.
+- Toggle GI modes while `DVE_SPLIT_RC_EXPERIMENT=1`: diffuse ownership must
+  remain correct and the old indirect texture must not leak into another mode.
+- Compare `DVE_SPLIT_RC_GPU_ASSIGN=1` with the new CPU assignment path for
+  visual output, timing and memory on NVIDIA hardware.
+- Measure 1080p GPU pass timings and CPU fence/readback wait separately;
+  `DVE_SPLIT_RC_PROFILE` is CPU wall time, not isolated shader duration.
+
 ## Receiver-aware upsampling
 
 The full-resolution GI reconstruction now evaluates the **actual receiver** from the current

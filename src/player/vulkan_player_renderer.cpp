@@ -1,4 +1,5 @@
 #include "dve/player/vulkan_player_renderer.hpp"
+#include "dve/player/split_rc_probe_layout.hpp"
 
 #include <algorithm>
 #include <array>
@@ -903,6 +904,21 @@ public:
         }
         if(candidates.empty())return true;
         if(candidates.size()>65536U){set_error(error,"split RC diagnostic exceeds 65536 probe candidates");return false;}
+        // The GPU hash pass is retained only as an explicit diagnostic.
+        // Normal execution builds the identical keys and assignments on the CPU:
+        // no probe-dispatch fence and no three GPU->CPU buffer readbacks.
+        const char* gpuAssign=std::getenv("DVE_SPLIT_RC_GPU_ASSIGN");
+        if(!gpuAssign || std::strcmp(gpuAssign,"1")!=0) {
+            std::vector<SplitRcProbeCandidate> cpu;
+            cpu.reserve(candidates.size());
+            for(const auto& sample:candidates)
+                cpu.push_back({sample.position,sample.meta});
+            const bool ok=splitProbeLayoutCache_.assign(cpu,outKeys,outAssignments,error);
+            if(ok && std::getenv("DVE_SPLIT_RC_PROFILE"))
+                std::fprintf(stderr,"[split RC] CPU probe layout: %zu samples, %zu slots, reused=%s\n",
+                    cpu.size(),outKeys.size(),splitProbeLayoutCache_.reused_last_call()?"yes":"no");
+            return ok;
+        }
         std::size_t capacity=1024U;while(capacity<candidates.size()*2U)capacity*=2U;
         std::vector<std::uint32_t> empty(capacity),keys(capacity),assignments(candidates.size());std::array<std::uint32_t,2> counters{};
         const auto inputBytes=candidates.size()*sizeof(ProbeSample),slotBytes=capacity*sizeof(std::uint32_t),resultBytes=candidates.size()*sizeof(std::uint32_t);
@@ -1785,6 +1801,7 @@ private:
     std::unordered_map<std::string,SplitCachedBuffer> splitBufferCache_;
     rhi::BindGroupLayoutHandle splitProbeLayout_{};
     rhi::ComputePipelineHandle splitProbePipeline_{};
+    SplitRcProbeLayoutCache splitProbeLayoutCache_{};
     rhi::BindGroupLayoutHandle splitTraceLayout_{};
     rhi::ComputePipelineHandle splitTracePipeline_{};
     rhi::BindGroupLayoutHandle splitSurfaceLayout_{};

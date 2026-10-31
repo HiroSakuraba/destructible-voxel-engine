@@ -1459,6 +1459,14 @@ private:
         // Cubemap views can be referenced by multiple queued frames: retire
         // their work before swapping. Nothing is uploaded on steady frames.
         device_->wait_idle();
+        // Retire descriptor sets before destroying views they reference.
+        // The live renderer normally reclaims these on its next frame,
+        // but capture replacement happens before that call.
+        for(auto& batch:live_.retiredGroups) {
+            for(auto group:batch.groups)
+                if(group && !device_->destroy_bind_group(group,error))return false;
+        }
+        live_.retiredGroups.clear();
         for(auto& existing:localReflectionGpu_)
             if(existing.texture) {
                 std::string ignored;

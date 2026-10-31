@@ -15,7 +15,7 @@
 
 using namespace dve;
 namespace {
-float dot(Float3 a,Float3 b){return a.x*b.x+a.y*b.y+a.z*b.z;}
+float local_dot(Float3 a,Float3 b){return a.x*b.x+a.y*b.y+a.z*b.z;}
 float error_sq(Float3 a,Float3 b){
     const float x=a.x-b.x,y=a.y-b.y,z=a.z-b.z;
     return (x*x+y*y+z*z)/3.0F;
@@ -34,7 +34,7 @@ EnvironmentCube fixture(int kind){
                     0.1F+0.6F*std::max(0.0F,d.y),
                     0.2F+0.3F*std::max(0.0F,d.y)};
                 if(kind==2){
-                    const float spot=dot(d,{0.0F,1.0F,0.0F})>0.985F?1.0F:0.0F;
+                    const float spot=local_dot(d,{0.0F,1.0F,0.0F})>0.985F?1.0F:0.0F;
                     rgb={0.04F+60.0F*spot,0.07F+30.0F*spot,0.12F+5.0F*spot};
                 }
                 e.texels[(static_cast<std::size_t>(face)*e.resolution+y)*e.resolution+x]=rgb;

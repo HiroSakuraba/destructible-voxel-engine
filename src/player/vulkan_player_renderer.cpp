@@ -1235,6 +1235,12 @@ public:
             if (moved < 0.9999F) historyBlend = 0.35F;
             giSunDirection_ = sun;
         }
+        const char* denoiseFlag=std::getenv("DVE_GI_DENOISER");
+        const bool denoise=denoiseFlag && std::strcmp(denoiseFlag,"1")==0;
+        if(denoise!=giDenoiserWasEnabled_) {
+            historyValid_=false;
+            giDenoiserWasEnabled_=denoise;
+        }
         constants.previousViewProjection = historyValid_ ? previousViewProjection_ : camera.viewProjection;
         {
             const auto frameBits = static_cast<std::uint32_t>(frameIndex_);
@@ -1245,8 +1251,6 @@ public:
             // behavior unless explicitly requested. Encode the mode in an
             // otherwise 0/1 history-validity float, without changing the RHI
             // constant layout: 0/1 legacy, 2/3 denoiser enabled.
-            const char* denoiseFlag=std::getenv("DVE_GI_DENOISER");
-            const bool denoise=denoiseFlag && std::strcmp(denoiseFlag,"1")==0;
             constants.giTemporal = {historyBlend,
                                     (historyValid_ ? 0.0F : 1.0F) + (denoise ? 2.0F : 0.0F),
                                     static_cast<float>(halfWidth()),
@@ -1887,6 +1891,7 @@ private:
     std::size_t giHistoryIndex_{};   // history written last frame
     std::uint32_t coarseOffsetWords_{};   // where the block occupancy bytes start in the grid buffer
     bool historyValid_{};
+    bool giDenoiserWasEnabled_{};
     std::vector<float> giLightKey_;
     Float3 giSunDirection_{0.0F, 1.0F, 0.0F};
     Matrix previousViewProjection_{};

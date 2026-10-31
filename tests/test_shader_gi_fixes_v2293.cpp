@@ -211,6 +211,7 @@ void test_shader_source_contracts() {
     CHECK(localProbes.find("LocalSH9Irradiance(") != std::string::npos);
     CHECK(localProbes.find("LocalSpecularRadiance(") != std::string::npos);
     CHECK(localProbes.find("gLocalReflectionSampler0") != std::string::npos);
+    CHECK(liveIbl.find("gLocalProbeData[0].w<.5F") != std::string::npos);
     CHECK(liveIbl.find("probeIrradiance-skyIrradiance*diffuseCoverage") != std::string::npos);
     CHECK(liveIbl.find("(1.0F-saturate(indirectDiffuse.a))") != std::string::npos);
     CHECK(liveRenderer.find("kLocalProbeGpuCapacity") != std::string::npos);

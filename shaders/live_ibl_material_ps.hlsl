@@ -3,6 +3,7 @@
 #include "common/environment_ibl.hlsli"
 #include "common/spherical_harmonic_exponentials.hlsli"
 #include "common/cascaded_shadow_map.hlsli"
+#include "common/local_light_probes.hlsli"
 
 #include "common/live_bindings.hlsli"
 #include "common/material_surface_detail.hlsli"
@@ -103,29 +104,48 @@ DVE_LIVE_BIND(0,1) cbuffer LiveObjectConstants : register(b9) {
 // The SHE path does not fetch or evaluate the legacy prefiltered specular
 // cubemap. It shares the exact diffuse, Fresnel, AO and GI policy with the
 // split-sum evaluator and switches only the environment specular integral.
-float3 EvaluateLiveImageBasedLighting(float3 normal, float3 viewDirection,
-                                      float3 baseColor, float metallic,
-                                      float roughness, float specular,
-                                      float ambientOcclusion, float4 indirectDiffuse) {
-    const float alpha=saturate(roughness)*saturate(roughness);
+float3 EvaluateLiveImageBasedLighting(float3 normal,float3 viewDirection,
+                                      float3 baseColor,float metallic,
+                                      float roughness,float specular,
+                                      float ambientOcclusion,float4 indirectDiffuse,
+                                      float3 worldPosition) {
     const float3 N=normalize(normal);
     const float3 V=normalize(viewDirection);
+    const float3 R=reflect(-V,N);
     const float ndv=saturate(dot(N,V));
+    const float3 dielectricF0=(0.08F*saturate(specular)).xxx;
+    const float3 f0=lerp(dielectricF0,max(baseColor,0.0F.xxx),saturate(metallic));
+    const float2 brdf=gEnvironmentBrdfLut.SampleLevel(
+        gBrdfSampler,float2(ndv,saturate(roughness)),0.0F);
+    const float3 specularAlbedo=f0*brdf.x+brdf.y*saturate(50.0F*f0.g);
+    const float ao=saturate(ambientOcclusion);
+    const float occlusion=saturate(
+        pow(ndv+ao,exp2(-16.0F*saturate(roughness)-1.0F))-1.0F+ao);
+
+    float diffuseCoverage;
+    const float3 probeIrradiance=LocalSH9Irradiance(
+        worldPosition,N,diffuseCoverage);
+    const float3 skyIrradiance=gDiffuseIrradiance.SampleLevel(
+        gEnvironmentSampler,RotateEnvironmentDirectionY(N,gEnvironmentParameters.x),0.0F).rgb;
+    // This is only a correction to the sky fallback. Traced diffuse owns
+    // the pixel when alpha = 1; never add baked light on top of traced GI.
+    const float3 diffuseAdjustment=
+        (probeIrradiance-skyIrradiance*diffuseCoverage)*
+        max(baseColor,0.0F.xxx)*((1.0F-saturate(metallic))/kPi)*
+        saturate(1.0F.xxx-specularAlbedo)*ao*(1.0F-saturate(indirectDiffuse.a));
+
+    float specularCoverage;
+    const float3 localSpec=LocalSpecularRadiance(
+        worldPosition,R,roughness,gSpecularSampler,specularCoverage);
     if(gSheSpecularCoefficients[52u]==0x53484531u &&
-       alpha>=DVE_SHE_MIN_ALPHA && alpha<=1.0F && ndv>=1.0e-4F) {
-        const float3 dielectricF0=(0.08F*saturate(specular)).xxx;
-        const float3 f0=lerp(dielectricF0,max(baseColor,0.0F.xxx),saturate(metallic));
-        float3 irradiance=gDiffuseIrradiance.SampleLevel(gEnvironmentSampler,
-            RotateEnvironmentDirectionY(N,gEnvironmentParameters.x),0.0F).rgb;
-        irradiance=ResolveDiffuseIndirectIrradiance(irradiance,indirectDiffuse);
+       specularCoverage<=1.0e-5F &&
+       saturate(roughness)*saturate(roughness)>=DVE_SHE_MIN_ALPHA &&
+       saturate(roughness)*saturate(roughness)<=1.0F && ndv>=1.0e-4F) {
+        float3 irradiance=ResolveDiffuseIndirectIrradiance(
+            skyIrradiance,indirectDiffuse);
         float3 diffuse=irradiance*max(baseColor,0.0F.xxx)*
                        ((1.0F-saturate(metallic))/kPi);
-        const float2 brdf=gEnvironmentBrdfLut.SampleLevel(
-            gBrdfSampler,float2(ndv,saturate(roughness)),0.0F);
-        const float3 specularAlbedo=f0*brdf.x+brdf.y*saturate(50.0F*f0.g);
         diffuse*=saturate(1.0F.xxx-specularAlbedo);
-        // Rotate the *whole* frame: the learned factors describe the sky
-        // in its source orientation, not only the reflection ray.
         const float3 envN=RotateEnvironmentDirectionY(N,gEnvironmentParameters.x);
         const float3 envV=RotateEnvironmentDirectionY(V,gEnvironmentParameters.x);
         const float3 sheBase=DveSheEvaluateBase(
@@ -133,18 +153,21 @@ float3 EvaluateLiveImageBasedLighting(float3 normal, float3 viewDirection,
         const float fresnelDenominator=max(brdf.x+brdf.y,1.0e-5F);
         const float3 sheSpecular=sheBase*
             (specularAlbedo/fresnelDenominator);
-        const float ao=saturate(ambientOcclusion);
-        const float specularOcclusion=saturate(
-            pow(ndv+ao,exp2(-16.0F*saturate(roughness)-1.0F))-1.0F+ao);
         return diffuse*DiffuseIndirectOcclusion(ao,indirectDiffuse.a)+
-               sheSpecular*specularOcclusion;
+               sheSpecular*occlusion+diffuseAdjustment;
     }
-    return EvaluateImageBasedLightingWithIndirect(
+    const float3 global=EvaluateImageBasedLightingWithIndirect(
         gDiffuseIrradiance,gSpecularPrefilter,gEnvironmentBrdfLut,
         gEnvironmentSampler,gSpecularSampler,gBrdfSampler,
         normal,viewDirection,baseColor,metallic,roughness,specular,
         ambientOcclusion,gEnvironmentParameters.w,gEnvironmentParameters.x,
         indirectDiffuse);
+    const float3 skySpec=gSpecularPrefilter.SampleLevel(
+        gSpecularSampler,RotateEnvironmentDirectionY(R,gEnvironmentParameters.x),
+        saturate(roughness)*gEnvironmentParameters.w).rgb;
+    const float3 specCorrection=(localSpec-skySpec*specularCoverage)*
+        specularAlbedo*occlusion;
+    return global+diffuseAdjustment+specCorrection;
 }
 
 float4 main(float4 position : SV_Position, float3 worldPosition : TEXCOORD0,
@@ -223,12 +246,12 @@ float4 main(float4 position : SV_Position, float3 worldPosition : TEXCOORD0,
         gIndirectLightSampler, position.xy / float2(max(giWidth, 1u), max(giHeight, 1u)), 0.0F);
     float3 ibl=EvaluateLiveImageBasedLighting(
         shadingNormal,V,baseColor,metallic,roughness,material.specular,
-        ambientOcclusion,indirect);
+        ambientOcclusion,indirect,worldPosition);
     if(material.clearCoat>0){
         float fresnel=.04F+.96F*pow(1-saturate(dot(shadingNormal,V)),5);
         float3 coat=EvaluateLiveImageBasedLighting(
             shadingNormal,V,0.0F.xxx,0.0F,material.clearCoatRoughness,
-            0.5F,1.0F,float4(0.0F,0.0F,0.0F,0.0F));
+            0.5F,1.0F,float4(0.0F,0.0F,0.0F,0.0F),worldPosition);
         ibl=ibl*(1-saturate(material.clearCoat)*fresnel)+coat*saturate(material.clearCoat);
     }
     ibl*=max(0,gEnvironmentParameters.y);

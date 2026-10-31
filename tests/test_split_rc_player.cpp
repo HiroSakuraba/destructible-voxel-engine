@@ -38,7 +38,12 @@ int main(){try{
     if(!gpu){if(std::getenv("DVE_REQUIRE_VULKAN"))throw std::runtime_error(error);return dve::testing::skip("Vulkan device unavailable: "+error);}
     require(gpu->resize(128,96,&error),error);
     auto frame=[&](){require(gpu->render(view,&error)&&gpu->present(&error),"render: "+error);const auto* image=gpu->readback();require(image&&image->valid(),"invalid image");return *image;};
-    const auto first=frame(),repeat=frame();const auto stable=changed(first,repeat);std::cout<<"static changed pixels: "<<stable<<"\n";
+    const auto first=frame();
+    const auto firstRays=gpu->last_stats().tracedRays;
+    require(firstRays>0U,"first split RC frame must trace rays");
+    const auto repeat=frame();
+    require(gpu->last_stats().tracedRays==0U,"unchanged voxel frame must reuse GI");
+    const auto stable=changed(first,repeat);std::cout<<"static changed pixels: "<<stable<<"\n";
     require(stable<10,"unchanged scene produced unstable image");
     // With all external lighting dark, changing only the block emission should
     // illuminate the surrounding floor through the split cascade, not just the block.
@@ -46,7 +51,10 @@ int main(){try{
     for(std::size_t i=0;i<materials.size();++i)materials[i]=default_voxel_material(static_cast<MaterialId>(i));
     objects[1].materials=materials;
     view.environment.sunIntensity=0;view.environment.skyColor={0,0,0};view.environment.groundColor={0,0,0};view.environment.bloomIntensity=0;
-    const auto dark=frame();materials[9].emissive={8,0,0};const auto emissive=frame();
+    const auto dark=frame();
+    require(gpu->last_stats().tracedRays>0U,"sky change must invalidate static GI cache");
+    materials[9].emissive={8,0,0};const auto emissive=frame();
+    require(gpu->last_stats().tracedRays>0U,"in-place emission edit must retrace GI");
     materials[9].emissive={0,0,0};const auto darkAgain=frame();
     require(changed(dark,darkAgain)<10,"indirect light persisted after emission was removed");
     materials[9].emissive={8,0,0};
@@ -85,9 +93,13 @@ int main(){try{
     objects[1].materials={};view.environment=RenderEnvironment{};view.environment.ambientOcclusionSamples=0;view.environment.volumetricFogDensityPerMeter=0;
     const auto restored=frame();
     view.environment.sunDirection={-.8F,.5F,.2F};const auto relit=frame();require(changed(restored,relit)>100,"changing the sun had no visible effect");
-    view.camera.position={-2.2F,1.8F,3.0F};const auto moved=frame();require(changed(relit,moved)>500,"camera movement had no visible effect");
+    view.camera.position={-2.2F,1.8F,3.0F};const auto moved=frame();
+    require(gpu->last_stats().tracedRays>0U,"camera move must invalidate static GI cache");
+    require(changed(relit,moved)>500,"camera movement had no visible effect");
     for(int x=0;x<6;++x)for(int z=0;z<6;++z)for(int y=6;y<12;++y)(void)tower.set_voxel({x,y,z},kAirMaterial);
-    const auto destroyed=frame();require(changed(moved,destroyed)>50,"voxel destruction had no visible effect");
+    const auto destroyed=frame();
+    require(gpu->last_stats().tracedRays>0U,"voxel destruction must retrace indirect GI");
+    require(changed(moved,destroyed)>50,"voxel destruction had no visible effect");
     require(gpu->resize(96,64,&error),error);const auto resized=frame();require(resized.width==96&&resized.height==64,"resize failed");
     std::cout<<"split RC player frame, light, camera, destruction and resize passed\n";return 0;
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

@@ -12,6 +12,7 @@
 #include "dve/render/cascaded_shadow_atlas.hpp"
 #include "dve/render/dashr_live_surface.hpp"
 #include "dve/render/environment_lighting_gpu.hpp"
+#include "dve/render/local_light_probes_gpu.hpp"
 #include "dve/render/mesh_rhi_mirror.hpp"
 #include "dve/render/main_material_table.hpp"
 #include "dve/render/live_optical_scene.hpp"
@@ -102,6 +103,11 @@ struct LiveEnvironmentRendererResources {
         std::vector<rhi::BindGroupHandle> groups;
     };
     rhi::BufferHandle frameConstants;
+    // Bind group 0, slot 3. A fixed-size storage buffer is zero-initialized
+    // and remains resident across frames; only changed probe revisions upload.
+    rhi::BufferHandle localProbeData;
+    std::uint64_t localProbeRevision{~std::uint64_t{0}};
+    bool localProbeEnabled{};
     rhi::BufferHandle objectConstants;
     rhi::BufferHandle cascadeConstants;
     rhi::BindGroupLayoutHandle frameLayout;
@@ -192,6 +198,13 @@ struct LiveEnvironmentFrameDesc {
     // Screen-sized view of traced indirect diffuse light (see LiveEnvironmentRendererResources::
     // giFallback); empty = image-based ambient only.
     rhi::TextureViewHandle indirectLight{};
+    // Optional LP-2B scene-owned probe payload and pre-uploaded local
+    // specular cubemap views. Capture owners keep both views alive through
+    // GPU submission and increment localProbeRevision whenever contents
+    // change. Empty payload disables local probes with sky IBL fallback.
+    std::span<const ProbeFloat4> localProbeWords{};
+    std::uint64_t localProbeRevision{};
+    std::array<rhi::TextureViewHandle,2> localReflectionCubes{};
 };
 
 struct LiveEnvironmentFrameStats {

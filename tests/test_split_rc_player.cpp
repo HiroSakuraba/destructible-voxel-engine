@@ -37,7 +37,8 @@ int main(){try{
     std::string error;auto gpu=make_vulkan_player_renderer(options,&error);
     if(!gpu){if(std::getenv("DVE_REQUIRE_VULKAN"))throw std::runtime_error(error);return dve::testing::skip("Vulkan device unavailable: "+error);}
     require(gpu->resize(128,96,&error),error);
-    auto frame=[&](){require(gpu->render(view,&error)&&gpu->present(&error),"render: "+error);const auto* image=gpu->readback();require(image&&image->valid(),"invalid image");return *image;};
+    unsigned frameNumber=0;
+    auto frame=[&](){++frameNumber;if(!gpu->render(view,&error))throw std::runtime_error("render frame "+std::to_string(frameNumber)+": "+error);if(!gpu->present(&error))throw std::runtime_error("present frame "+std::to_string(frameNumber)+": "+error);const auto* image=gpu->readback();require(image&&image->valid(),"invalid image");return *image;};
     const auto first=frame();
     const auto firstRays=gpu->last_stats().tracedRays;
     require(firstRays>0U,"first split RC frame must trace rays");

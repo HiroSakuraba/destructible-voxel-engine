@@ -7,6 +7,11 @@ struct Surface { float4 position; float4 normal; };
 DVE_LIVE_BIND(2,0) StructuredBuffer<Surface> surfaces : register(t1);
 DVE_LIVE_BIND(3,0) StructuredBuffer<float4> light : register(t2);
 DVE_LIVE_BIND(4,0) StructuredBuffer<float4> settings : register(t3);
+// DXC otherwise declares Rgba32f in SPIR-V while the player uses RGBA16Float.
+// glslang's HLSL parser does not accept vk::image_format.
+#ifdef DVE_SPLIT_RC_DXC
+[[vk::image_format("rgba16f")]]
+#endif
 DVE_LIVE_BIND(5,0) RWTexture2D<float4> output : register(u0);
 [numthreads(8,8,1)]
 void main(uint3 id:SV_DispatchThreadID){

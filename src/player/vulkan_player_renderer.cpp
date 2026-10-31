@@ -961,7 +961,6 @@ public:
     // It does not modify the lighting output or constitute a Split RC mode.
     bool debug_split_trace(std::span<const SplitSurfaceSample> surfaces, const RenderEnvironment& environment,
                            bool runDiagnostic, std::string* error) {
-        if(!runDiagnostic)return true;
         if (!splitTraceLayout_) {
             rhi::BindGroupLayoutDesc desc;desc.bindings={{0U,rhi::BindingType::StorageBufferReadOnly,rhi::ShaderStage::Compute},
                 {1U,rhi::BindingType::StorageBufferReadWrite,rhi::ShaderStage::Compute}};
@@ -971,6 +970,7 @@ public:
             pipeline.bindGroupLayouts={aoLayout_,splitTraceLayout_};
             splitTracePipeline_=device_->create_compute_pipeline(pipeline,error);if(!splitTracePipeline_)return false;
         }
+        if(!runDiagnostic)return true;
         std::vector<SplitTraceInput> rays;const float lift=std::max(std::max(1.0e-3F,environment.shadowBiasMeters),1.1F*grid_.cell_meters());
         for(const auto& s:surfaces){
             if(s.position[3]<.5F || s.normal[3]<.5F)continue;

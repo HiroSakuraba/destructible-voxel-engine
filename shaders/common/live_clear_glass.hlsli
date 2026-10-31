@@ -10,13 +10,23 @@ struct OpticalTriangle {
     float3 p0;float3 p1;float3 p2;float3 n0;float3 n1;float3 n2;float3 c0;float3 c1;float3 c2;
     uint material;
 };
+// Seven aligned vectors preserve the CPU's 112-byte packed triangle without
+// requiring Vulkan's optional scalarBlockLayout feature.
+struct PackedOpticalTriangle { float4 a;float4 b;float4 c;float4 d;float4 e;float4 f;uint4 g; };
+OpticalTriangle UnpackOpticalTriangle(PackedOpticalTriangle v) {
+    OpticalTriangle t;
+    t.p0=v.a.xyz;t.p1=float3(v.a.w,v.b.xy);t.p2=float3(v.b.zw,v.c.x);
+    t.n0=v.c.yzw;t.n1=v.d.xyz;t.n2=float3(v.d.w,v.e.xy);
+    t.c0=float3(v.e.zw,v.f.x);t.c1=v.f.yzw;t.c2=asfloat(v.g.xyz);t.material=v.g.w;
+    return t;
+}
 struct OpticalSettings {
     uint nodeCount;uint triangleCount;uint materialCount;uint maximumInteractions;
     uint maximumPaths;uint mediumCount;float rayEpsilonMeters;float maximumDistanceMeters;
     uint4 media0;uint4 media1;
 };
 DVE_LIVE_BIND(0,4) StructuredBuffer<OpticalNode> gOpticalNodes : register(t37);
-DVE_LIVE_BIND(1,4) StructuredBuffer<OpticalTriangle> gOpticalTriangles : register(t38);
+DVE_LIVE_BIND(1,4) StructuredBuffer<PackedOpticalTriangle> gOpticalTriangles : register(t38);
 DVE_LIVE_BIND(2,4) StructuredBuffer<MaterialRecord> gOpticalMaterials : register(t39);
 DVE_LIVE_BIND(3,4) StructuredBuffer<OpticalSettings> gOpticalSettings : register(t40);
 struct OpticalHit {float distance;uint surface;float2 bary;};
@@ -41,7 +51,7 @@ bool TraceOpticalScene(float3 o,float3 d,OpticalSettings settings,out OpticalHit
         if(!OpticalBox(o,d,node,hit.distance)){nodeIndex=node.escape;continue;}
         if(node.triangleCount==0){++nodeIndex;continue;}
         [loop]for(uint i=node.firstTriangle;i<node.firstTriangle+node.triangleCount;++i)
-            if(OpticalIntersect(o,d,gOpticalTriangles[i],settings.rayEpsilonMeters*.1F,hit))hit.surface=i;
+            if(OpticalIntersect(o,d,UnpackOpticalTriangle(gOpticalTriangles[i]),settings.rayEpsilonMeters*.1F,hit))hit.surface=i;
         nodeIndex=node.escape;
     }return hit.surface!=0xffffffffU;
 }
@@ -80,7 +90,7 @@ float3 EvaluateLiveClearGlass(float3 origin,float3 direction) {
         const uint medium=path.count?OpticalMedium(path,path.count-1):0;
         if(medium){const MaterialRecord inside=gOpticalMaterials[medium-1];path.weight*=ClearAbsorption(float3(inside.attenuationColorR,inside.attenuationColorG,inside.attenuationColorB),inside.attenuationDistanceMeters,hit.distance);}
         if(!found){radiance+=path.weight*OpticalEnvironment(path.direction);continue;}
-        const OpticalTriangle surface=gOpticalTriangles[hit.surface];const MaterialRecord material=gOpticalMaterials[surface.material];
+        const OpticalTriangle surface=UnpackOpticalTriangle(gOpticalTriangles[hit.surface]);const MaterialRecord material=gOpticalMaterials[surface.material];
         const float3 p=path.origin+path.direction*hit.distance,Ng=normalize(cross(surface.p1-surface.p0,surface.p2-surface.p0));
         float3 Ns=surface.n0*(1-hit.bary.x-hit.bary.y)+surface.n1*hit.bary.x+surface.n2*hit.bary.y;
         Ns=dot(Ns,Ns)>1e-12F?normalize(Ns):Ng;

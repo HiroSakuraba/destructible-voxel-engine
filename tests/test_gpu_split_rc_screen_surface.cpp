@@ -49,7 +49,7 @@ int main(int argc,char** argv){try{
        d.write_buffer(lightBuf,0,std::as_bytes(std::span(radiance)),&error)&&
        d.write_buffer(settingsBuf,0,std::as_bytes(std::span(tolerance)),&error),"upsample buffers");
  TextureDesc outDesc;outDesc.width=width;outDesc.height=height;outDesc.format=TextureFormat::RGBA16Float;
- outDesc.usage=TextureUsage::Storage|TextureUsage::CopySource;outDesc.initialState=ResourceState::ShaderRead;
+ outDesc.usage=TextureUsage::Storage|TextureUsage::CopySource|TextureUsage::Sampled;outDesc.initialState=ResourceState::ShaderRead;
  const auto outTex=d.create_texture(outDesc,&error);
  const auto outView=d.create_texture_view({outTex,0,1,0,1,"split RC edge fixture"},&error);
  check(outTex&&outView,"upsample texture");

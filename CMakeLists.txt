@@ -1998,10 +1998,14 @@ if(DVE_BUILD_PLAYER AND DVE_BUILD_RHI AND DVE_BUILD_PLATFORM)
                     set(_profile ps_6_0)
                 endif()
                 set(_spv "${_dve_player_shader_dir}/${_shader}.spv")
+                set(_shader_defines)
+                if(_shader STREQUAL "player_split_rc_upsample_cs")
+                    list(APPEND _shader_defines -DDVE_SPLIT_RC_DXC=1)
+                endif()
                 add_custom_command(OUTPUT "${_spv}"
                     COMMAND "${CMAKE_COMMAND}" -E make_directory "${_dve_player_shader_dir}"
                     COMMAND "${DVE_DXC_EXECUTABLE}" -spirv -fspv-target-env=vulkan1.2 -fvk-use-dx-layout
-                        -T ${_profile} -E main -I "${CMAKE_CURRENT_SOURCE_DIR}/shaders"
+                        -T ${_profile} -E main -I "${CMAKE_CURRENT_SOURCE_DIR}/shaders" ${_shader_defines}
                         -Fo "${_spv}" "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${_shader}.hlsl"
                     DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${_shader}.hlsl" ${_dve_player_shader_headers}
                     COMMENT "DXC (SPIR-V) ${_shader}.hlsl for dve_player"
@@ -2213,6 +2217,8 @@ if(DVE_BUILD_TESTS)
             add_executable(dve_gpu_clear_glass_tests tests/test_gpu_clear_glass.cpp)
             target_link_libraries(dve_gpu_clear_glass_tests PRIVATE dve::rhi_vulkan dve::render_bridge)
             add_test(NAME dve_gpu_clear_glass_tests COMMAND dve_gpu_clear_glass_tests)
+            set_tests_properties(dve_gpu_clear_glass_tests PROPERTIES
+                FAIL_REGULAR_EXPRESSION "\\[dve vulkan error\\];doesn.t match the VkImageView")
             find_program(DVE_DXC_EXECUTABLE NAMES dxc)
             set(_dve_dxc_spirv OFF)
             if(DVE_DXC_EXECUTABLE)
@@ -2427,7 +2433,7 @@ if(DVE_BUILD_TESTS)
                 add_custom_command(OUTPUT "${_split_rc_upsample_shader}"
                     COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/split-rc"
                     COMMAND "${DVE_DXC_EXECUTABLE}" -spirv -fspv-target-env=vulkan1.2 -fvk-use-dx-layout
-                        -T cs_6_0 -E main -I "${CMAKE_CURRENT_SOURCE_DIR}/shaders"
+                        -T cs_6_0 -E main -DDVE_SPLIT_RC_DXC=1 -I "${CMAKE_CURRENT_SOURCE_DIR}/shaders"
                         -Fo "${_split_rc_upsample_shader}"
                         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/player_split_rc_upsample_cs.hlsl"
                     DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/player_split_rc_upsample_cs.hlsl"

@@ -854,15 +854,22 @@ public:
         for(unsigned iteration=0;iteration<4;++iteration){const unsigned level=3U-iteration;const auto count=levelQueries[level].size();if(count&&(!run(merges[level],static_cast<std::uint32_t>((count+63U)/64U))||!run(scatters[level],static_cast<std::uint32_t>((count+63U)/64U))))return fail();}
         mark("merge");
         if(!run(g,static_cast<std::uint32_t>((gather.size()+63U)/64U)))return fail();
-        auto upsample=stage(shader_blobs::player_split_rc_upsample_cs(),{R,R,R,rhi::BindingType::StorageTexture},
-            {{0,splitSurfaceBuffer_,{},0,surfaces.size()*sizeof(SplitSurfaceSample),{}},{1,go,{},0,gather.size()*sizeof(V),{}},
-             {2,upSettings,{},0,sizeof(V),{}},{3,{},giView_,0,0,{}}});
+        // Full-resolution receiver reconstruction needs the current depth and the
+        // existing screen-space camera constants, not the coarse tile's normal.
+        auto upsample=stage(shader_blobs::player_split_rc_upsample_cs(),
+            {rhi::BindingType::SampledTexture,rhi::BindingType::UniformBuffer,R,R,R,rhi::BindingType::StorageTexture},
+            {{0,{},depthView_,0,0,depthSampler_},{1,aoConstants_,{},0,512U,{}},
+             {2,splitSurfaceBuffer_,{},0,surfaces.size()*sizeof(SplitSurfaceSample),{}},
+             {3,go,{},0,gather.size()*sizeof(V),{}},{4,upSettings,{},0,sizeof(V),{}},
+             {5,{},giView_,0,0,{}}});
         if(!upsample.pipeline)return fail();
         const auto cmd=device_->begin_commands(rhi::QueueKind::Graphics,"split RC upsample",error);
-        if(!cmd||!device_->transition_texture(cmd,giTexture_,ResourceState::ShaderRead,ResourceState::ShaderWrite,error)||
+        if(!cmd||!device_->transition_texture(cmd,depth_,ResourceState::DepthWrite,ResourceState::ShaderRead,error)||
+           !device_->transition_texture(cmd,giTexture_,ResourceState::ShaderRead,ResourceState::ShaderWrite,error)||
            !device_->bind_compute_bind_group(cmd,0U,upsample.group,error)||
            !device_->dispatch(cmd,upsample.pipeline,(width_+7U)/8U,(height_+7U)/8U,1U,error)||
-           !device_->transition_texture(cmd,giTexture_,ResourceState::ShaderWrite,ResourceState::ShaderRead,error))return fail();
+           !device_->transition_texture(cmd,giTexture_,ResourceState::ShaderWrite,ResourceState::ShaderRead,error)||
+           !device_->transition_texture(cmd,depth_,ResourceState::ShaderRead,ResourceState::DepthWrite,error))return fail();
         const auto upFence=device_->submit(cmd,error);if(!upFence||!device_->fence_complete(upFence))return fail();
         mark("GPU gather and upsample");
         if(profile)std::fprintf(stderr,"[split RC] experimental GI: %zu rays, %u bins, %.2f ms\n",rayCount,bins,milliseconds_since(experimentStart));

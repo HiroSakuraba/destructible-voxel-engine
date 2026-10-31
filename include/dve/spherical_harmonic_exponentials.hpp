@@ -69,6 +69,13 @@ struct SheBakeSettings {
     const SheProbeCoefficients& probe, Float3 normal, Float3 viewDirection,
     float alpha) noexcept;
 
+// Slow CPU reference for independent scene-specific quality sweeps. Computes the
+// Fresnel=1 GGX/Smith environment integral directly from the original source.
+// Does not use SHE coefficients, filtered cubemaps, BRDF LUTs or denoisers.
+[[nodiscard]] std::optional<Float3> reference_ggx_environment_integral(
+    const EnvironmentCube& source, Float3 normal, Float3 viewDirection,
+    float alpha, std::uint32_t samples = 4096U);
+
 [[nodiscard]] ShePackedProbe pack_she_probe_half(const SheProbeCoefficients& probe) noexcept;
 [[nodiscard]] SheProbeCoefficients unpack_she_probe_half(const ShePackedProbe& packed) noexcept;
 

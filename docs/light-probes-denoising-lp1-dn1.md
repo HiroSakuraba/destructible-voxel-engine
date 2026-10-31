@@ -84,6 +84,50 @@ the existing temporal/upsampling shader behavior.
    visual noise, ghosting, edge leak count and VRAM at 1080p GTX 1080.
    Avoid comparing CPU wall-clock timing as if it were isolated GPU pass time.
 
+## Continuation: LP-2A probe baking and DN-1.1 temporal rejection
+
+### LP-2A: source-to-probe irradiance baking (implemented)
+
+- `bake_irradiance_probe_sh9` now projects an existing HDR cubemap into
+  9 real SH coefficients per RGB channel. It integrates each texel with its
+  **exact cube-map solid angle**, then applies the Lambertian cosine kernel
+  by frequency band: A0=π, A1=2π/3, A2=π/4. The output is
+  **irradiance**, not incoming radiance; do not apply cosine convolution
+  a second time when shading.
+- Probe-grid sampling reuses the same orthonormal basis as the baker.
+- New `sample_irradiance_probe_grid_visible` supports a caller-owned
+  line-of-sight/visibility predicate for each of up to eight surrounding
+  probes. Occluded probes do **not** redistribute their weight to probes
+  across walls: coverage decreases and the sky/fallback owns the remainder.
+  The existing no-visibility sampler is preserved.
+- Unit tests cover uniform HDR cubemaps approaching πL for arbitrary
+  surface normals, a one-sided sky, invalid input and simulated wall
+  occlusion (a blue probe behind a wall must not bleed into a red room).
+- A real visibility raytracer/capture manager, scene revision invalidation,
+  GPU upload and material shader integration remain LP-2B tasks. The
+  visibility callback is an interface for those implementations, not an
+  automatically solved visibility field.
+
+### DN-1.1: stricter disocclusion checks (implemented, opt-in)
+
+- Reprojection clamp now checks current-frame normal agreement (dot ≥ .85),
+  receiver-plane distance and camera-depth distance before accepting a
+  neighboring current GI sample.
+- Clipping additionally estimates local mean/squared **luminance** and
+  constrains reprojected history to a bounded deviation. This is a
+  **spatial one-frame variance estimate**, not temporal moments.
+- Motion-aware blending increases weight on current rays for large
+  reprojected screen displacement; a slow moving camera can still
+  benefit from valid history.
+- `DVE_GI_DENOISER=1` remains the opt-in and `--gi bounce` the
+  affected mode. Hardware acceptance must include both static and
+  moving-camera paths, glossy-to-diffuse transitions, emitted light
+  changes, voxel destruction, and GPU millisecond measurements.
+- DN-2 still needs dedicated persistent first/second moment history,
+  history age/normal IDs, multi-iteration à-trous ping-pong, and
+  destruction-aware rejection. A local spatial estimate alone does
+  not establish SVGF behavior.
+
 ## Future LP-2 / DN-2
 
 - **LP-2:** source capture, saved probe volumes and revisions, editor

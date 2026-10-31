@@ -102,6 +102,37 @@ struct IrradianceProbeGrid {
     }
 };
 
+// LP-2A offline capture driver: the caller renders/traces the six faces
+// at each probe location and returns an EnvironmentCube. This does not
+// implicitly light the scene or depend on a GPU backend.
+// Transactional: invalid/missing capture leaves the original grid untouched.
+template<class Capture>
+[[nodiscard]] inline bool bake_irradiance_probe_grid_sh9(
+    IrradianceProbeGrid& grid, Capture&& capture) {
+    if(!grid.validate())return false;
+    std::vector<IrradianceProbe> staged;
+    staged.reserve(grid.probes.size());
+    const auto dims=grid.dimensions;
+    for(std::uint32_t z=0;z<dims[2];++z)
+        for(std::uint32_t y=0;y<dims[1];++y)
+            for(std::uint32_t x=0;x<dims[0];++x){
+                const std::size_t index=static_cast<std::size_t>(x)+
+                    static_cast<std::size_t>(dims[0])*(y+
+                    static_cast<std::size_t>(dims[1])*z);
+                const Float3 position{
+                    grid.origin.x+grid.cellSize.x*static_cast<float>(x),
+                    grid.origin.y+grid.cellSize.y*static_cast<float>(y),
+                    grid.origin.z+grid.cellSize.z*static_cast<float>(z)};
+                const EnvironmentCube image=capture(position);
+                if(!image.validate())return false;
+                IrradianceProbe baked=bake_irradiance_probe_sh9(image);
+                baked.confidence=grid.probes[index].confidence;
+                staged.push_back(baked);
+            }
+    grid.probes.swap(staged);
+    return true;
+}
+
 struct IrradianceProbeLookup {
     Float3 irradiance{};
     float coverage{};  // 0..1; residual weight belongs to the fallback sky

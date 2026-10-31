@@ -11,6 +11,20 @@ float3 RotateEnvironmentDirectionY(float3 direction, float rotationRadians) {
                  -sineValue * direction.x + cosineValue * direction.z);
 }
 
+// Single-source diffuse ownership shared by split-sum and SHE.
+// Traced diffuse is incoming radiance (rather than irradiance) and replaces
+// environment diffuse only where its validity alpha is nonzero.
+float3 ResolveDiffuseIndirectIrradiance(float3 environmentIrradiance,
+                                        float4 tracedRadiance) {
+    return lerp(environmentIrradiance, max(tracedRadiance.rgb,0.0F.xxx)*kPi,
+                saturate(tracedRadiance.a));
+}
+
+// Traced GI already includes occlusion; apply AO only to environment fallback.
+float DiffuseIndirectOcclusion(float ambientOcclusion, float traceValidity) {
+    return lerp(saturate(ambientOcclusion),1.0F,saturate(traceValidity));
+}
+
 float3 EvaluateImageBasedLightingWithIndirect(
     TextureCube<float4> diffuseIrradiance,
     TextureCube<float4> specularPrefilter,
@@ -36,7 +50,7 @@ float3 EvaluateImageBasedLightingWithIndirect(
         RotateEnvironmentDirectionY(N, environmentRotationRadians), 0.0F).rgb;
     // Traced indirect light (.rgb radiance, .a 1 where valid) replaces the environment's diffuse
     // integral; it already sees occluders, so diffuse AO is not applied on top of it.
-    irradiance = lerp(irradiance, indirectDiffuse.rgb * kPi, saturate(indirectDiffuse.a));
+    irradiance = ResolveDiffuseIndirectIrradiance(irradiance, indirectDiffuse);
     float3 diffuse = irradiance * max(baseColor, 0.0F.xxx) * (1.0F - saturate(metallic)) / kPi;
     float3 prefiltered = specularPrefilter.SampleLevel(specularSampler,
         RotateEnvironmentDirectionY(R, environmentRotationRadians),
@@ -53,7 +67,7 @@ float3 EvaluateImageBasedLightingWithIndirect(
     // preserves narrow reflections while still occluding rough reflections in cavities.
     float specularOcclusion = saturate(pow(NdotV + ao, exp2(-16.0F * saturate(roughness) - 1.0F))
                                        - 1.0F + ao);
-    return diffuse * lerp(ao, 1.0F, saturate(indirectDiffuse.a)) + specularLighting * specularOcclusion;
+    return diffuse * DiffuseIndirectOcclusion(ao,indirectDiffuse.a) + specularLighting * specularOcclusion;
 }
 
 float3 EvaluateImageBasedLightingSeparateSamplers(

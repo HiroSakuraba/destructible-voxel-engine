@@ -4515,22 +4515,64 @@
       ],
       "bindings": [
         {
-          "name": "surfaces",
-          "kind": "storage_buffer",
+          "name": "PlayerSsaoConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b0"
+        },
+        {
+          "name": "gDepthSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s0"
+        },
+        {
+          "name": "gGiRawSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s7"
+        },
+        {
+          "name": "gGiHistorySampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s8"
+        },
+        {
+          "name": "gDepth",
+          "kind": "sampled_texture",
           "access": "read",
           "register": "t0"
         },
         {
-          "name": "light",
+          "name": "surfaces",
           "kind": "storage_buffer",
           "access": "read",
           "register": "t1"
         },
         {
-          "name": "settings",
+          "name": "light",
           "kind": "storage_buffer",
           "access": "read",
           "register": "t2"
+        },
+        {
+          "name": "settings",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t3"
+        },
+        {
+          "name": "gGiRaw",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t7"
+        },
+        {
+          "name": "gGiHistory",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t8"
         },
         {
           "name": "output",

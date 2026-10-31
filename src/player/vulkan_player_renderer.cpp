@@ -1,4 +1,6 @@
 #include "dve/player/vulkan_player_renderer.hpp"
+#include "dve/player/split_rc_probe_layout.hpp"
+#include "dve/player/indirect_lighting_ownership.hpp"
 
 #include <algorithm>
 #include <array>
@@ -702,8 +704,14 @@ public:
                               environment.globalIlluminationMode != GlobalIlluminationMode::Off &&
                               environment.globalIlluminationIntensity > 0.0F &&
                               !draws_.empty() && shader_blobs::player_traced_gi_ps().size() > 0U;
-        const bool giCascades = giTraced && options_.globalIllumination == PlayerGlobalIlluminationMode::RadianceCascades &&
-                                rcCascadePipeline_ && rcGatherPipeline_ && rcViews_[0];
+        const char* experiment=std::getenv("DVE_SPLIT_RC_EXPERIMENT");
+        const bool requestSplit=experiment && std::strcmp(experiment,"0")!=0;
+        const auto owner=choose_indirect_diffuse_owner(
+            giTraced,options_.globalIllumination==PlayerGlobalIlluminationMode::RadianceCascades,
+            rcCascadePipeline_ && rcGatherPipeline_ && rcViews_[0],requestSplit);
+        const bool giCascades=uses_screen_cascades(owner) || uses_split_cascades(owner);
+        // Switching GI owners must never reuse the previous split RC texture.
+        if(!giCascades)splitStaticFrameValid_=false;
         if ((aoTraced || giTraced) && !update_scene_grid(view, view.camera.position, error))
             return stage_failed("scene voxel grid", error);
         if ((aoOn || giTraced) &&
@@ -796,6 +804,7 @@ public:
             ++rank;
         }
         const std::size_t rayCount=prepareSurfaces.size()*directions.size(),intervalCount=rayCount*4U;
+        stats_.tracedRays=rayCount;  // diagnostic: zero on a valid static-frame cache hit
         if(!rayCount)return true;
         mark("build surface inputs");
         const std::size_t sumWords=static_cast<std::size_t>(bins)*6U;std::array<std::uint32_t,3> diag{};std::array<std::uint32_t,4> config{keyCount,bins,0,0};
@@ -854,15 +863,22 @@ public:
         for(unsigned iteration=0;iteration<4;++iteration){const unsigned level=3U-iteration;const auto count=levelQueries[level].size();if(count&&(!run(merges[level],static_cast<std::uint32_t>((count+63U)/64U))||!run(scatters[level],static_cast<std::uint32_t>((count+63U)/64U))))return fail();}
         mark("merge");
         if(!run(g,static_cast<std::uint32_t>((gather.size()+63U)/64U)))return fail();
-        auto upsample=stage(shader_blobs::player_split_rc_upsample_cs(),{R,R,R,rhi::BindingType::StorageTexture},
-            {{0,splitSurfaceBuffer_,{},0,surfaces.size()*sizeof(SplitSurfaceSample),{}},{1,go,{},0,gather.size()*sizeof(V),{}},
-             {2,upSettings,{},0,sizeof(V),{}},{3,{},giView_,0,0,{}}});
+        // Full-resolution receiver reconstruction needs the current depth and the
+        // existing screen-space camera constants, not the coarse tile's normal.
+        auto upsample=stage(shader_blobs::player_split_rc_upsample_cs(),
+            {rhi::BindingType::SampledTexture,rhi::BindingType::UniformBuffer,R,R,R,rhi::BindingType::StorageTexture},
+            {{0,{},depthView_,0,0,depthSampler_},{1,aoConstants_,{},0,512U,{}},
+             {2,splitSurfaceBuffer_,{},0,surfaces.size()*sizeof(SplitSurfaceSample),{}},
+             {3,go,{},0,gather.size()*sizeof(V),{}},{4,upSettings,{},0,sizeof(V),{}},
+             {5,{},giView_,0,0,{}}});
         if(!upsample.pipeline)return fail();
         const auto cmd=device_->begin_commands(rhi::QueueKind::Graphics,"split RC upsample",error);
-        if(!cmd||!device_->transition_texture(cmd,giTexture_,ResourceState::ShaderRead,ResourceState::ShaderWrite,error)||
+        if(!cmd||!device_->transition_texture(cmd,depth_,ResourceState::DepthWrite,ResourceState::ShaderRead,error)||
+           !device_->transition_texture(cmd,giTexture_,ResourceState::ShaderRead,ResourceState::ShaderWrite,error)||
            !device_->bind_compute_bind_group(cmd,0U,upsample.group,error)||
            !device_->dispatch(cmd,upsample.pipeline,(width_+7U)/8U,(height_+7U)/8U,1U,error)||
-           !device_->transition_texture(cmd,giTexture_,ResourceState::ShaderWrite,ResourceState::ShaderRead,error))return fail();
+           !device_->transition_texture(cmd,giTexture_,ResourceState::ShaderWrite,ResourceState::ShaderRead,error)||
+           !device_->transition_texture(cmd,depth_,ResourceState::ShaderRead,ResourceState::DepthWrite,error))return fail();
         const auto upFence=device_->submit(cmd,error);if(!upFence||!device_->fence_complete(upFence))return fail();
         mark("GPU gather and upsample");
         if(profile)std::fprintf(stderr,"[split RC] experimental GI: %zu rays, %u bins, %.2f ms\n",rayCount,bins,milliseconds_since(experimentStart));
@@ -872,16 +888,6 @@ public:
     // Diagnostic only: build world-space probe keys from the actual player depth pass.
     bool debug_split_probes(std::span<const SplitSurfaceSample> surfaces, std::vector<std::uint32_t>& outKeys,
                             std::vector<std::uint32_t>& outAssignments, std::string* error) {
-        if(!splitProbeLayout_){
-            rhi::BindGroupLayoutDesc ld;ld.bindings={{0U,rhi::BindingType::StorageBufferReadOnly,rhi::ShaderStage::Compute},
-                {1U,rhi::BindingType::StorageBufferReadWrite,rhi::ShaderStage::Compute},
-                {2U,rhi::BindingType::StorageBufferReadWrite,rhi::ShaderStage::Compute},
-                {3U,rhi::BindingType::StorageBufferReadWrite,rhi::ShaderStage::Compute}};
-            splitProbeLayout_=device_->create_bind_group_layout(ld,error);if(!splitProbeLayout_)return false;
-            rhi::ComputePipelineDesc pd;pd.debugName="split RC world probe diagnostic";
-            pd.bytecode=copy_bytes(shader_blobs::split_rc_probe_assign_cs());pd.bindGroupLayouts={splitProbeLayout_};
-            splitProbePipeline_=device_->create_compute_pipeline(pd,error);if(!splitProbePipeline_)return false;
-        }
         struct ProbeSample {std::array<float,4> position;std::array<std::int32_t,4> meta;};
         static_assert(sizeof(ProbeSample)==32);
         std::vector<ProbeSample> candidates;const Float3 origin=grid_.origin();
@@ -896,6 +902,31 @@ public:
         }
         if(candidates.empty())return true;
         if(candidates.size()>65536U){set_error(error,"split RC diagnostic exceeds 65536 probe candidates");return false;}
+        // The GPU hash pass is retained only as an explicit diagnostic.
+        // Normal execution builds the identical keys and assignments on the CPU:
+        // no probe-dispatch fence and no three GPU->CPU buffer readbacks.
+        const char* gpuAssign=std::getenv("DVE_SPLIT_RC_GPU_ASSIGN");
+        if(!gpuAssign || std::strcmp(gpuAssign,"1")!=0) {
+            std::vector<SplitRcProbeCandidate> cpu;
+            cpu.reserve(candidates.size());
+            for(const auto& sample:candidates)
+                cpu.push_back({sample.position,sample.meta});
+            const bool ok=splitProbeLayoutCache_.assign(cpu,outKeys,outAssignments,error);
+            if(ok && std::getenv("DVE_SPLIT_RC_PROFILE"))
+                std::fprintf(stderr,"[split RC] CPU probe layout: %zu samples, %zu slots, reused=%s\n",
+                    cpu.size(),outKeys.size(),splitProbeLayoutCache_.reused_last_call()?"yes":"no");
+            return ok;
+        }
+        if(!splitProbeLayout_){
+            rhi::BindGroupLayoutDesc ld;ld.bindings={{0U,rhi::BindingType::StorageBufferReadOnly,rhi::ShaderStage::Compute},
+                {1U,rhi::BindingType::StorageBufferReadWrite,rhi::ShaderStage::Compute},
+                {2U,rhi::BindingType::StorageBufferReadWrite,rhi::ShaderStage::Compute},
+                {3U,rhi::BindingType::StorageBufferReadWrite,rhi::ShaderStage::Compute}};
+            splitProbeLayout_=device_->create_bind_group_layout(ld,error);if(!splitProbeLayout_)return false;
+            rhi::ComputePipelineDesc pd;pd.debugName="split RC world probe diagnostic";
+            pd.bytecode=copy_bytes(shader_blobs::split_rc_probe_assign_cs());pd.bindGroupLayouts={splitProbeLayout_};
+            splitProbePipeline_=device_->create_compute_pipeline(pd,error);if(!splitProbePipeline_)return false;
+        }
         std::size_t capacity=1024U;while(capacity<candidates.size()*2U)capacity*=2U;
         std::vector<std::uint32_t> empty(capacity),keys(capacity),assignments(candidates.size());std::array<std::uint32_t,2> counters{};
         const auto inputBytes=candidates.size()*sizeof(ProbeSample),slotBytes=capacity*sizeof(std::uint32_t),resultBytes=candidates.size()*sizeof(std::uint32_t);
@@ -920,6 +951,7 @@ public:
     // It does not modify the lighting output or constitute a Split RC mode.
     bool debug_split_trace(std::span<const SplitSurfaceSample> surfaces, const RenderEnvironment& environment,
                            bool runDiagnostic, std::string* error) {
+        if(!runDiagnostic)return true;
         if (!splitTraceLayout_) {
             rhi::BindGroupLayoutDesc desc;desc.bindings={{0U,rhi::BindingType::StorageBufferReadOnly,rhi::ShaderStage::Compute},
                 {1U,rhi::BindingType::StorageBufferReadWrite,rhi::ShaderStage::Compute}};
@@ -929,7 +961,6 @@ public:
             pipeline.bindGroupLayouts={aoLayout_,splitTraceLayout_};
             splitTracePipeline_=device_->create_compute_pipeline(pipeline,error);if(!splitTracePipeline_)return false;
         }
-        if(!runDiagnostic)return true;
         std::vector<SplitTraceInput> rays;const float lift=std::max(std::max(1.0e-3F,environment.shadowBiasMeters),1.1F*grid_.cell_meters());
         for(const auto& s:surfaces){
             if(s.position[3]<.5F || s.normal[3]<.5F)continue;
@@ -1075,6 +1106,7 @@ public:
         settings.cellMeters = options_.tracedAoCellMeters;
         settings.maximumDimension = options_.tracedAoMaximumDimension;
         const bool changed = grid_.update(gridObjects_, settings, focus);
+        if(changed){++splitGridRevision_;splitStaticFrameValid_=false;}
         if (grid_.empty()) return true;
         if (!changed && gridUploaded_) return true;
         const auto cells = grid_.cells();
@@ -1112,7 +1144,33 @@ public:
                               const render::CascadedShadowPlan& plan, bool aoOn, bool aoTraced, bool giTraced, bool giCascades,
                               std::string* error) {
         const char* experimentFlag=std::getenv("DVE_SPLIT_RC_EXPERIMENT");
-        const bool splitExperiment=experimentFlag && std::strcmp(experimentFlag,"0")!=0;
+        const bool splitExperiment=giCascades && experimentFlag && std::strcmp(experimentFlag,"0")!=0;
+        if(!splitExperiment)splitStaticFrameValid_=false;
+        const char* debugSurface=std::getenv("DVE_SPLIT_RC_SURFACE_DEBUG");
+        const bool forceDebug=debugSurface && std::strcmp(debugSurface,"0")!=0;
+        // Strict temporal reuse is limited to fully known, unchanged voxel geometry.
+        // Polygon meshes and diagnostic capture still retrace every frame.
+        std::vector<float> splitFrameKey(camera.viewProjection.begin(),camera.viewProjection.end());
+        splitFrameKey.insert(splitFrameKey.end(),{
+            camera.position.x,camera.position.y,camera.position.z,
+            environment.sunDirection.x,environment.sunDirection.y,environment.sunDirection.z,
+            environment.sunIntensity,environment.sunColor.x,environment.sunColor.y,environment.sunColor.z,
+            environment.skyColor.x,environment.skyColor.y,environment.skyColor.z,
+            environment.groundColor.x,environment.groundColor.y,environment.groundColor.z,
+            environment.globalIlluminationIntensity,environment.globalIlluminationMaxDistanceMeters,
+            environment.shadowBiasMeters,environment.shadowMaxDistanceMeters,
+            environment.shadowStrength,
+            static_cast<float>(environment.skyMode==SkyMode::Physical?1:0),
+            static_cast<float>(environment.globalIlluminationMode)
+        });
+        splitFrameKey.insert(splitFrameKey.end(),skyKey_.begin(),skyKey_.end());
+        const char* proxyVisibilityName=std::getenv("DVE_SPLIT_RC_PROXY_NAME");
+        const bool hiddenProxy=proxyVisibilityName && *proxyVisibilityName;
+        const bool reuseSplitFrame=splitExperiment && !forceDebug && !hiddenProxy && splitStaticFrameValid_ &&
+            stats_.polygonInstances==0U && stats_.skippedObjects==0U && !grid_.empty() &&
+            splitFrameGridRevision_==splitGridRevision_ && splitFrameKey==splitStaticFrameKey_;
+        if(reuseSplitFrame && std::getenv("DVE_SPLIT_RC_PROFILE"))
+            std::fprintf(stderr,"[split RC profile] reused unchanged voxel frame: no probe or trace work\n");
         render::LiveEnvironmentFrameDesc prepass;
         prepass.depthTarget = depth_;
         prepass.width = width_;
@@ -1284,8 +1342,7 @@ public:
             }
         }
         if (!giTraced || giCascades) historyValid_ = false;
-        const char* debugSurface = std::getenv("DVE_SPLIT_RC_SURFACE_DEBUG");
-        const bool captureSurfaces = splitExperiment || (debugSurface && std::strcmp(debugSurface, "0") != 0);
+        const bool captureSurfaces = (splitExperiment && !reuseSplitFrame) || forceDebug;
         if (captureSurfaces) {
             if (!ensure_split_surface_debug(error)) return false;
             if (!device_->bind_compute_bind_group(commands, 0U, splitSurfaceGroup_, error) ||
@@ -1307,7 +1364,15 @@ public:
             if (giTraced && !grid_.empty()) {
                 std::vector<std::uint32_t> probeKeys, probeAssignments;
                 if (!debug_split_probes(samples, probeKeys, probeAssignments, error) || !debug_split_trace(samples, environment, !splitExperiment, error)) return false;
-                if(splitExperiment && !debug_split_pipeline(samples,probeKeys,probeAssignments,environment,error))return false;
+                if(splitExperiment) {
+                    if(!debug_split_pipeline(samples,probeKeys,probeAssignments,environment,error)) {
+                        splitStaticFrameValid_=false;
+                        return false;
+                    }
+                    splitStaticFrameValid_=!hiddenProxy && stats_.polygonInstances==0U && stats_.skippedObjects==0U;
+                    splitStaticFrameKey_=splitFrameKey;
+                    splitFrameGridRevision_=splitGridRevision_;
+                }
             }
         }
         return true;
@@ -1735,6 +1800,8 @@ private:
         if (giRaw_) (void)device_->destroy_texture(giRaw_, &ignored);
         giRawView_ = {}; giRaw_ = {};
         historyValid_ = false;
+        splitStaticFrameValid_ = false;
+        splitProbeLayoutCache_.invalidate();
         for (rhi::BindGroupHandle& g : rcGroups_) if (g) { (void)device_->destroy_bind_group(g, &ignored); g = {}; }
         for (std::size_t i = 0; i < kRcLevels; ++i) {
             if (rcViews_[i]) (void)device_->destroy_texture_view(rcViews_[i], &ignored);
@@ -1778,6 +1845,11 @@ private:
     std::unordered_map<std::string,SplitCachedBuffer> splitBufferCache_;
     rhi::BindGroupLayoutHandle splitProbeLayout_{};
     rhi::ComputePipelineHandle splitProbePipeline_{};
+    SplitRcProbeLayoutCache splitProbeLayoutCache_{};
+    // Cached full-resolution indirect diffuse output, valid only for exact static repeats.
+    bool splitStaticFrameValid_{};
+    std::uint64_t splitGridRevision_{}, splitFrameGridRevision_{};
+    std::vector<float> splitStaticFrameKey_;
     rhi::BindGroupLayoutHandle splitTraceLayout_{};
     rhi::ComputePipelineHandle splitTracePipeline_{};
     rhi::BindGroupLayoutHandle splitSurfaceLayout_{};

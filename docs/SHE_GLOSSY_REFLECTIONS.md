@@ -111,6 +111,44 @@ including DC plus 8 Q without DC.
 - Existing `dve_vulkan_live_environment_renderer_tests` and player
   builds are needed to confirm shader reflection/pipeline layout validity.
 
+### Diffuse/specular ownership after lighting integration
+
+`environment_ibl.hlsli` now supplies the common diffuse-GI selection and AO
+policy used by both SHE and split-sum paths. SHE replaces **only** specular
+environment reflections on supported roughness. A valid traced GI value
+replaces environment diffuse rather than being added, and AO is not applied
+again to the already occluded traced diffuse. When traced GI lacks support,
+environment diffuse plus its AO remains available. Baked-lightmap integration
+is still a separate future renderer path and must adopt the same ownership
+rule before being enabled concurrently.
+
+## Reproducible CPU quality comparison
+
+The new optional `dve_she_quality_benchmark` target compares both SHE and
+legacy split-sum against a direct, high-sample GGX/Smith environment integral.
+It evaluates three HDR cubemaps (uniform, horizon gradient, small bright
+sunspot), roughness values 0.50 / 0.65 / 0.80 / 0.95, multiple normal and
+view directions, and outputs **linear HDR RGB RMS error**. The benchmark's
+Fresnel=1, metallic-white material makes the reference comparison meaningful
+without conflating direct lights, AO, tone mapping, exposure or diffuse GI.
+
+```text
+cmake --build <build-dir> --target dve_she_quality_benchmark
+<build-dir>/dve_she_quality_benchmark 4096 > she_quality.csv
+```
+
+The optional argument is GGX samples per measurement (256..1,000,000).
+Reference sampling does not use the fitted SHE coefficients or split-sum
+prefilter/BRDF LUT. It shares the GGX distribution and Smith masking
+assumptions, so it is a useful controlled numerical oracle, not an
+independent physically-based renderer or a hardware screenshot.
+
+Compare per-scene error rather than selecting a winner from one average.
+The sunspot environment can expose sharp-HDR fit bias. High-reference-sample
+noise, low cubemap resolution, and the finite training fit remain limits.
+The CPU tool makes **no GPU-speed or VRAM claim**; retain hardware acceptance
+and GPU profiling below.
+
 ## Hardware acceptance gates (not yet measured)
 
 On the user's GTX 1080 at 1080p: compare `--ibl she` to

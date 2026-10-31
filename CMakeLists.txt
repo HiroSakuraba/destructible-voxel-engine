@@ -3104,6 +3104,12 @@ if(DVE_BUILD_TESTS)
                 -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/player_sample_regenerated
                 -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/dve_player_sample_assets.cmake)
 
+        add_executable(dve_split_rc_probe_layout_tests tests/test_split_rc_probe_layout.cpp)
+        target_link_libraries(dve_split_rc_probe_layout_tests PRIVATE dve::core)
+        add_test(NAME dve_split_rc_probe_layout_tests COMMAND dve_split_rc_probe_layout_tests)
+        add_executable(dve_indirect_lighting_ownership_tests tests/test_indirect_lighting_ownership.cpp)
+        target_link_libraries(dve_indirect_lighting_ownership_tests PRIVATE dve::core)
+        add_test(NAME dve_indirect_lighting_ownership_tests COMMAND dve_indirect_lighting_ownership_tests)
         add_executable(dve_player_runtime_tests tests/test_player_runtime.cpp)
         target_link_libraries(dve_player_runtime_tests PRIVATE dve::player_runtime)
         target_compile_definitions(dve_player_runtime_tests PRIVATE DVE_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
@@ -3830,6 +3836,10 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     add_executable(dve_spherical_harmonic_exponentials_tests tests/test_spherical_harmonic_exponentials.cpp)
     target_link_libraries(dve_spherical_harmonic_exponentials_tests PRIVATE dve::core)
     add_test(NAME dve_spherical_harmonic_exponentials_tests COMMAND dve_spherical_harmonic_exponentials_tests)
+    # Explicit opt-in diagnostic, not a CI performance or visual-fidelity assertion.
+    # Emits CSV to stdout and scene-level summaries to stderr.
+    add_executable(dve_she_quality_benchmark tools/she_quality_benchmark.cpp)
+    target_link_libraries(dve_she_quality_benchmark PRIVATE dve::core)
     add_executable(dve_v2292_lighting_rendering_fixes_tests tests/test_lighting_rendering_fixes_v2292.cpp)
     target_link_libraries(dve_v2292_lighting_rendering_fixes_tests PRIVATE dve::render_bridge)
     target_compile_definitions(dve_v2292_lighting_rendering_fixes_tests PRIVATE

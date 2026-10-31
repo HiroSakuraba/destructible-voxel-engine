@@ -4545,18 +4545,6 @@
           "register": "t0"
         },
         {
-          "name": "gGiRaw",
-          "kind": "sampled_texture",
-          "access": "read",
-          "register": "t7"
-        },
-        {
-          "name": "gGiHistory",
-          "kind": "sampled_texture",
-          "access": "read",
-          "register": "t8"
-        },
-        {
           "name": "surfaces",
           "kind": "storage_buffer",
           "access": "read",
@@ -4573,6 +4561,18 @@
           "kind": "storage_buffer",
           "access": "read",
           "register": "t3"
+        },
+        {
+          "name": "gGiRaw",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t7"
+        },
+        {
+          "name": "gGiHistory",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t8"
         },
         {
           "name": "output",

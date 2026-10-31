@@ -70,9 +70,15 @@ float3 LocalSH9Irradiance(float3 worldPosition, float3 worldNormal,
 
 float3 LocalBoxCorrectedDirection(float3 worldPosition,float3 reflected,
                                   float3 centre,float3 extents) {
-    const float3 safeR=sign(reflected)*max(abs(reflected),1.0e-5F.xxx);
-    const float3 farBoundary=centre+sign(reflected)*extents;
-    const float3 distances=(farBoundary-worldPosition)/safeR;
+    // Zero reflection components must contribute +infinity, never a
+    // 0/0 NaN that can redirect reflections at the axis-aligned seams.
+    float3 distances=1.0e20F.xxx;
+    if(abs(reflected.x)>1.0e-6F)
+        distances.x=(centre.x+(reflected.x>0.0F?extents.x:-extents.x)-worldPosition.x)/reflected.x;
+    if(abs(reflected.y)>1.0e-6F)
+        distances.y=(centre.y+(reflected.y>0.0F?extents.y:-extents.y)-worldPosition.y)/reflected.y;
+    if(abs(reflected.z)>1.0e-6F)
+        distances.z=(centre.z+(reflected.z>0.0F?extents.z:-extents.z)-worldPosition.z)/reflected.z;
     const float distance=max(0.0F,min(distances.x,min(distances.y,distances.z)));
     return normalize(worldPosition+reflected*distance-centre);
 }

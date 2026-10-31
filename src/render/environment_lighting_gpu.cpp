@@ -61,6 +61,64 @@ bool upload_cube(rhi::IDevice& device,rhi::TextureHandle texture,const Environme
 bool upload_cube(rhi::IDevice& device,rhi::TextureHandle texture,const EnvironmentCube& cube,std::uint64_t& bytes,std::string* error){EnvironmentCubeMipChain chain;chain.levels.push_back(cube);return upload_cube(device,texture,chain,bytes,error);}
 }
 
+bool destroy_local_reflection_capture(rhi::IDevice& device,
+    LocalReflectionCaptureGpu& capture,std::string* error) {
+    bool ok=true;
+    std::string local;
+    if(capture.view && !device.destroy_texture_view(capture.view,&local))ok=false;
+    if(capture.texture && !device.destroy_texture(capture.texture,&local))ok=false;
+    if(!ok && error)*error=local;
+    capture={};
+    return ok;
+}
+
+bool upload_local_reflection_capture(rhi::IDevice& device,
+    const IblBakeResult& baked,LocalReflectionCaptureGpu& out,std::string* error) {
+    std::string validation;
+    if(!baked.specularPrefilter.validate(&validation)){
+        set_error(error,"invalid local reflection capture: "+validation);return false;
+    }
+    const auto& chain=baked.specularPrefilter;
+    if(chain.levels.empty()||chain.levels.size()>16U){
+        set_error(error,"local reflection capture mip count out of bounds");return false;
+    }
+    rhi::TextureDesc texture;
+    texture.dimension=rhi::TextureDimension::TextureCube;
+    texture.format=rhi::TextureFormat::RGBA16Float;
+    texture.width=chain.levels.front().resolution;
+    texture.height=texture.width;
+    texture.arrayLayers=6U;
+    texture.mipLevels=static_cast<std::uint32_t>(chain.levels.size());
+    texture.usage=rhi::TextureUsage::Sampled|rhi::TextureUsage::CopyDestination;
+    texture.initialState=rhi::ResourceState::ShaderRead;
+    texture.debugName="Local reflection probe prefiltered HDR cube";
+    LocalReflectionCaptureGpu temp;
+    temp.texture=device.create_texture(texture,&validation);
+    if(!temp.texture){set_error(error,validation);return false;}
+    std::uint64_t bytes{};
+    if(!upload_cube(device,temp.texture,chain,bytes,&validation)){
+        std::string ignored;(void)destroy_local_reflection_capture(device,temp,&ignored);
+        set_error(error,validation);return false;
+    }
+    rhi::TextureViewDesc view;
+    view.texture=temp.texture;
+    view.layerCount=6U;
+    view.dimension=rhi::TextureViewDimension::TextureCube;
+    view.mipCount=texture.mipLevels;
+    view.debugName="Local reflection probe cube view";
+    temp.view=device.create_texture_view(view,&validation);
+    if(!temp.view){
+        std::string ignored;(void)destroy_local_reflection_capture(device,temp,&ignored);
+        set_error(error,validation);return false;
+    }
+    temp.mipLevels=texture.mipLevels;
+    if(out.texture){
+        std::string ignored;(void)destroy_local_reflection_capture(device,out,&ignored);
+    }
+    out=temp;
+    return true;
+}
+
 bool update_environment_she_probe(rhi::IDevice& device,const SheProbeCoefficients* probe,
                                   EnvironmentLightingGpuResources& resources,std::string* error) {
     if(!resources.valid()){set_error(error,"SHE GPU resources are unavailable");return false;}

@@ -1,5 +1,6 @@
 #include "dve/environment_lighting.hpp"
 #include "dve/irradiance_probe_grid.hpp"
+#include "dve/render/local_light_probes_gpu.hpp"
 
 #include <array>
 #include <cmath>
@@ -180,6 +181,38 @@ void test_irradiance_probe_grid(){
     CHECK(!grid.validate());
 }
 
+void test_local_probe_gpu_abi(){
+    using namespace dve;
+    using namespace dve::render;
+    const auto empty=pack_local_probe_gpu(nullptr);
+    CHECK(empty.words.size()==kLocalProbeHeaderWords+2*kLocalReflectionStrideWords);
+    CHECK(!empty.irradiance_enabled());
+    CHECK(empty.words[0][3]==0.0F && empty.words[3][0]==0.0F);
+    IrradianceProbeGrid grid;
+    grid.dimensions={2,1,1};
+    grid.cellSize={1,1,1};
+    grid.probes.resize(2);
+    grid.probes[0].sh[0]={1,2,3};
+    grid.probes[1].sh[0]={4,5,6};
+    grid.probes[1].confidence=.25F;
+    CHECK(grid.validate());
+    const ReflectionProbe probe{1,{0,0,0},{2,2,2},.25F,1.0F,2,true};
+    std::array<ReflectionProbe,1> volumes{probe};
+    std::array<float,1> mips{3.0F};
+    const auto packed=pack_local_probe_gpu(&grid,volumes,mips);
+    CHECK(packed.irradiance_enabled());
+    CHECK(packed.words.size()==kLocalProbeHeaderWords+
+          2*kLocalProbeStrideWords+2*kLocalReflectionStrideWords);
+    CHECK(packed.words[0][0]==2.0F && packed.words[3][0]==1.0F);
+    CHECK(packed.words[4][0]==1.0F && packed.words[14][0]==4.0F);
+    CHECK(close(packed.words[23][0],.25F));
+    CHECK(close(packed.words[24][3],2.0F));
+    CHECK(close(packed.words[26][1],3.0F));
+    const auto sky=pack_local_probe_gpu(nullptr,volumes,mips);
+    CHECK(!sky.irradiance_enabled());
+    CHECK(sky.words[3][0]==1.0F); // local specular independent of SH9
+}
+
 void test_bounded_local_probe_mixing(){
     using namespace dve;
     std::vector<ReflectionProbe> zones{
@@ -234,4 +267,4 @@ void test_bounded_local_probe_mixing(){
 }
 }
 
-int main(){try{test_cube_coordinates();test_constant_environment_bake();test_equirectangular_and_probes();test_bounded_local_probe_mixing();test_irradiance_probe_sh9_bake();test_probe_grid_capture_driver();test_visibility_gated_irradiance();test_irradiance_probe_grid();std::cout<<"dve_environment_lighting_tests: PASS\n";return 0;}catch(const std::exception& e){std::cerr<<"dve_environment_lighting_tests: FAIL: "<<e.what()<<'\n';return 1;}}
+int main(){try{test_cube_coordinates();test_constant_environment_bake();test_equirectangular_and_probes();test_bounded_local_probe_mixing();test_local_probe_gpu_abi();test_irradiance_probe_sh9_bake();test_probe_grid_capture_driver();test_visibility_gated_irradiance();test_irradiance_probe_grid();std::cout<<"dve_environment_lighting_tests: PASS\n";return 0;}catch(const std::exception& e){std::cerr<<"dve_environment_lighting_tests: FAIL: "<<e.what()<<'\n';return 1;}}

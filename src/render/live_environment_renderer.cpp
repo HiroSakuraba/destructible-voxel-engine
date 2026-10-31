@@ -208,7 +208,7 @@ bool LiveEnvironmentShaderBytecode::valid() const noexcept {
 }
 
 bool LiveEnvironmentRendererResources::valid() const noexcept {
-    return frameConstants && objectConstants && cascadeConstants &&
+    return frameConstants && localProbeData && objectConstants && cascadeConstants &&
            frameLayout && objectLayout && cascadeLayout && frameGroup &&
            skyboxPipeline && materialPipeline && shadowOpaquePipeline &&
            skyboxVertices && skyboxIndices && frameConstantCapacity > 0U &&
@@ -257,6 +257,7 @@ bool destroy_live_environment_renderer(rhi::IDevice& device,
     if (r.objectLayout) destroy(device.destroy_bind_group_layout(r.objectLayout, &local));
     if (r.cascadeLayout) destroy(device.destroy_bind_group_layout(r.cascadeLayout, &local));
     if (r.frameConstants) destroy(device.destroy_buffer(r.frameConstants, &local));
+    if (r.localProbeData) destroy(device.destroy_buffer(r.localProbeData, &local));
     if (r.objectConstants) destroy(device.destroy_buffer(r.objectConstants, &local));
     if (r.cascadeConstants) destroy(device.destroy_buffer(r.cascadeConstants, &local));
     if (r.skyboxVertices) destroy(device.destroy_buffer(r.skyboxVertices, &local));
@@ -321,6 +322,17 @@ bool create_live_environment_renderer(rhi::IDevice& device,
     };
     r.frameConstants = create_constant_buffer(r.frameConstantCapacity, "Live environment frame constants");
     if (!r.frameConstants) return fail(local);
+    rhi::BufferDesc localProbes;
+    localProbes.bytes=kLocalProbeGpuCapacity;
+    localProbes.usage=rhi::BufferUsage::Storage|rhi::BufferUsage::CopyDestination;
+    localProbes.memory=rhi::MemoryDomain::Upload;
+    localProbes.initialState=rhi::ResourceState::ShaderRead;
+    localProbes.debugName="Live LP-2B local irradiance and reflection probe data";
+    r.localProbeData=device.create_buffer(localProbes,&local);
+    if(!r.localProbeData)return fail(local);
+    const std::array<ProbeFloat4,kLocalProbeHeaderWords> emptyProbeData{};
+    if(!device.write_buffer(r.localProbeData,0U,
+            std::as_bytes(std::span(emptyProbeData)),&local))return fail(local);
     r.objectConstants = create_constant_buffer(r.objectConstantCapacity, "Live environment object constants");
     if (!r.objectConstants) return fail(local);
     r.cascadeConstants = create_constant_buffer(r.cascadeConstantCapacity, "Live environment cascade constants");
@@ -331,7 +343,10 @@ bool create_live_environment_renderer(rhi::IDevice& device,
     frameLayout.bindings = {{0U, rhi::BindingType::UniformBuffer,
                              rhi::ShaderStage::Vertex | rhi::ShaderStage::Fragment},
                             {1U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment},
-                            {2U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment}};
+                            {2U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment},
+                            {3U, rhi::BindingType::StorageBufferReadOnly, rhi::ShaderStage::Fragment},
+                            {4U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment},
+                            {5U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment}};
     r.frameLayout = device.create_bind_group_layout(frameLayout, &local);
     if (!r.frameLayout) return fail(local);
     rhi::BindGroupLayoutDesc objectLayout;
@@ -383,7 +398,10 @@ bool create_live_environment_renderer(rhi::IDevice& device,
     frameGroup.debugName = "Live environment frame group";
     frameGroup.entries = {{0U, r.frameConstants, {}, 0U, maximumFrameConstantBytes, {}},
                           {1U, {}, r.aoFallbackView, 0U, 0U, r.aoSampler},
-                          {2U, {}, r.giFallbackView, 0U, 0U, r.aoSampler}};
+                          {2U, {}, r.giFallbackView, 0U, 0U, r.aoSampler},
+                          {3U, r.localProbeData, {}, 0U, kLocalProbeGpuCapacity, {}},
+                          {4U, {}, lighting.specularPrefilterView, 0U, 0U, lighting.sampler},
+                          {5U, {}, lighting.specularPrefilterView, 0U, 0U, lighting.sampler}};
     r.frameGroup = device.create_bind_group(frameGroup, &local);
     if (!r.frameGroup) return fail(local);
 
@@ -879,8 +897,28 @@ bool record_live_environment_frame(rhi::IDevice& device,
         return true;
     };
     if (!atlas_state(rhi::ResourceState::DepthWrite, rhi::ResourceState::ShaderRead)) return fail();
+    // Changes are infrequent; synchronize before rewriting storage that a
+    // prior submitted draw may still be sampling. Never block on unchanged
+    // frames. A production multi-frame staging ring can replace this later.
+    const bool newProbeData=frame.localProbeRevision!=renderer.localProbeRevision ||
+                            frame.localProbeWords.empty()!=!renderer.localProbeEnabled;
+    if(newProbeData) {
+        if(frame.localProbeWords.size()*sizeof(ProbeFloat4)>kLocalProbeGpuCapacity) {
+            set_error(error,"local light probe GPU capacity exceeded (1024 cells max)");
+            return fail();
+        }
+        device.wait_idle();
+        const std::array<ProbeFloat4,kLocalProbeHeaderWords> none{};
+        const auto bytes=frame.localProbeWords.empty()
+          ? std::as_bytes(std::span(none))
+          : std::as_bytes(frame.localProbeWords);
+        if(!device.write_buffer(renderer.localProbeData,0U,bytes,error))return fail();
+        renderer.localProbeRevision=frame.localProbeRevision;
+        renderer.localProbeEnabled=!frame.localProbeWords.empty();
+    }
     rhi::BindGroupHandle mainFrameGroup = renderer.frameGroup;
-    if (frame.ambientOcclusion || frame.indirectLight) {
+    if (frame.ambientOcclusion || frame.indirectLight ||
+        frame.localReflectionCubes[0] || frame.localReflectionCubes[1]) {
         rhi::BindGroupDesc aoGroup;
         aoGroup.layout = renderer.frameLayout;
         aoGroup.debugName = "Live environment frame group (ambient occlusion)";
@@ -888,7 +926,14 @@ bool record_live_environment_frame(rhi::IDevice& device,
                            {1U, {}, frame.ambientOcclusion ? frame.ambientOcclusion : renderer.aoFallbackView,
                             0U, 0U, renderer.aoSampler},
                            {2U, {}, frame.indirectLight ? frame.indirectLight : renderer.giFallbackView,
-                            0U, 0U, renderer.aoSampler}};
+                            0U, 0U, renderer.aoSampler},
+                           {3U, renderer.localProbeData, {}, 0U, kLocalProbeGpuCapacity, {}},
+                           {4U, {}, frame.localReflectionCubes[0] ?
+                                    frame.localReflectionCubes[0] : lighting.specularPrefilterView,
+                            0U, 0U, lighting.sampler},
+                           {5U, {}, frame.localReflectionCubes[1] ?
+                                    frame.localReflectionCubes[1] : lighting.specularPrefilterView,
+                            0U, 0U, lighting.sampler}};
         mainFrameGroup = device.create_bind_group(aoGroup, error);
         if (!mainFrameGroup) return fail();
         transientGroups.push_back(mainFrameGroup);

@@ -29,6 +29,24 @@ struct EnvironmentLightingGpuResources {
     [[nodiscard]] bool valid() const noexcept;
 };
 
+// LP-2B: GPU-resident local specular capture. Only the GGX-prefiltered
+// cubemap is uploaded: each material uses the existing BRDF LUT and sampler.
+// Callers own capture invalidation and retire in-flight GPU work before destroying.
+struct LocalReflectionCaptureGpu {
+    rhi::TextureHandle texture{};
+    rhi::TextureViewHandle view{};
+    std::uint32_t mipLevels{};
+    [[nodiscard]] bool valid() const noexcept {
+        return texture && view && mipLevels > 0U;
+    }
+};
+[[nodiscard]] bool upload_local_reflection_capture(
+    rhi::IDevice& device, const IblBakeResult& baked,
+    LocalReflectionCaptureGpu& out, std::string* error = nullptr);
+[[nodiscard]] bool destroy_local_reflection_capture(
+    rhi::IDevice& device, LocalReflectionCaptureGpu& capture,
+    std::string* error = nullptr);
+
 [[nodiscard]] bool upload_environment_lighting(
     rhi::IDevice& device,
     const EnvironmentLightingAsset& asset,

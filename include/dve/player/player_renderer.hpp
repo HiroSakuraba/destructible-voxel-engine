@@ -20,6 +20,7 @@
 #include <string_view>
 
 #include "dve/game_world.hpp"
+#include "dve/irradiance_probe_grid.hpp"
 #include "dve/player/frame_image.hpp"
 #include "dve/render/polygon_renderer.hpp"
 #include "dve/render/cpu_fog.hpp"
@@ -35,6 +36,14 @@ struct PlayerRenderView {
     std::span<const GameRenderObject> objects;   // GameWorld::render_objects()
     render::PolygonCamera camera;                // world space, metres
     RenderEnvironment environment;
+    // LP-2B: optional, scene-owned baked local probes. If not supplied, sky
+    // lighting is unchanged. The owner must keep these objects/captures
+    // alive for the draw and increment localProbeRevision after edits,
+    // rebakes or moving probe volumes.
+    const IrradianceProbeGrid* localIrradianceGrid{};
+    std::span<const ReflectionProbe> localReflectionVolumes{};
+    std::span<const ReflectionProbeRadiance> localReflectionCaptures{};
+    std::uint64_t localProbeRevision{};
     bool polygonFrustumCulling{true};
     float polygonLodBias{};
     // Optional local media supplied by the scene owner, in metre space.

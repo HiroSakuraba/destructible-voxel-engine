@@ -109,6 +109,17 @@ float3 EvaluateLiveImageBasedLighting(float3 normal,float3 viewDirection,
                                       float roughness,float specular,
                                       float ambientOcclusion,float4 indirectDiffuse,
                                       float3 worldPosition) {
+    // Preserve the unmodified split-sum fast path for ordinary scenes.
+    // Missing scene probes must not cost an extra SH9 evaluation or an
+    // extra environment specular cubemap lookup on GTX 1080.
+    if(gLocalProbeData[0].w<.5F && gLocalProbeData[3].x<.5F &&
+       gSheSpecularCoefficients[52u]!=0x53484531u)
+        return EvaluateImageBasedLightingWithIndirect(
+            gDiffuseIrradiance,gSpecularPrefilter,gEnvironmentBrdfLut,
+            gEnvironmentSampler,gSpecularSampler,gBrdfSampler,
+            normal,viewDirection,baseColor,metallic,roughness,specular,
+            ambientOcclusion,gEnvironmentParameters.w,gEnvironmentParameters.x,
+            indirectDiffuse);
     const float3 N=normalize(normal);
     const float3 V=normalize(viewDirection);
     const float3 R=reflect(-V,N);

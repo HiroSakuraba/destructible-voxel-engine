@@ -2421,11 +2421,25 @@ if(DVE_BUILD_TESTS)
                         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/common/live_bindings.hlsli"
                     VERBATIM)
                 add_custom_target(dve_split_rc_screen_shader DEPENDS "${_split_rc_screen_shader}")
+                # Compile the exact upsample shader independently of the optional player target
+                # so this GPU regression runs in the Vulkan-focused test configuration too.
+                set(_split_rc_upsample_shader "${CMAKE_CURRENT_BINARY_DIR}/split-rc/player_split_rc_upsample_cs.spv")
+                add_custom_command(OUTPUT "${_split_rc_upsample_shader}"
+                    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/split-rc"
+                    COMMAND "${DVE_DXC_EXECUTABLE}" -spirv -fspv-target-env=vulkan1.2 -fvk-use-dx-layout
+                        -T cs_6_0 -E main -I "${CMAKE_CURRENT_SOURCE_DIR}/shaders"
+                        -Fo "${_split_rc_upsample_shader}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/player_split_rc_upsample_cs.hlsl"
+                    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/player_split_rc_upsample_cs.hlsl"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/common/player_screen_geometry.hlsli"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/common/live_bindings.hlsli"
+                    VERBATIM)
+                add_custom_target(dve_split_rc_upsample_shader DEPENDS "${_split_rc_upsample_shader}")
                 add_executable(dve_gpu_split_rc_screen_tests tests/test_gpu_split_rc_screen_surface.cpp)
                 target_link_libraries(dve_gpu_split_rc_screen_tests PRIVATE dve::rhi_vulkan)
-                add_dependencies(dve_gpu_split_rc_screen_tests dve_split_rc_screen_shader)
+                add_dependencies(dve_gpu_split_rc_screen_tests dve_split_rc_screen_shader dve_split_rc_upsample_shader)
                 add_test(NAME dve_gpu_split_rc_screen_tests
-                    COMMAND dve_gpu_split_rc_screen_tests "${_split_rc_screen_shader}")
+                    COMMAND dve_gpu_split_rc_screen_tests "${_split_rc_screen_shader}" "${_split_rc_upsample_shader}")
                 set(_surface_shader_dir "${CMAKE_CURRENT_BINARY_DIR}/surface-shaders")
                 file(GLOB _surface_shader_headers CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/common/*.hlsli")
                 set(_surface_shader_outputs)

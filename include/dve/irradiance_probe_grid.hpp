@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <stdexcept>
 #include <vector>
 
 namespace dve {
@@ -16,6 +17,67 @@ struct IrradianceProbe {
     std::array<Float3,9> sh{}; // real orthonormal SH, bands 0..2, m=-l..+l
     float confidence{1.0F};   // capture validity and visibility confidence
 };
+
+// LP-2A: Fit the *cosine-convolved irradiance*, rather than raw radiance,
+// from an already-captured six-face HDR cubemap. Each cubemap texel is
+// weighted by its exact solid angle. The SH9 cosine kernel has band gains
+// pi, 2*pi/3, pi/4 for bands 0, 1 and 2 respectively.
+// Capture and visibility still belong to the caller; this is a deterministic
+// lighting baker, not a live GPU capture or a raytracing approximation.
+[[nodiscard]] inline std::array<float,9> irradiance_sh9_basis(Float3 normal) noexcept {
+    const float n2=normal.x*normal.x+normal.y*normal.y+normal.z*normal.z;
+    if(!(n2>1.0e-12F) || !std::isfinite(n2))return {};
+    const float inverse=1.0F/std::sqrt(n2);
+    const float x=normal.x*inverse,y=normal.y*inverse,z=normal.z*inverse;
+    return {0.28209479177387814F,
+            0.4886025119029199F*y,0.4886025119029199F*z,0.4886025119029199F*x,
+            1.0925484305920792F*x*y,1.0925484305920792F*y*z,
+            0.31539156525252005F*(3.0F*z*z-1.0F),
+            1.0925484305920792F*x*z,
+            0.5462742152960396F*(x*x-y*y)};
+}
+
+[[nodiscard]] inline IrradianceProbe bake_irradiance_probe_sh9(
+    const EnvironmentCube& radiance) {
+    if(!radiance.validate())
+        throw std::invalid_argument("SH9 irradiance baker requires a valid HDR cubemap");
+    IrradianceProbe output{};
+    constexpr float pi=3.14159265358979323846F;
+    constexpr std::array<float,9> kernel{pi,
+        2.0F*pi/3.0F,2.0F*pi/3.0F,2.0F*pi/3.0F,
+        pi/4.0F,pi/4.0F,pi/4.0F,pi/4.0F,pi/4.0F};
+    const float resolution=static_cast<float>(radiance.resolution);
+    const auto area=[](double u,double v){
+        return std::atan2(u*v,std::sqrt(1.0+u*u+v*v));
+    };
+    for(unsigned face=0;face<6U;++face){
+        for(std::uint32_t y=0;y<radiance.resolution;++y){
+            const double v0=2.0*static_cast<double>(y)/resolution-1.0;
+            const double v1=2.0*static_cast<double>(y+1U)/resolution-1.0;
+            for(std::uint32_t x=0;x<radiance.resolution;++x){
+                const double u0=2.0*static_cast<double>(x)/resolution-1.0;
+                const double u1=2.0*static_cast<double>(x+1U)/resolution-1.0;
+                const float omega=static_cast<float>(
+                    area(u1,v1)-area(u0,v1)-area(u1,v0)+area(u0,v0));
+                const auto direction=cube_lookup_to_direction(
+                    static_cast<CubeFace>(face),
+                    {(static_cast<float>(x)+.5F)/resolution,
+                     (static_cast<float>(y)+.5F)/resolution});
+                const auto basis=irradiance_sh9_basis(direction);
+                const auto& value=radiance.texels[
+                    radiance.face_offset(static_cast<CubeFace>(face))+
+                    static_cast<std::size_t>(y)*radiance.resolution+x];
+                for(unsigned band=0;band<9U;++band){
+                    const float scale=omega*basis[band]*kernel[band];
+                    output.sh[band].x+=value.x*scale;
+                    output.sh[band].y+=value.y*scale;
+                    output.sh[band].z+=value.z*scale;
+                }
+            }
+        }
+    }
+    return output;
+}
 
 struct IrradianceProbeGrid {
     Float3 origin{};
@@ -62,15 +124,7 @@ struct IrradianceProbeLookup {
        !std::isfinite(normal.z))return out;
     const float n2=normal.x*normal.x+normal.y*normal.y+normal.z*normal.z;
     if(!(n2>1.0e-12F))return out;
-    const float inv=1.0F/std::sqrt(n2),x=normal.x*inv,y=normal.y*inv,z=normal.z*inv;
-    const std::array<float,9> basis{
-        0.28209479177387814F,
-        0.4886025119029199F*y,0.4886025119029199F*z,0.4886025119029199F*x,
-        1.0925484305920792F*x*y,1.0925484305920792F*y*z,
-        0.31539156525252005F*(3.0F*z*z-1.0F),
-        1.0925484305920792F*x*z,
-        0.5462742152960396F*(x*x-y*y)
-    };
+    const std::array<float,9> basis=irradiance_sh9_basis(normal);
     const std::array<float,3> world{position.x,position.y,position.z};
     const std::array<float,3> origin{grid.origin.x,grid.origin.y,grid.origin.z};
     const std::array<float,3> cells{grid.cellSize.x,grid.cellSize.y,grid.cellSize.z};

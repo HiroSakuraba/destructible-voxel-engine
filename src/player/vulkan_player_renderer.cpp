@@ -1235,7 +1235,15 @@ public:
             float frameFloat{};
             std::memcpy(&frameFloat, &frameBits, sizeof(frameFloat));
             constants.previousCamera = {previousCamera_.x, previousCamera_.y, previousCamera_.z, frameFloat};
-            constants.giTemporal = {historyBlend, historyValid_ ? 0.0F : 1.0F, static_cast<float>(halfWidth()),
+            // Opt-in DN-1 filter; the shader keeps the original single-pass
+            // behavior unless explicitly requested. Encode the mode in an
+            // otherwise 0/1 history-validity float, without changing the RHI
+            // constant layout: 0/1 legacy, 2/3 denoiser enabled.
+            const char* denoiseFlag=std::getenv("DVE_GI_DENOISER");
+            const bool denoise=denoiseFlag && std::strcmp(denoiseFlag,"1")==0;
+            constants.giTemporal = {historyBlend,
+                                    (historyValid_ ? 0.0F : 1.0F) + (denoise ? 2.0F : 0.0F),
+                                    static_cast<float>(halfWidth()),
                                     static_cast<float>(halfHeight())};
         }
         // The experimental split-RC surface pass samples the existing depth at an 8-pixel stride.

@@ -1161,7 +1161,7 @@ public:
             environment.shadowBiasMeters,environment.shadowMaxDistanceMeters,
             environment.shadowStrength,
             static_cast<float>(environment.skyMode==SkyMode::Physical?1:0),
-            static_cast<float>(environment.globalIlluminationMode==GlobalIlluminationMode::Off?0:1)
+            static_cast<float>(environment.globalIlluminationMode)
         });
         splitFrameKey.insert(splitFrameKey.end(),skyKey_.begin(),skyKey_.end());
         const char* proxyVisibilityName=std::getenv("DVE_SPLIT_RC_PROXY_NAME");

@@ -1164,7 +1164,9 @@ public:
             static_cast<float>(environment.globalIlluminationMode==GlobalIlluminationMode::Off?0:1)
         });
         splitFrameKey.insert(splitFrameKey.end(),skyKey_.begin(),skyKey_.end());
-        const bool reuseSplitFrame=splitExperiment && !forceDebug && splitStaticFrameValid_ &&
+        const char* proxyVisibilityName=std::getenv("DVE_SPLIT_RC_PROXY_NAME");
+        const bool hiddenProxy=proxyVisibilityName && *proxyVisibilityName;
+        const bool reuseSplitFrame=splitExperiment && !forceDebug && !hiddenProxy && splitStaticFrameValid_ &&
             stats_.polygonInstances==0U && stats_.skippedObjects==0U && !grid_.empty() &&
             splitFrameGridRevision_==splitGridRevision_ && splitFrameKey==splitStaticFrameKey_;
         if(reuseSplitFrame && std::getenv("DVE_SPLIT_RC_PROFILE"))
@@ -1367,7 +1369,7 @@ public:
                         splitStaticFrameValid_=false;
                         return false;
                     }
-                    splitStaticFrameValid_=stats_.polygonInstances==0U && stats_.skippedObjects==0U;
+                    splitStaticFrameValid_=!hiddenProxy && stats_.polygonInstances==0U && stats_.skippedObjects==0U;
                     splitStaticFrameKey_=splitFrameKey;
                     splitFrameGridRevision_=splitGridRevision_;
                 }

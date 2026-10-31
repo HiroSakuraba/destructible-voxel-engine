@@ -123,11 +123,28 @@ int main(){
     check(changed(specular,fallback)>100U,
           "local cubemap reflection not visible in Vulkan frame");
 
+    // Two captures exercise the GPU priority selector, not just upload
+    // slot zero. The higher-priority blue capture must override amber
+    // inside their overlapping volumes.
+    EnvironmentCube cyan{8U,std::vector<Float3>(6ULL*8U*8U,{.1F,1.0F,4.0F})};
+    auto blueCapture=bake_image_based_lighting(cyan,bake);
+    std::array<ReflectionProbe,2> pairVolumes{
+        volumes[0],
+        ReflectionProbe{2,{0,0,0},{3,3,3},.5F,1,3,true}};
+    std::array<ReflectionProbeRadiance,2> pairCaptures{
+        captures[0],ReflectionProbeRadiance{2,&blueCapture}};
+    view.localReflectionVolumes=pairVolumes;
+    view.localReflectionCaptures=pairCaptures;
+    view.localProbeRevision=4U;
+    const auto prioritized=frame();
+    check(changed(prioritized,specular)>100U,
+          "higher-priority second reflection capture was ignored");
+
     // Clearing all probes must restore the original fallback. This catches
     // stale local cubemap descriptors and stale SH9 storage.
     view.localReflectionVolumes={};
     view.localReflectionCaptures={};
-    view.localProbeRevision=4U;
+    view.localProbeRevision=5U;
     const auto restored=frame();
     check(changed(restored,fallback)<15U,
           "global sky fallback not restored after local probes removed");

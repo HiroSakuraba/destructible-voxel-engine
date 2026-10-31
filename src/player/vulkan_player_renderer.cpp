@@ -1,5 +1,6 @@
 #include "dve/player/vulkan_player_renderer.hpp"
 #include "dve/player/split_rc_probe_layout.hpp"
+#include "dve/player/indirect_lighting_ownership.hpp"
 
 #include <algorithm>
 #include <array>
@@ -703,8 +704,12 @@ public:
                               environment.globalIlluminationMode != GlobalIlluminationMode::Off &&
                               environment.globalIlluminationIntensity > 0.0F &&
                               !draws_.empty() && shader_blobs::player_traced_gi_ps().size() > 0U;
-        const bool giCascades = giTraced && options_.globalIllumination == PlayerGlobalIlluminationMode::RadianceCascades &&
-                                rcCascadePipeline_ && rcGatherPipeline_ && rcViews_[0];
+        const char* experiment=std::getenv("DVE_SPLIT_RC_EXPERIMENT");
+        const bool requestSplit=experiment && std::strcmp(experiment,"0")!=0;
+        const auto owner=choose_indirect_diffuse_owner(
+            giTraced,options_.globalIllumination==PlayerGlobalIlluminationMode::RadianceCascades,
+            rcCascadePipeline_ && rcGatherPipeline_ && rcViews_[0],requestSplit);
+        const bool giCascades=uses_screen_cascades(owner) || uses_split_cascades(owner);
         // Switching GI owners must never reuse the previous split RC texture.
         if(!giCascades)splitStaticFrameValid_=false;
         if ((aoTraced || giTraced) && !update_scene_grid(view, view.camera.position, error))

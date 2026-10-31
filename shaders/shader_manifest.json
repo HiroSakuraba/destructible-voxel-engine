@@ -2201,6 +2201,18 @@
           "register": "s14"
         },
         {
+          "name": "gLocalReflectionSampler0",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s15"
+        },
+        {
+          "name": "gLocalReflectionSampler1",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s16"
+        },
+        {
           "name": "gDiffuseIrradiance",
           "kind": "sampled_texture",
           "access": "read",
@@ -2301,6 +2313,24 @@
           "kind": "storage_buffer",
           "access": "read",
           "register": "t43"
+        },
+        {
+          "name": "gLocalProbeData",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t44"
+        },
+        {
+          "name": "gLocalReflection0",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t45"
+        },
+        {
+          "name": "gLocalReflection1",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t46"
         }
       ],
       "vulkan_bindings": [

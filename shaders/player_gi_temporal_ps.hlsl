@@ -30,6 +30,13 @@ float4 main(float4 position : SV_Position, float2 uv : TEXCOORD0) : SV_Target0 {
                         // This is a controlled DN-1 clamp, not SVGF moments.
                         const int2 size=int2(gGiTemporal.zw);
                         float3 lo=raw.rgb,hi=raw.rgb;
+                        float sumLum=dot(max(raw.rgb,0.0F.xxx),
+                                         float3(.2126F,.7152F,.0722F));
+                        float sumLum2=sumLum*sumLum;
+                        float count=1.0F;
+                        float3 centrePosition,centreNormal;
+                        const bool centreValid=SurfaceAtPixel(
+                            HalfTexelPixel(texel),centrePosition,centreNormal);
                         [unroll] for(int y=-1;y<=1;++y) {
                             [unroll] for(int x=-1;x<=1;++x) {
                                 const int2 samplePixel=texel+int2(x,y);
@@ -38,20 +45,47 @@ float4 main(float4 position : SV_Position, float2 uv : TEXCOORD0) : SV_Target0 {
                                 if(neighbour.a<.5F||!all(isfinite(neighbour.rgb))||
                                    any(neighbour.rgb<0.0F.xxx))continue;
                                 bool surfaceValid;
-                                const float3 p=PixelPosition(HalfTexelPixel(samplePixel),surfaceValid);
-                                if(!surfaceValid)continue;
+                                float3 p,n;
+                                surfaceValid=SurfaceAtPixel(HalfTexelPixel(samplePixel),p,n);
+                                if(!surfaceValid||!centreValid)continue;
                                 const float neighbourDistance=length(p-gCameraPosition.xyz);
                                 if(abs(neighbourDistance-distanceToCamera)>
                                    max(.03F,.04F*distanceToCamera))continue;
+                                if(dot(centreNormal,n)<.85F ||
+                                   abs(dot(centreNormal,p-centrePosition))>
+                                       max(.03F,.025F*distanceToCamera))continue;
                                 lo=min(lo,neighbour.rgb);
                                 hi=max(hi,neighbour.rgb);
+                                const float lum=dot(neighbour.rgb,float3(.2126F,.7152F,.0722F));
+                                sumLum+=lum;
+                                sumLum2+=lum*lum;
+                                count+=1.0F;
                             }
                         }
                         const float3 slack=max(.02F.xxx,
                             (hi-lo)*.12F+max(raw.rgb,0.0F.xxx)*.05F);
                         history=clamp(max(history,0.0F.xxx),max(lo-slack,0.0F.xxx),hi+slack);
+                        // A one-frame spatial luminance variance estimate.
+                        // NOT persistent SVGF temporal moments: the existing
+                        // RGBA16F history alpha stores camera distance.
+                        const float mean=sumLum/count;
+                        const float sigma=sqrt(max(0.0F,sumLum2/count-mean*mean));
+                        const float band=max(.08F,2.0F*sigma+.06F*mean);
+                        const float historicalLuminance=dot(history,
+                            float3(.2126F,.7152F,.0722F));
+                        const float boundedLuminance=clamp(historicalLuminance,
+                            max(0.0F,mean-band),mean+band);
+                        if(historicalLuminance>1.0e-5F)
+                            history*=boundedLuminance/historicalLuminance;
                     }
                     blend = gGiTemporal.x;
+                    if(dn1) {
+                        // Dramatic camera motion needs more current-frame
+                        // weight even when a depth-only reprojection matches.
+                        const float2 presentUv=(float2(texel)+.5F)/gGiTemporal.zw;
+                        const float motion=length(previousUv-presentUv);
+                        blend=max(blend,saturate(motion*4.0F));
+                    }
                 }
             }
         }

@@ -1,4 +1,5 @@
 #include "dve/environment_lighting.hpp"
+#include "dve/irradiance_probe_grid.hpp"
 
 #include <cmath>
 #include <iostream>
@@ -47,6 +48,40 @@ void test_equirectangular_and_probes(){
     std::vector<ReflectionProbe> probes{{1,{0,0,0},{2,2,2},1,1,0,true},{2,{1,0,0},{2,2,2},1,2,1,true},{3,{20,0,0},{1,1,1},1,1,10,true}};
     const auto weights=select_reflection_probes(probes,{0,0,0},2U);CHECK(weights.size()==2U);CHECK(weights.front().id==2U);CHECK(close(weights[0].weight+weights[1].weight,1.0F,1.0e-5F));
     const Float3 projected=box_project_reflection_direction(probes.front(),{0,0,0},{1,0.2F,0});CHECK(projected.x>0.8F);
+}
+
+void test_irradiance_probe_grid(){
+    using namespace dve;
+    IrradianceProbeGrid grid;
+    grid.origin={0,0,0};
+    grid.cellSize={1,1,1};
+    grid.dimensions={2,1,1};
+    grid.probes.resize(2);
+    const float y00=0.28209479177387814F;
+    grid.probes[0].sh[0]={1.0F/y00,0.5F/y00,0};
+    grid.probes[1].sh[0]={3.0F/y00,2.0F/y00,0};
+    grid.probes[1].confidence=.5F;
+    CHECK(grid.validate());
+    const auto middle=sample_irradiance_probe_grid(grid,{.5F,0,0},{0,1,0});
+    CHECK(close(middle.coverage,.75F,1e-5F));
+    CHECK(close(middle.irradiance.x,1.25F,.005F));
+    CHECK(close(middle.irradiance.y,.75F,.005F));
+    // 25% of the total irradiance comes from the global sky fallback;
+    // grid sampling itself does not add the fallback or double-count it.
+    CHECK(close(middle.coverage+(1.0F-middle.coverage),1.0F));
+    const auto off=sample_irradiance_probe_grid(grid,{2,0,0},{0,1,0});
+    CHECK(close(off.coverage,0.0F));
+    const auto invalidNormal=sample_irradiance_probe_grid(grid,{0,0,0},{0,0,0});
+    CHECK(close(invalidNormal.coverage,0.0F));
+    grid.probes[0].confidence=0;
+    const auto half=sample_irradiance_probe_grid(grid,{0,0,0},{0,1,0});
+    CHECK(close(half.coverage,0.0F));
+    grid.probes[0].confidence=2;
+    CHECK(!grid.validate());
+    CHECK(close(sample_irradiance_probe_grid(grid,{0,0,0},{0,1,0}).coverage,0.0F));
+    grid.probes[0].confidence=1;
+    grid.dimensions={262,1,1};
+    CHECK(!grid.validate());
 }
 
 void test_bounded_local_probe_mixing(){
@@ -103,4 +138,4 @@ void test_bounded_local_probe_mixing(){
 }
 }
 
-int main(){try{test_cube_coordinates();test_constant_environment_bake();test_equirectangular_and_probes();test_bounded_local_probe_mixing();std::cout<<"dve_environment_lighting_tests: PASS\n";return 0;}catch(const std::exception& e){std::cerr<<"dve_environment_lighting_tests: FAIL: "<<e.what()<<'\n';return 1;}}
+int main(){try{test_cube_coordinates();test_constant_environment_bake();test_equirectangular_and_probes();test_bounded_local_probe_mixing();test_irradiance_probe_grid();std::cout<<"dve_environment_lighting_tests: PASS\n";return 0;}catch(const std::exception& e){std::cerr<<"dve_environment_lighting_tests: FAIL: "<<e.what()<<'\n';return 1;}}

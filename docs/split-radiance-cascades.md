@@ -8,6 +8,23 @@ The prototype reconstructs one visible depth sample per 8x8 pixels, inserts four
 
 The prototype uses a bounded hash key and atlas, a coarse scene voxel grid and one nearest probe per sample per level. It is missing the paper's full hierarchical ray allocator, distance-based probe LODs, persistent world-space temporal history and multi-bounce cache. Sparse interpolation can leak light, and secondary hits use voxel palette values rather than full polygon textures or glass transmission. It is not a path-traced reference or a caustics renderer.
 
+## Receiver-aware upsampling
+
+The full-resolution GI reconstruction now evaluates the **actual receiver** from the current
+depth buffer at each pixel instead of reusing the centre of its 8x8 ray tile. It rejects sky,
+incompatible surface normals (dot product below 0.85), and candidates whose tangent planes
+disagree by more than the existing voxel-size-scaled upsample tolerance (checked in both
+directions). Compatible candidates are bilinearly normalized; pixels without valid support
+retain alpha 0 and fall back to environment lighting rather than borrowing GI across a wall.
+
+The regression fixture `dve_gpu_split_rc_screen_tests` builds a depth discontinuity *inside
+one 8x8 tile* and verifies that the near/far plane and sky pixels do not share the coarse
+sample's indirect radiance. This does not fix world-space probe visibility or light leaks
+between coplanar but separated surfaces, and a very thin triangle with no valid neighbour
+can still lose indirect light. The per-pixel position/normal reconstruction adds depth
+reads and ALU work; record the isolated upsample GPU duration at 1080p on GTX 1080 before
+claiming a performance result. The original split-RC mode remains opt-in and experimental.
+
 ## Sponza fixture
 
 Sponza is not included in this repository. For the Khronos glTF version supplied separately, build `dve_player`, `dve_cook_mesh` and `dve_cook_model`, then on Windows run:

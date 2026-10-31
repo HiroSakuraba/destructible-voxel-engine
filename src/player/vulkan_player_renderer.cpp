@@ -888,16 +888,6 @@ public:
     // Diagnostic only: build world-space probe keys from the actual player depth pass.
     bool debug_split_probes(std::span<const SplitSurfaceSample> surfaces, std::vector<std::uint32_t>& outKeys,
                             std::vector<std::uint32_t>& outAssignments, std::string* error) {
-        if(!splitProbeLayout_){
-            rhi::BindGroupLayoutDesc ld;ld.bindings={{0U,rhi::BindingType::StorageBufferReadOnly,rhi::ShaderStage::Compute},
-                {1U,rhi::BindingType::StorageBufferReadWrite,rhi::ShaderStage::Compute},
-                {2U,rhi::BindingType::StorageBufferReadWrite,rhi::ShaderStage::Compute},
-                {3U,rhi::BindingType::StorageBufferReadWrite,rhi::ShaderStage::Compute}};
-            splitProbeLayout_=device_->create_bind_group_layout(ld,error);if(!splitProbeLayout_)return false;
-            rhi::ComputePipelineDesc pd;pd.debugName="split RC world probe diagnostic";
-            pd.bytecode=copy_bytes(shader_blobs::split_rc_probe_assign_cs());pd.bindGroupLayouts={splitProbeLayout_};
-            splitProbePipeline_=device_->create_compute_pipeline(pd,error);if(!splitProbePipeline_)return false;
-        }
         struct ProbeSample {std::array<float,4> position;std::array<std::int32_t,4> meta;};
         static_assert(sizeof(ProbeSample)==32);
         std::vector<ProbeSample> candidates;const Float3 origin=grid_.origin();
@@ -927,6 +917,16 @@ public:
                     cpu.size(),outKeys.size(),splitProbeLayoutCache_.reused_last_call()?"yes":"no");
             return ok;
         }
+        if(!splitProbeLayout_){
+            rhi::BindGroupLayoutDesc ld;ld.bindings={{0U,rhi::BindingType::StorageBufferReadOnly,rhi::ShaderStage::Compute},
+                {1U,rhi::BindingType::StorageBufferReadWrite,rhi::ShaderStage::Compute},
+                {2U,rhi::BindingType::StorageBufferReadWrite,rhi::ShaderStage::Compute},
+                {3U,rhi::BindingType::StorageBufferReadWrite,rhi::ShaderStage::Compute}};
+            splitProbeLayout_=device_->create_bind_group_layout(ld,error);if(!splitProbeLayout_)return false;
+            rhi::ComputePipelineDesc pd;pd.debugName="split RC world probe diagnostic";
+            pd.bytecode=copy_bytes(shader_blobs::split_rc_probe_assign_cs());pd.bindGroupLayouts={splitProbeLayout_};
+            splitProbePipeline_=device_->create_compute_pipeline(pd,error);if(!splitProbePipeline_)return false;
+        }
         std::size_t capacity=1024U;while(capacity<candidates.size()*2U)capacity*=2U;
         std::vector<std::uint32_t> empty(capacity),keys(capacity),assignments(candidates.size());std::array<std::uint32_t,2> counters{};
         const auto inputBytes=candidates.size()*sizeof(ProbeSample),slotBytes=capacity*sizeof(std::uint32_t),resultBytes=candidates.size()*sizeof(std::uint32_t);
@@ -951,6 +951,7 @@ public:
     // It does not modify the lighting output or constitute a Split RC mode.
     bool debug_split_trace(std::span<const SplitSurfaceSample> surfaces, const RenderEnvironment& environment,
                            bool runDiagnostic, std::string* error) {
+        if(!runDiagnostic)return true;
         if (!splitTraceLayout_) {
             rhi::BindGroupLayoutDesc desc;desc.bindings={{0U,rhi::BindingType::StorageBufferReadOnly,rhi::ShaderStage::Compute},
                 {1U,rhi::BindingType::StorageBufferReadWrite,rhi::ShaderStage::Compute}};
@@ -960,7 +961,6 @@ public:
             pipeline.bindGroupLayouts={aoLayout_,splitTraceLayout_};
             splitTracePipeline_=device_->create_compute_pipeline(pipeline,error);if(!splitTracePipeline_)return false;
         }
-        if(!runDiagnostic)return true;
         std::vector<SplitTraceInput> rays;const float lift=std::max(std::max(1.0e-3F,environment.shadowBiasMeters),1.1F*grid_.cell_meters());
         for(const auto& s:surfaces){
             if(s.position[3]<.5F || s.normal[3]<.5F)continue;

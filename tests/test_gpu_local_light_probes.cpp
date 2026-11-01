@@ -75,10 +75,34 @@ EnvironmentCube capture_voxel_room(const VoxelObject& room,
         camera.up=ups[face];camera.verticalFieldOfViewRadians=1.57079632679F;
         camera.nearPlane=.5F;camera.farPlane=1000;
         (void)renderer.render(std::span(&instance,1),camera,env,target,true);
-        for(unsigned i=0;i<size*size;++i){const auto c=target.hdrColor[i];
-            cube.texels[face*size*size+i]={c.x,c.y,c.z};}
+        // The renderer's camera right is cross(forward, up), which runs
+        // opposite to increasing U in cube_lookup_to_direction on all six
+        // faces, so each rendered row is stored reversed: without the flip
+        // the baked SH9 and reflections would be horizontally mirrored
+        // (the V axis already agrees and is copied unchanged).
+        for(unsigned y=0;y<size;++y)for(unsigned x=0;x<size;++x){
+            const auto c=target.hdrColor[y*size+x];
+            cube.texels[face*size*size+y*size+(size-1U-x)]={c.x,c.y,c.z};}
     }
     return cube;
+}
+
+// The aggregate color checks in the fixture cannot detect a mirrored
+// capture, so pin the orientation directly: one emissive voxel at
+// (4,0,-2) from the capture point must bake toward (0.894,0,-0.447),
+// not toward its horizontal mirror (0.894,0,+0.447). CPU-only; runs
+// with or without a Vulkan device.
+void check_capture_orientation(){
+    VoxelObject probe{101};
+    (void)probe.set_voxel({4,0,-2},1);
+    std::vector<VoxelMaterialDefinition> materials(2);
+    for(unsigned i=0;i<materials.size();++i)materials[i]=default_voxel_material(static_cast<MaterialId>(i));
+    materials[1].emissive={8,8,8};
+    const auto cube=capture_voxel_room(probe,materials,{0,0,0});
+    const auto toward=sample_environment_cube(cube,{.894F,0,-.447F});
+    const auto mirrored=sample_environment_cube(cube,{.894F,0,.447F});
+    check(toward.x>1.0F&&toward.x>4.0F*mirrored.x,
+          "scene capture is horizontally mirrored relative to CubeFace UVs");
 }
 
 void two_room_fixture(IPlayerRenderer& gpu,std::string& error){
@@ -192,6 +216,7 @@ void two_room_fixture(IPlayerRenderer& gpu,std::string& error){
 
 int main(){
   try {
+    check_capture_orientation();
     if(!vulkan_player_renderer_available())
         return dve::testing::skip("local probe test: Vulkan SPIR-V unavailable");
     std::string error;

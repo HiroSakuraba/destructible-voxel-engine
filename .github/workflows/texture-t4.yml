@@ -45,6 +45,6 @@ jobs:
           cmake --build build-t4 --target \
             dve_bc5_shader_mapping_tests dve_bc5_main_material_binding_tests \
             dve_material_mapping_tests dve_main_material_table_tests dve_texture_bc5_tests \
-            --parallel 2
+            --parallel 4
       - name: Run shader source and live binding contracts
         run: ctest --test-dir build-t4 -R '^(dve_bc5_shader_mapping_tests|dve_bc5_main_material_binding_tests|dve_bc5_shader_source_contracts|dve_material_mapping_tests|dve_main_material_table_tests|dve_texture_bc5_tests)$' --output-on-failure

@@ -35,6 +35,6 @@ jobs:
             -DDVE_ENABLE_CPU_HAIR=OFF -DDVE_ENABLE_SIMULATION_ENERGY_COMPILER=OFF \
             -DDVE_ENABLE_BC7F_ENCODER=ON
       - name: Build new and existing residency tests
-        run: cmake --build build-t2 --target dve_texture_bc7f_residency_tests dve_texture_residency_tests --parallel 2
+        run: cmake --build build-t2 --target dve_texture_bc7f_residency_tests dve_texture_residency_tests --parallel 4
       - name: Run
         run: ctest --test-dir build-t2 -R '^(dve_texture_bc7f_residency_tests|dve_texture_residency_tests)$' --output-on-failure

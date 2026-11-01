@@ -49,7 +49,7 @@ jobs:
             -DDVE_ENABLE_CPU_HAIR=OFF -DDVE_ENABLE_SIMULATION_ENERGY_COMPILER=OFF \
             -DDVE_ENABLE_KTX2_EXPORT=OFF -DDVE_REQUIRE_TEST_GROUPS=Editor
       - name: Compile actual bake and BC5 quality tests
-        run: cmake --build build-bake --target dve_material_bake_bc5_quality_tests dve_texture_bc5_tests dve_bc5_shader_mapping_tests --parallel 2
+        run: cmake --build build-bake --target dve_material_bake_bc5_quality_tests dve_texture_bc5_tests dve_bc5_shader_mapping_tests --parallel 4
       - name: Verify three actual DVE-baked materials
         env:
           DVE_REQUIRE_COMPLETE_TESTS: "1"
@@ -94,7 +94,7 @@ jobs:
             -DKTX_FEATURE_TOOLS=OFF -DKTX_FEATURE_TESTS=OFF \
             -DKTX_FEATURE_VK_UPLOAD=OFF -DKTX_FEATURE_GL_UPLOAD=OFF \
             -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/ktx-install"
-          cmake --build "$RUNNER_TEMP/ktx-build" --target ktx --parallel 2
+          cmake --build "$RUNNER_TEMP/ktx-build" --target ktx --parallel 4
           cmake --install "$RUNNER_TEMP/ktx-build" --prefix "$RUNNER_TEMP/ktx-install"
       - name: Check the installed libktx is the pinned release
         run: |
@@ -113,7 +113,7 @@ jobs:
             "-DDVE_KTX_INCLUDE_DIR=$RUNNER_TEMP/ktx-install/include" \
             "-DDVE_KTX_LIBRARY=$RUNNER_TEMP/ktx-install/lib/libktx.so"
       - name: Compile genuine libktx/DVE interoperability
-        run: cmake --build build-ktx --target dve_texture_ktx2_export_tests dve_texture_t1_format_tests --parallel 2
+        run: cmake --build build-ktx --target dve_texture_ktx2_export_tests dve_texture_t1_format_tests --parallel 4
       - name: Read native KTX2 independently with libktx
         env:
           DVE_REQUIRE_COMPLETE_TESTS: "1"

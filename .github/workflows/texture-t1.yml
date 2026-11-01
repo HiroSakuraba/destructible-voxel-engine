@@ -38,7 +38,7 @@ jobs:
             -DDVE_ENABLE_SOFT_BODIES=OFF -DDVE_ENABLE_CPU_HAIR=OFF \
             -DDVE_REQUIRE_TEST_GROUPS=Vulkan,Player
       - name: Compile T1 and Vulkan mapping
-        run: cmake --build build-t1 --target dve_compressed_texture_tests dve_texture_t1_format_tests dve_vulkan_texture_t1_format_tests dve_rhi_vulkan --parallel 2
+        run: cmake --build build-t1 --target dve_compressed_texture_tests dve_texture_t1_format_tests dve_vulkan_texture_t1_format_tests dve_rhi_vulkan --parallel 4
       - name: Run compressed texture contracts
         # dve_vulkan_texture_t1_format_tests exits 77 (Skipped, ctest exit 0) on this runner: no GPU.
         run: ctest --test-dir build-t1 -R '^(dve_compressed_texture_tests|dve_texture_t1_format_tests|dve_vulkan_texture_t1_format_tests)$' --output-on-failure
@@ -59,6 +59,6 @@ jobs:
             -DDVE_BUILD_NATIVE_EDITOR=OFF -DDVE_ENABLE_SDL3_HOST=OFF \
             -DDVE_ENABLE_FLUODDITY=OFF
       - name: Compile pinned bc7f
-        run: cmake --build build-bc7f --target dve_bc7f_poc --parallel 2
+        run: cmake --build build-bc7f --target dve_bc7f_poc --parallel 4
       - name: Run 4096-block encoder comparison
         run: ./build-bc7f/dve_bc7f_poc

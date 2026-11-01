@@ -50,7 +50,7 @@ jobs:
           -DDVE_ENABLE_RTMIDI=OFF -DDVE_BUILD_AUDIO_SYNTH=OFF
       - name: Build focused tests
         run: >-
-          cmake --build build-xr --parallel 3 --target
+          cmake --build build-xr --parallel 4 --target
           dve_xr_session_loop_tests dve_openxr_driver_tests dve_openxr_events_views_tests
           dve_openxr_resources_tests dve_openxr_projection_tests dve_openxr_stereo_renderer_tests dve_openxr_configuration_tests dve_openxr_vulkan_tests
           dve_openxr_probe dve_fake_openxr_loader

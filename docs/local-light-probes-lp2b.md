@@ -88,6 +88,18 @@ local probe shading: the scene references do.
   individual PNG frames for inspection. These uniform-color captures
   exercise the shader path, but do not establish scene-dependent reflection
   fidelity, roughness behavior, or visibility across a wall.
+- The same test also renders a small two-room voxel fixture with separate
+  warm/cool irradiance and directional reflection cubemaps, smooth and rough
+  metals, a changed camera, and an explicit capture rebake. It checks the
+  individual contribution of reflection and material roughness. Set
+  `DVE_PROBE_VISUAL=1` for 1280x720 fixture frames (the default is 320x180).
+  The directional cubemaps are procedural. A separate comparison renders
+  six HDR faces with the CPU voxel reference renderer, changes an emissive
+  panel from red to blue, and bakes each capture into SH9 and reflection
+  probes for Vulkan readback. It checks the combined image response; it
+  does not isolate scene-derived diffuse from specular response or establish
+  reflection fidelity. The shared irradiance grid does not implement wall
+  visibility, and this is not an occlusion or physical-accuracy acceptance test.
 - A test without compiled Vulkan shaders returns an explicit skip; a
   nonexistent Vulkan device is a skip unless `DVE_REQUIRE_VULKAN=1`.
   **Passing CI with skips is not proof of graphics-card execution.**

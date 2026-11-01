@@ -5,8 +5,11 @@
 #include "dve/irradiance_probe_grid.hpp"
 #include "dve/player/player_renderer.hpp"
 #include "dve/player/vulkan_player_renderer.hpp"
+#include "dve/render/voxel_reference_renderer.hpp"
 #include "dve/voxel_object.hpp"
 #include <array>
+#include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
@@ -35,10 +38,185 @@ std::array<double,3> mean_rgb(const Rgba8Image& image){
     for(double& value:sum)value/=image.width*image.height;
     return sum;
 }
+
+// A directional, procedural environment with a bright panel and a floor/sky
+// gradient. It is not a scene capture: it exercises reflection direction and
+// roughness while the two-room capture workflow is still being developed.
+EnvironmentCube room_capture(Float3 tint, bool movedPanel){
+    constexpr unsigned size=16;
+    EnvironmentCube cube{size,std::vector<Float3>(6U*size*size)};
+    for(unsigned face=0;face<6;++face)for(unsigned y=0;y<size;++y)for(unsigned x=0;x<size;++x){
+        const Float3 d=cube_lookup_to_direction(static_cast<CubeFace>(face),
+            {(x+.5F)/size,(y+.5F)/size});
+        const float panel=std::pow(std::max(0.0F,(movedPanel?-d.x:d.x)*.8F+d.y*.45F-d.z*.35F),32.0F)*12.0F;
+        const float level=.15F+.5F*std::max(0.0F,d.y)+panel;
+        cube.texels[face*size*size+y*size+x]={tint.x*level,tint.y*level,tint.z*level};
+    }
+    return cube;
+}
+
+// Capture linear HDR from the real CPU voxel reference renderer. The scene
+// and camera are in voxel units; each face follows CubeFace's UV convention.
+EnvironmentCube capture_voxel_room(const VoxelObject& room,
+        std::span<const VoxelMaterialDefinition> materials,Float3 position){
+    constexpr unsigned size=32;
+    EnvironmentCube cube{size,std::vector<Float3>(6U*size*size)};
+    const std::array<Float3,6> directions{{{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}}};
+    const std::array<Float3,6> ups{{{0,1,0},{0,1,0},{0,0,-1},{0,0,1},{0,1,0},{0,1,0}}};
+    render::VoxelReferenceInstance instance;instance.objectId=101;instance.object=&room;instance.materials=materials;
+    render::ReferenceVoxelRenderer renderer;renderer.threadCount=2;renderer.metersPerVoxel=.1F;
+    RenderEnvironment env;env.sunIntensity=0;env.skyColor={.03F,.03F,.03F};env.groundColor=env.skyColor;
+    env.ambientOcclusionSamples=0;env.globalIlluminationMode=GlobalIlluminationMode::AmbientHemisphere;
+    render::PolygonRenderTarget target;target.resize(size,size);
+    for(unsigned face=0;face<6;++face){
+        target.clear({.03F,.03F,.03F,1});
+        render::PolygonCamera camera;camera.position=position;camera.target={position.x+directions[face].x,
+            position.y+directions[face].y,position.z+directions[face].z};
+        camera.up=ups[face];camera.verticalFieldOfViewRadians=1.57079632679F;
+        camera.nearPlane=.5F;camera.farPlane=1000;
+        (void)renderer.render(std::span(&instance,1),camera,env,target,true);
+        // The renderer's camera right is cross(forward, up), which runs
+        // opposite to increasing U in cube_lookup_to_direction on all six
+        // faces, so each rendered row is stored reversed: without the flip
+        // the baked SH9 and reflections would be horizontally mirrored
+        // (the V axis already agrees and is copied unchanged).
+        for(unsigned y=0;y<size;++y)for(unsigned x=0;x<size;++x){
+            const auto c=target.hdrColor[y*size+x];
+            cube.texels[face*size*size+y*size+(size-1U-x)]={c.x,c.y,c.z};}
+    }
+    return cube;
+}
+
+// The aggregate color checks in the fixture cannot detect a mirrored
+// capture, so pin the orientation directly: one emissive voxel at
+// (4,0,-2) from the capture point must bake toward (0.894,0,-0.447),
+// not toward its horizontal mirror (0.894,0,+0.447). CPU-only; runs
+// with or without a Vulkan device.
+void check_capture_orientation(){
+    VoxelObject probe{101};
+    (void)probe.set_voxel({4,0,-2},1);
+    std::vector<VoxelMaterialDefinition> materials(2);
+    for(unsigned i=0;i<materials.size();++i)materials[i]=default_voxel_material(static_cast<MaterialId>(i));
+    materials[1].emissive={8,8,8};
+    const auto cube=capture_voxel_room(probe,materials,{0,0,0});
+    const auto toward=sample_environment_cube(cube,{.894F,0,-.447F});
+    const auto mirrored=sample_environment_cube(cube,{.894F,0,.447F});
+    check(toward.x>1.0F&&toward.x>4.0F*mirrored.x,
+          "scene capture is horizontally mirrored relative to CubeFace UVs");
+}
+
+void two_room_fixture(IPlayerRenderer& gpu,std::string& error){
+    VoxelObject room{101};
+    auto put=[&](int x,int y,int z,MaterialId id){(void)room.set_voxel({x,y,z},id);};
+    for(int x=-40;x<40;++x)for(int z=-20;z<20;++z)for(int y=-2;y<0;++y)put(x,y,z,1);
+    for(int x=-40;x<40;++x)for(int y=0;y<26;++y)put(x,y,-20,1);
+    for(int z=-20;z<20;++z)for(int y=0;y<26;++y)put(0,y,z,1);
+    for(int side : {-1,1})for(int x=0;x<8;++x)for(int z=0;z<8;++z)for(int y=0;y<12;++y){
+        put(side*20+x-13,y,z-4,2);
+        put(side*20+x+5,y,z-4,3);
+    }
+    for(int x=15;x<25;++x)for(int y=10;y<20;++y)put(x,y,-19,4);
+    std::vector<VoxelMaterialDefinition> materials(5);
+    for(unsigned i=0;i<materials.size();++i)materials[i]=default_voxel_material(static_cast<MaterialId>(i));
+    materials[1].baseColor={.55F,.55F,.55F,1};materials[1].roughness=.9F;
+    materials[2].baseColor={.8F,.8F,.8F,1};materials[2].metallic=1;materials[2].roughness=.12F;
+    materials[3]=materials[2];materials[3].roughness=.8F;
+    GameRenderObject object;object.id=101;object.kind=GameGeometryKind::Voxel;
+    object.voxels=&room;object.voxelSizeMeters=.1F;object.materials=materials;
+    std::array<GameRenderObject,1> objects{object};
+    PlayerRenderView view;view.objects=objects;
+    view.camera.verticalFieldOfViewRadians=.95F;view.camera.nearPlane=.05F;view.camera.farPlane=100;
+    view.environment.sunIntensity=0;view.environment.skyColor={.03F,.03F,.03F};
+    view.environment.groundColor={.03F,.03F,.03F};
+    view.environment.globalIlluminationMode=GlobalIlluminationMode::AmbientHemisphere;
+    view.environment.ambientOcclusionSamples=0;view.environment.volumetricFogDensityPerMeter=0;
+    const bool visual=std::getenv("DVE_PROBE_VISUAL")!=nullptr;
+    const bool resized=gpu.resize(visual?1280U:320U,visual?720U:180U,&error);
+    check(resized,"two-room resize: "+error);
+    auto frame=[&](const char* name){
+        error.clear();const bool rendered=gpu.render(view,&error);check(rendered,"two-room render: "+error);
+        const bool presented=gpu.present(&error);check(presented,"two-room present: "+error);
+        const auto* image=gpu.readback();check(image&&image->valid(),"two-room readback failed");
+        if(const char* dir=std::getenv("DVE_PROBE_CAPTURE_DIR")){
+            std::string saveError;const bool saved=write_png(std::filesystem::path(dir)/name,*image,&saveError);
+            check(saved,"two-room capture: "+saveError);
+        }
+        return *image;
+    };
+    IblBakeSettings bake;bake.irradianceResolution=4;bake.specularResolution=16;
+    bake.specularMipLevels=5;bake.sampleCount=64;bake.brdfResolution=16;
+    const auto warmSource=room_capture({3.0F,1.1F,.3F},false);
+    const auto coolSource=room_capture({.3F,1.1F,3.0F},false);
+    auto warm=bake_image_based_lighting(warmSource,bake);
+    auto cool=bake_image_based_lighting(coolSource,bake);
+    const auto warmDiffuse=bake_irradiance_probe_sh9(warmSource);
+    const auto coolDiffuse=bake_irradiance_probe_sh9(coolSource);
+    std::array<ReflectionProbe,2> volumes{
+        ReflectionProbe{1,{-2,1,0},{2,2,3},.2F,1,1,true},
+        ReflectionProbe{2,{2,1,0},{2,2,3},.2F,1,1,true}};
+    std::array<ReflectionProbeRadiance,2> captures{ReflectionProbeRadiance{1,&warm},ReflectionProbeRadiance{2,&cool}};
+    IrradianceProbeGrid grid;grid.origin={-4,-1,-2};grid.cellSize={4,4,4};
+    grid.dimensions={3,2,2};grid.probes.resize(12);
+    for(unsigned z=0;z<2;++z)for(unsigned y=0;y<2;++y)for(unsigned x=0;x<3;++x){
+        auto& p=grid.probes[x+3*(y+2*z)];
+        p=x==2?coolDiffuse:warmDiffuse;
+        if(x==1)for(auto& coefficient:p.sh)coefficient={};
+    }
+    check(grid.validate(),"two-room irradiance grid invalid");
+    view.camera.position={-2,1.5F,4.0F};view.camera.target={-2,.8F,0};
+    const auto baseline=frame("rooms-warm-sky-only.png");
+    view.localIrradianceGrid=&grid;view.localReflectionVolumes=volumes;
+    view.localReflectionCaptures=captures;view.localProbeRevision=10;
+    const auto warmFrame=frame("rooms-warm-probes.png");
+    check(changed(warmFrame,baseline)>500,"warm room probes did not change the image");
+    const auto wm=mean_rgb(warmFrame);check(wm[0]>wm[2]+1,"warm room lighting is not warm");
+    view.localReflectionVolumes={};view.localReflectionCaptures={};++view.localProbeRevision;
+    const auto diffuseOnly=frame("rooms-warm-diffuse-only.png");
+    check(changed(diffuseOnly,warmFrame)>100,"local reflections did not change the warm room");
+    view.localReflectionVolumes=volumes;view.localReflectionCaptures=captures;++view.localProbeRevision;
+    view.camera.position={2,1.5F,4.0F};view.camera.target={2,.8F,0};
+    const auto coolFrame=frame("rooms-cool-probes.png");
+    const auto cm=mean_rgb(coolFrame);check(cm[2]>cm[0]+1,"cool room lighting is not cool");
+    materials[2].roughness=.8F;materials[3].roughness=.12F;
+    const auto roughnessSwapped=frame("rooms-cool-roughness-swapped.png");
+    check(changed(roughnessSwapped,coolFrame)>40,"metal roughness did not affect local reflections");
+    materials[2].roughness=.12F;materials[3].roughness=.8F;
+    view.camera.position={2.7F,1.6F,3.5F};
+    const auto moved=frame("rooms-cool-moved-camera.png");
+    check(changed(moved,coolFrame)>500,"camera movement did not change the image");
+    cool=bake_image_based_lighting(room_capture({.3F,1.1F,3.0F},true),bake);
+    ++view.localProbeRevision;
+    const auto rebaked=frame("rooms-cool-rebaked.png");
+    check(changed(rebaked,moved)>30,"rebaked directional capture did not change reflections");
+    // Capture the real voxel scene twice with different emitter colors, bake
+    // each HDR cubemap, and hold the visible scene fixed during GPU comparison.
+    materials[4].emissive={8,.1F,.1F};
+    const auto redScene=capture_voxel_room(room,materials,{20,12,5});
+    materials[4].emissive={.1F,.1F,8};
+    const auto blueScene=capture_voxel_room(room,materials,{20,12,5});
+    materials[4].emissive={};
+    auto redSceneIbl=bake_image_based_lighting(redScene,bake);
+    auto blueSceneIbl=bake_image_based_lighting(blueScene,bake);
+    const auto redSceneSh=bake_irradiance_probe_sh9(redScene);
+    const auto blueSceneSh=bake_irradiance_probe_sh9(blueScene);
+    for(unsigned z=0;z<2;++z)for(unsigned y=0;y<2;++y)grid.probes[2+3*(y+2*z)]=redSceneSh;
+    captures[1].baked=&redSceneIbl;++view.localProbeRevision;
+    const auto sceneRed=frame("rooms-scene-capture-red.png");
+    for(unsigned z=0;z<2;++z)for(unsigned y=0;y<2;++y)grid.probes[2+3*(y+2*z)]=blueSceneSh;
+    captures[1].baked=&blueSceneIbl;++view.localProbeRevision;
+    const auto sceneBlue=frame("rooms-scene-capture-blue.png");
+    check(changed(sceneRed,sceneBlue)>100,"scene-captured emitter change did not affect GPU lighting");
+    const auto redMean=mean_rgb(sceneRed),blueMean=mean_rgb(sceneBlue);
+    check(redMean[0]>blueMean[0]+.1 && blueMean[2]>redMean[2]+.1,
+          "scene-captured emitter colors did not reach GPU lighting");
+    std::cout<<"two-room irradiance, reflection, roughness, camera and directional rebake: PASS\n";
+    std::cout<<"CPU HDR voxel capture to SH9 and reflection bake to GPU: PASS\n";
+}
 }
 
 int main(){
   try {
+    check_capture_orientation();
     if(!vulkan_player_renderer_available())
         return dve::testing::skip("local probe test: Vulkan SPIR-V unavailable");
     std::string error;
@@ -165,6 +343,7 @@ int main(){
     capture("fallback-restored.png",restored);
     check(changed(restored,fallback)<15U,
           "global sky fallback not restored after local probes removed");
+    two_room_fixture(*gpu,error);
     std::cout<<"LP-2B local diffuse, specular, revision, fallback: PASS\n";
     return 0;
   } catch(const std::exception& ex) {

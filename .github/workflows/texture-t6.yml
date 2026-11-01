@@ -7,6 +7,16 @@ on:
       - "tests/scripts/t6_make_gallery.py"
       - "docs/TEXTURE_T6_RENDER_DIFF.md"
       - ".github/workflows/texture-t6.yml"
+  # Pushes to main seed the ccache entries that pull requests restore (same
+  # scheme as ci.yml: PRs never write the main-scoped entries).
+  push:
+    branches: [main]
+    paths:
+      - "CMakeLists.txt"
+      - "tests/test_texture_render_diff_t6.cpp"
+      - "tests/scripts/t6_make_gallery.py"
+      - "docs/TEXTURE_T6_RENDER_DIFF.md"
+      - ".github/workflows/texture-t6.yml"
   workflow_dispatch:
 
 permissions:
@@ -17,13 +27,27 @@ jobs:
     name: DVE reference renderer A/B BC5
     runs-on: ubuntu-latest
     timeout-minutes: 50
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.cache/ccache
+      CCACHE_COMPRESS: "true"
+      CCACHE_MAXSIZE: 500M
     steps:
       - uses: actions/checkout@v4
+      - name: Restore ccache
+        id: ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: .cache/ccache
+          key: dve-ccache-t6-bc5-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            dve-ccache-t6-bc5-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-
+            dve-ccache-t6-bc5-
       - name: Install image dependencies
-        run: sudo apt-get update && sudo apt-get install -y ninja-build libpng-dev libjpeg-dev
+        run: sudo apt-get update && sudo apt-get install -y ninja-build libpng-dev libjpeg-dev ccache
       - name: Configure editor and baker
         run: |
           cmake -S . -B build-t6 -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DDVE_BUILD_TESTS=ON -DDVE_BUILD_RHI=ON -DDVE_BUILD_PLATFORM=ON \
             -DDVE_BUILD_PLAYER=ON -DDVE_BUILD_EDITOR=ON -DDVE_BUILD_NATIVE_EDITOR=OFF \
             -DDVE_BUILD_ASSET_COOKER=OFF -DDVE_BUILD_ASSET_PIPELINE_TESTS=OFF \
@@ -32,7 +56,7 @@ jobs:
             -DDVE_ENABLE_CPU_HAIR=OFF -DDVE_ENABLE_SIMULATION_ENERGY_COMPILER=OFF \
             -DDVE_ENABLE_BC7F_ENCODER=OFF -DDVE_ENABLE_KTX2_EXPORT=OFF
       - name: Build T6
-        run: cmake --build build-t6 --target dve_texture_render_diff_t6_tests --parallel 2
+        run: cmake --build build-t6 --target dve_texture_render_diff_t6_tests --parallel 4
       - name: Run rendered-image comparisons
         env:
           DVE_REQUIRE_COMPLETE_TESTS: "1"
@@ -50,18 +74,38 @@ jobs:
           name: t6-cpu-reference-bc5
           path: ${{ runner.temp }}/t6-bc5/
           if-no-files-found: warn
+      - name: Save ccache
+        if: always() && steps.ccache.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/ccache
+          key: ${{ steps.ccache.outputs.cache-primary-key }}
 
   bc7-reference:
     name: DVE reference renderer A/B BC5 and Basis BC7
     runs-on: ubuntu-latest
     timeout-minutes: 50
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.cache/ccache
+      CCACHE_COMPRESS: "true"
+      CCACHE_MAXSIZE: 500M
     steps:
       - uses: actions/checkout@v4
+      - name: Restore ccache
+        id: ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: .cache/ccache
+          key: dve-ccache-t6-bc7-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            dve-ccache-t6-bc7-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-
+            dve-ccache-t6-bc7-
       - name: Install image dependencies
-        run: sudo apt-get update && sudo apt-get install -y ninja-build libpng-dev libjpeg-dev
+        run: sudo apt-get update && sudo apt-get install -y ninja-build libpng-dev libjpeg-dev ccache
       - name: Configure editor with pinned Basis transcoder
         run: |
           cmake -S . -B build-t6-bc7 -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DDVE_BUILD_TESTS=ON -DDVE_BUILD_RHI=ON -DDVE_BUILD_PLATFORM=ON \
             -DDVE_BUILD_PLAYER=ON -DDVE_BUILD_EDITOR=ON -DDVE_BUILD_NATIVE_EDITOR=OFF \
             -DDVE_BUILD_ASSET_COOKER=OFF -DDVE_BUILD_ASSET_PIPELINE_TESTS=OFF \
@@ -70,7 +114,7 @@ jobs:
             -DDVE_ENABLE_CPU_HAIR=OFF -DDVE_ENABLE_SIMULATION_ENERGY_COMPILER=OFF \
             -DDVE_ENABLE_BC7F_ENCODER=ON -DDVE_ENABLE_KTX2_EXPORT=OFF
       - name: Build T6 with Basis
-        run: cmake --build build-t6-bc7 --target dve_texture_render_diff_t6_tests --parallel 2
+        run: cmake --build build-t6-bc7 --target dve_texture_render_diff_t6_tests --parallel 4
       - name: Run BC5/BC7 rendered-image comparisons
         env:
           DVE_REQUIRE_COMPLETE_TESTS: "1"
@@ -89,3 +133,9 @@ jobs:
           name: t6-cpu-reference-bc5-bc7
           path: ${{ runner.temp }}/t6-bc7/
           if-no-files-found: warn
+      - name: Save ccache
+        if: always() && steps.ccache.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/ccache
+          key: ${{ steps.ccache.outputs.cache-primary-key }}

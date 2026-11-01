@@ -32,7 +32,7 @@ jobs:
             -DDVE_ENABLE_SOFT_BODIES=OFF -DDVE_ENABLE_CPU_HAIR=OFF \
             -DDVE_ENABLE_SIMULATION_ENERGY_COMPILER=OFF
       - name: Build live renderer and DASHR tests
-        run: cmake --build build-pso2c --target dve_live_environment_renderer_tests dve_dashr_shell_tests --parallel 2
+        run: cmake --build build-pso2c --target dve_live_environment_renderer_tests dve_dashr_shell_tests --parallel 4
       - name: Run complete variant inventory before first draw
         env:
           DVE_REQUIRE_COMPLETE_TESTS: "1"
@@ -57,7 +57,7 @@ jobs:
             -DDVE_ENABLE_SOFT_BODIES=OFF -DDVE_ENABLE_CPU_HAIR=OFF \
             -DDVE_ENABLE_SIMULATION_ENERGY_COMPILER=OFF
       - name: Build real live Vulkan renderer
-        run: cmake --build build-pso2c-vulkan --target dve_vulkan_live_environment_renderer_tests --parallel 2
+        run: cmake --build build-pso2c-vulkan --target dve_vulkan_live_environment_renderer_tests --parallel 4
       - name: Verify prepared native pipelines and rendered output
         run: |
           set -euo pipefail

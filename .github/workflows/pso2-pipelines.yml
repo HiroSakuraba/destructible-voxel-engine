@@ -33,7 +33,7 @@ jobs:
             -DDVE_ENABLE_FLUODDITY=OFF -DDVE_ENABLE_SOFT_BODIES=OFF \
             -DDVE_ENABLE_CPU_HAIR=OFF -DDVE_ENABLE_SIMULATION_ENERGY_COMPILER=OFF
       - name: Compile queue contract test
-        run: cmake --build build-pso2 --target dve_pso2_preparation_tests --parallel 2
+        run: cmake --build build-pso2 --target dve_pso2_preparation_tests --parallel 4
       - name: Assert lifecycle and stale-work barriers
         run: ctest --test-dir build-pso2 -R '^dve_pso2_preparation_tests$' -V --output-on-failure
 
@@ -55,7 +55,7 @@ jobs:
             -DDVE_ENABLE_FLUODDITY=OFF -DDVE_ENABLE_SOFT_BODIES=OFF \
             -DDVE_ENABLE_CPU_HAIR=OFF -DDVE_ENABLE_SIMULATION_ENERGY_COMPILER=OFF
       - name: Compile Vulkan consumer tests
-        run: cmake --build build-pso2-vk --target dve_vulkan_graphics_tests dve_vulkan_compute_tests --parallel 2
+        run: cmake --build build-pso2-vk --target dve_vulkan_graphics_tests dve_vulkan_compute_tests --parallel 4
       - name: Demand actual Vulkan device and compiled pipeline transfer
         run: |
           set -euo pipefail

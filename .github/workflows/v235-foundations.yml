@@ -50,7 +50,7 @@ jobs:
           -DDVE_ENABLE_GRID_FLUIDS=OFF
           -DDVE_ENABLE_FLIP_LIQUIDS=OFF
       - name: Build core and v2.35 contract target
-        run: cmake --build build --target dve_v235_foundations_tests --parallel 2
+        run: cmake --build build --target dve_v235_foundations_tests --parallel 4
       - name: Run v2.35 CTest target
         run: ctest --test-dir build --output-on-failure -R '^dve_v235_foundations_tests$'
 
@@ -112,7 +112,7 @@ jobs:
           "-DDVE_REQUIRE_TEST_GROUPS=${{ matrix.groups }}"
           ${{ matrix.options }}
       - name: Build native adapter contract
-        run: cmake --build build --target ${{ matrix.target }} --parallel 2
+        run: cmake --build build --target ${{ matrix.target }} --parallel 4
       - name: Run native adapter contract
         # Nothing in this selection may skip: a skipped adapter test must fail here.
         env:

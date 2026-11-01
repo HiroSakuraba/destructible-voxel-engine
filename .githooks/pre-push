@@ -1,0 +1,5 @@
+#!/bin/sh
+# Runs the repo's local pre-push checks (scripts/pre_push_checks.sh).
+# Enable once per clone:
+#   git config core.hooksPath .githooks
+exec "$(git rev-parse --show-toplevel)/scripts/pre_push_checks.sh"

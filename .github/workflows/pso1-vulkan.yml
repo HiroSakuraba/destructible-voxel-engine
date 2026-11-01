@@ -32,7 +32,7 @@ jobs:
             -DDVE_ENABLE_FLUODDITY=OFF -DDVE_ENABLE_SOFT_BODIES=OFF \
             -DDVE_ENABLE_CPU_HAIR=OFF -DDVE_ENABLE_SIMULATION_ENERGY_COMPILER=OFF
       - name: Build isolated helper test
-        run: cmake --build build-pso1 --target dve_pso_cache_file_tests --parallel 2
+        run: cmake --build build-pso1 --target dve_pso_cache_file_tests --parallel 4
       - name: Validate vendor/driver/version/UUID and hostile input handling
         run: ctest --test-dir build-pso1 -R '^dve_pso_cache_file_tests$' -V --output-on-failure
 
@@ -54,7 +54,7 @@ jobs:
             -DDVE_ENABLE_FLUODDITY=OFF -DDVE_ENABLE_SOFT_BODIES=OFF \
             -DDVE_ENABLE_CPU_HAIR=OFF -DDVE_ENABLE_SIMULATION_ENERGY_COMPILER=OFF
       - name: Compile real graphics and compute Vulkan programs
-        run: cmake --build build-pso1-gpu --target dve_vulkan_graphics_tests dve_vulkan_compute_tests --parallel 2
+        run: cmake --build build-pso1-gpu --target dve_vulkan_graphics_tests dve_vulkan_compute_tests --parallel 4
       - name: Fresh cache, two clean processes, validate seed on second launch
         run: |
           set -euo pipefail

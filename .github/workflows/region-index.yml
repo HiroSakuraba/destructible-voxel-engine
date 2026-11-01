@@ -74,7 +74,7 @@ jobs:
             -DDVE_ENABLE_GRID_FLUIDS=OFF -DDVE_ENABLE_FLIP_LIQUIDS=OFF \
             "${sanitize_args[@]}"
       - name: Build region contract tests
-        run: cmake --build build-region --target dve_region_catalog_tests dve_region_streaming_tests dve_region_streaming_runtime_contract_tests dve_region_dirty_tests dve_region_dirty_dispatch_tests dve_region_game_damage_host_contract_tests --parallel 2
+        run: cmake --build build-region --target dve_region_catalog_tests dve_region_streaming_tests dve_region_streaming_runtime_contract_tests dve_region_dirty_tests dve_region_dirty_dispatch_tests dve_region_game_damage_host_contract_tests --parallel 4
       - name: Run region contract tests
         env:
           # Nothing in these selections may skip (dve_test_skip.hpp).
@@ -87,5 +87,5 @@ jobs:
         env:
           DVE_REQUIRE_COMPLETE_TESTS: "1"
         run: |
-          cmake --build build-region --target dve_region_streaming_real_tests dve_region_dirty_gpu_tests dve_region_dirty_dispatch_real_tests dve_region_dirty_dispatch_budget_tests dve_region_game_damage_real_tests dve_region_game_damage_host_real_tests --parallel 2
+          cmake --build build-region --target dve_region_streaming_real_tests dve_region_dirty_gpu_tests dve_region_dirty_dispatch_real_tests dve_region_dirty_dispatch_budget_tests dve_region_game_damage_real_tests dve_region_game_damage_host_real_tests --parallel 4
           ctest --test-dir build-region -R '^dve_region_(streaming_real_tests|dirty_gpu_tests|dirty_dispatch_real_tests|dirty_dispatch_budget_tests|game_damage_real_tests|game_damage_host_real_tests)$' --output-on-failure

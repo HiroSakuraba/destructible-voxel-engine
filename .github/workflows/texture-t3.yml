@@ -40,7 +40,7 @@ jobs:
           cmake --build build-t3 --target \
             dve_texture_bc5_tests dve_texture_native_cook_tests \
             dve_texture_bc5_quality_bench dve_texture_residency_tests \
-            --parallel 2
+            --parallel 4
       - name: Execute format and backward compatibility tests
         run: ctest --test-dir build-t3 -R '^(dve_texture_bc5_tests|dve_texture_native_cook_tests|dve_texture_residency_tests)$' --output-on-failure
       - name: Synthetic quality corpus (not real game assets)

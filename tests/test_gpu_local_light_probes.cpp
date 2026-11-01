@@ -8,6 +8,7 @@
 #include "dve/voxel_object.hpp"
 #include <array>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -77,7 +78,14 @@ int main(){
         check(image&&image->valid(),"LP2B GPU readback failed");
         return *image;
     };
+    auto capture=[&](const char* name,const Rgba8Image& image) {
+        if(const char* dir=std::getenv("DVE_PROBE_CAPTURE_DIR")) {
+            std::string saveError;
+            check(write_png(std::filesystem::path(dir)/name,image,&saveError),"probe capture: "+saveError);
+        }
+    };
     const auto fallback=frame();
+    capture("fallback.png",fallback);
 
     // Two-by-two-by-two uniform cubemap capture; the entire voxel scene
     // lies inside the grid and is lit red. This ensures the *shader* reads
@@ -92,6 +100,7 @@ int main(){
     view.localIrradianceGrid=&grid;
     view.localProbeRevision=1U;
     const auto red=frame();
+    capture("irradiance-red.png",red);
     const auto redMean=mean_rgb(red);
     check(changed(red,fallback)>150U,"SH9 grid not visible in Vulkan frame");
     check(redMean[0]>mean_rgb(fallback)[0]+2.0,"red probe added no red light");
@@ -101,6 +110,7 @@ int main(){
         probe.sh[0]={0,0,2.0F*invY00};
     view.localProbeRevision=2U;
     const auto blue=frame();
+    capture("irradiance-blue.png",blue);
     const auto blueMean=mean_rgb(blue);
     check(changed(blue,red)>150U,"revision change did not update GPU SH9");
     check(blueMean[2]>redMean[2]+2.0,"blue SH9 bake added no blue light");
@@ -120,8 +130,11 @@ int main(){
     view.localReflectionCaptures=captures;
     view.localProbeRevision=3U;
     const auto specular=frame();
+    capture("reflection-amber.png",specular);
     check(changed(specular,fallback)>100U,
           "local cubemap reflection not visible in Vulkan frame");
+    const auto amberMean=mean_rgb(specular);
+    check(amberMean[0]>amberMean[2]+1.0,"amber reflection has incorrect color");
 
     // Two captures exercise the GPU priority selector, not just upload
     // slot zero. The higher-priority blue capture must override amber
@@ -137,8 +150,11 @@ int main(){
     view.localReflectionCaptures=pairCaptures;
     view.localProbeRevision=4U;
     const auto prioritized=frame();
+    capture("reflection-priority-blue.png",prioritized);
     check(changed(prioritized,specular)>100U,
           "higher-priority second reflection capture was ignored");
+    const auto priorityMean=mean_rgb(prioritized);
+    check(priorityMean[2]>priorityMean[0]+1.0,"priority reflection has incorrect color");
 
     // Clearing all probes must restore the original fallback. This catches
     // stale local cubemap descriptors and stale SH9 storage.
@@ -146,6 +162,7 @@ int main(){
     view.localReflectionCaptures={};
     view.localProbeRevision=5U;
     const auto restored=frame();
+    capture("fallback-restored.png",restored);
     check(changed(restored,fallback)<15U,
           "global sky fallback not restored after local probes removed");
     std::cout<<"LP-2B local diffuse, specular, revision, fallback: PASS\n";
